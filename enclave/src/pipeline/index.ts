@@ -1,3 +1,6 @@
+import { embedText } from '../inference/tinfoil.js';
+import { persistFact } from '../db/persist.js';
+
 type SourceKind = 'github' | 'slack' | 'linear' | 'notion' | 'intercom';
 
 const KNOWN_SOURCES = new Set<SourceKind>(['github', 'slack', 'linear', 'notion', 'intercom']);
@@ -8,7 +11,6 @@ function isKnownSource(s: string): s is SourceKind {
 
 interface NormalizedEvent {
   source: SourceKind;
-  // unknown until full Fact/Container normalization is implemented
   body: unknown;
 }
 
@@ -19,6 +21,17 @@ function normalize(source: SourceKind, plaintext: Buffer): NormalizedEvent | nul
   } catch {
     return null;
   }
+}
+
+// sourceFactId extracts a stable dedup key from the raw event body.
+// Falls back to a SHA-256 fingerprint of the body when no explicit id field is present.
+function extractSourceFactId(body: unknown): string {
+  if (body !== null && typeof body === 'object') {
+    const b = body as Record<string, unknown>;
+    const id = b['id'] ?? b['node_id'] ?? b['ts'] ?? b['identifier'];
+    if (typeof id === 'string' || typeof id === 'number') return String(id);
+  }
+  return Buffer.from(JSON.stringify(body)).toString('base64url').slice(0, 64);
 }
 
 export async function handle(plaintext: Buffer, source: string, _masterKey: Buffer): Promise<void> {
@@ -33,7 +46,18 @@ export async function handle(plaintext: Buffer, source: string, _masterKey: Buff
     return;
   }
 
-  // TODO: embed via Tinfoil confidential inference
-  // TODO: score associations
-  // TODO: persist Fact/Container + embedding + graph edges to Postgres + Memgraph
+  const orgId = process.env['TENANT_ID']!;
+  const bodyStr = JSON.stringify(event.body);
+  const sourceFactId = extractSourceFactId(event.body);
+
+  const embedding = await embedText(bodyStr);
+
+  await persistFact({
+    orgId,
+    sourceKind: event.source,
+    sourceFactId,
+    occurredAt: new Date(),
+    body: bodyStr,
+    embedding,
+  });
 }

@@ -1,9 +1,3 @@
-/**
- * Master key and derived key generation via HKDF-SHA256.
- *
- * Every per-purpose key is derived deterministically from the master key.
- * A single sealed blob is all that needs to persist across reboots.
- */
 import { hkdfSync, createPrivateKey, createPublicKey, KeyObject } from 'crypto';
 import { getEntropy } from './nsm.js';
 
@@ -21,21 +15,19 @@ export interface IngestKeypair {
   publicKeyRaw: Buffer;
 }
 
-/**
- * Stable X25519 keypair for webhook ingest decryption.
- * Deterministic — same master key produces the same keypair on every boot,
- * so the public key stored in Postgres stays valid across reboots and upgrades.
- */
+// Deterministic across reboots — public key written to SSM stays valid after upgrades.
 export function deriveIngestKeypair(masterKey: Buffer): IngestKeypair {
   const seed = deriveKey(masterKey, 'ingest-keypair-v1', 32);
 
+  // X25519 JWK requires a pre-computed x field; PKCS#8 accepts raw key bytes directly.
+  const pkcs8Header = Buffer.from('302e020100300506032b656e04220420', 'hex');
   const privateKey = createPrivateKey({
-    key: { kty: 'OKP', crv: 'X25519', d: seed.toString('base64url') },
-    format: 'jwk',
+    key: Buffer.concat([pkcs8Header, seed]),
+    format: 'der',
+    type: 'pkcs8',
   });
   const publicKey = createPublicKey(privateKey);
 
-  // Raw 32-byte public key — safe to store in Postgres
   const publicKeyRaw = Buffer.from(publicKey.export({ type: 'spki', format: 'der' }).slice(-32));
 
   return { privateKey, publicKey, publicKeyRaw };

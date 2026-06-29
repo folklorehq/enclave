@@ -1,16 +1,4 @@
-/**
- * Master key sealing — Model 2: KMS with PCR attestation condition.
- *
- * Seal   (kms:Encrypt)  — any caller with the enclave IAM role.
- *                         No PCR required; encrypting doesn't expose plaintext.
- * Unseal (kms:Decrypt)  — requires a valid Nitro attestation doc whose PCR0
- *                         matches the key policy. A code change shifts PCR0,
- *                         the condition fails, and the enclave refuses to start.
- *
- * KMS never returns decrypted plaintext over the wire. Instead it encrypts the
- * response to the ephemeral RSA public key we embed in the attestation doc —
- * plaintext only exists in this process's heap.
- */
+// KMS recipient attestation: response is encrypted to our ephemeral key — plaintext never leaves this heap.
 import { KMSClient, DecryptCommand, EncryptCommand } from '@aws-sdk/client-kms';
 import { generateKeyPairSync, privateDecrypt, constants } from 'crypto';
 import { getAttestationDoc } from './nsm.js';
@@ -22,8 +10,6 @@ const ENCRYPTION_CONTEXT = { purpose: 'master-key', version: '1' };
 function kmsClient(): KMSClient {
   return new KMSClient({
     region: REGION,
-    // All AWS calls route through the vsock proxy on the parent instance.
-    // TLS terminates here — the proxy forwards raw bytes without parsing them.
     endpoint: `http://localhost:${PROXY_PORT}`,
   });
 }
@@ -40,8 +26,7 @@ export async function sealMasterKey(masterKey: Buffer, kmsKeyId: string): Promis
 }
 
 export async function unsealMasterKey(ciphertext: Buffer, kmsKeyId: string): Promise<Buffer> {
-  // One-time ephemeral RSA-2048 key — embedded in the attestation doc so KMS
-  // encrypts its response to us rather than returning raw plaintext.
+  // ephemeral key embedded in attDoc so KMS encrypts the response to us, not over the wire
   const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const ephemeralPubDer = Buffer.from(publicKey.export({ type: 'spki', format: 'der' }));
 
