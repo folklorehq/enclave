@@ -1,14 +1,6 @@
-/**
- * Ingest Lambda — the only component that runs outside the enclave.
- *
- * Receives webhooks, encrypts with the tenant's X25519 public key, enqueues
- * to SQS. Holds only a public key — cannot decrypt anything.
- *
- * Scheme: ECIES — ephemeral X25519 + HKDF-SHA256 + AES-256-GCM.
- * Both public keys are bound into HKDF info to prevent key-confusion attacks.
- * Must match decryptPayload() in enclave/src/ingest/receiver.ts exactly.
- */
-import { RDSDataClient, ExecuteStatementCommand, type Field } from '@aws-sdk/client-rds-data';
+// ECIES: ephemeral X25519 + HKDF-SHA256 + AES-256-GCM. Both public keys bound
+// in HKDF info — must match decryptPayload() in enclave/src/ingest/receiver.ts.
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
 import {
   generateKeyPairSync,
@@ -20,25 +12,27 @@ import {
 } from 'crypto';
 import type { APIGatewayProxyHandlerV2 } from 'aws-lambda';
 
-const rds = new RDSDataClient({});
+const ssm = new SSMClient({});
 const sqs = new SQSClient({});
 
-const DB_ARN = process.env['DB_ARN']!;
-const DB_SECRET_ARN = process.env['DB_SECRET_ARN']!;
 const QUEUE_URL = process.env['QUEUE_URL']!;
 
+const CACHE_TTL_MS = 5 * 60 * 1000;
+const publicKeyCache = new Map<string, { key: Buffer; expiresAt: number }>();
+
 async function fetchPublicKey(tenantId: string): Promise<Buffer> {
-  const result = await rds.send(
-    new ExecuteStatementCommand({
-      resourceArn: DB_ARN,
-      secretArn: DB_SECRET_ARN,
-      sql: 'SELECT ingest_public_key FROM tenants WHERE id = :id',
-      parameters: [{ name: 'id', value: { stringValue: tenantId } }],
-    }),
+  const cached = publicKeyCache.get(tenantId);
+  if (cached && Date.now() < cached.expiresAt) return cached.key;
+
+  const result = await ssm.send(
+    new GetParameterCommand({ Name: `/folklore/${tenantId}/ingest-public-key` }),
   );
-  const row = result.records?.[0] as Field[] | undefined;
-  if (!row) throw new Error(`Unknown tenant: ${tenantId}`);
-  return Buffer.from((row[0] as { stringValue: string }).stringValue, 'hex');
+  const hex = result.Parameter?.Value;
+  if (!hex) throw new Error(`No ingest public key for tenant: ${tenantId}`);
+
+  const key = Buffer.from(hex, 'hex');
+  publicKeyCache.set(tenantId, { key, expiresAt: Date.now() + CACHE_TTL_MS });
+  return key;
 }
 
 function deriveAesKey(
@@ -56,7 +50,8 @@ function deriveAesKey(
 
 export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   const tenantId = event.pathParameters?.['tenant_id'];
-  if (!tenantId) return { statusCode: 400 };
+  const source = event.pathParameters?.['source'];
+  if (!tenantId || !source) return { statusCode: 400 };
 
   const body = event.body ?? '';
   const recipientPubBytes = await fetchPublicKey(tenantId);
@@ -66,7 +61,6 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     format: 'jwk',
   });
 
-  // Ephemeral key — generated per request, discarded after this function returns
   const { privateKey: ephemeralPriv, publicKey: ephemeralPub } = generateKeyPairSync('x25519');
   const ephemeralPubBytes = Buffer.from(
     ephemeralPub.export({ type: 'spki', format: 'der' }).slice(-32),
@@ -79,7 +73,6 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   const cipher = createCipheriv('aes-256-gcm', aesKey, nonce);
   const encrypted = Buffer.concat([cipher.update(body, 'utf8'), cipher.final()]);
   const authTag = cipher.getAuthTag();
-  // Append auth tag — matches Python AESGCM convention, split in receiver.ts
   const ciphertextWithTag = Buffer.concat([encrypted, authTag]);
 
   await sqs.send(
@@ -87,6 +80,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       QueueUrl: QUEUE_URL,
       MessageBody: JSON.stringify({
         tenant_id: tenantId,
+        source,
         ephemeralPublicKey: ephemeralPubBytes.toString('hex'),
         nonce: nonce.toString('hex'),
         ciphertext: ciphertextWithTag.toString('hex'),
