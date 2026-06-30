@@ -1,14 +1,16 @@
 import { S3Client, GetObjectCommand, PutObjectCommand, NoSuchKey } from '@aws-sdk/client-s3';
-import { SQSClient, ReceiveMessageCommand, DeleteMessageCommand } from '@aws-sdk/client-sqs';
+import {
+  SQSClient,
+  ReceiveMessageCommand,
+  DeleteMessageCommand,
+  SendMessageCommand,
+} from '@aws-sdk/client-sqs';
 import { SSMClient, PutParameterCommand } from '@aws-sdk/client-ssm';
 import { KMSClient } from '@aws-sdk/client-kms';
 import { KmsKeyringNode } from '@aws-crypto/client-node';
-import neo4j from 'neo4j-driver';
 import { generateMasterKey, deriveIngestKeypair, deriveMnemonic } from './sealing/keygen.js';
 import { sealMasterKey, unsealMasterKey } from './sealing/seal.js';
 import { decryptPayload, type EncryptedPayload } from './ingest/receiver.js';
-import { createDb } from './db/client.js';
-import { EnclaveFactPersister } from './db/persist.js';
 import { Pipeline } from './pipeline/index.js';
 import { HnswStore } from './hnsw/index.js';
 import { startHealthServer } from './http/server.js';
@@ -19,9 +21,12 @@ const KMS_KEY_ID = process.env['KMS_KEY_ID']!;
 const SEALED_BLOB_BUCKET = process.env['SEALED_BLOB_BUCKET']!;
 const QUEUE_URL = process.env['QUEUE_URL']!;
 const PROCESSED_OUTPUTS_BUCKET = process.env['PROCESSED_OUTPUTS_BUCKET']!;
+const PROCESSED_QUEUE_URL = process.env['PROCESSED_QUEUE_URL']!;
+const RAW_PAYLOADS_BUCKET = process.env['RAW_PAYLOADS_BUCKET'] ?? '';
 const PROXY_PORT = process.env['VSOCK_KMS_PROXY_PORT'] ?? '8000';
 
 const SEALED_BLOB_KEY = `sealed-keys/${TENANT_ID}/master.blob`;
+const RECOVERY_PHRASE_SSM_PATH = `/folklore/${TENANT_ID}/recovery-phrase`;
 const INGEST_KEY_SSM_PATH = `/folklore/${TENANT_ID}/ingest-public-key`;
 const IDLE_SSM_PATH = `/folklore/${TENANT_ID}/idle`;
 // After 15 consecutive empty long-polls (~5 min) the enclave signals idle.
@@ -88,6 +93,20 @@ async function boot(): Promise<Buffer> {
   // Show once — customer must record this; Folklore never stores it (ADL #12, #30)
   const mnemonic = deriveMnemonic(masterKey);
   console.log('RECOVERY_PHRASE', { mnemonic });
+  // Also persist to SSM SecureString encrypted with customer's KMS key (zero-knowledge to Folklore)
+  try {
+    await ssm.send(
+      new PutParameterCommand({
+        Name: RECOVERY_PHRASE_SSM_PATH,
+        Value: mnemonic,
+        Type: 'SecureString',
+        KeyId: KMS_KEY_ID,
+        Overwrite: false,
+      }),
+    );
+  } catch (err) {
+    if (!(err instanceof Error) || err.name !== 'ParameterAlreadyExists') throw err;
+  }
   return masterKey;
 }
 
@@ -142,6 +161,20 @@ async function processLoop(masterKey: Buffer, pipeline: Pipeline): Promise<void>
     }
 
     for (const msg of messages) {
+      if (RAW_PAYLOADS_BUCKET && msg.MessageId && msg.Body) {
+        const now = new Date();
+        const archiveKey = `${TENANT_ID}/${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}/${String(now.getUTCDate()).padStart(2, '0')}/${msg.MessageId}`;
+        void s3
+          .send(
+            new PutObjectCommand({
+              Bucket: RAW_PAYLOADS_BUCKET,
+              Key: archiveKey,
+              Body: msg.Body,
+              ContentType: 'text/plain',
+            }),
+          )
+          .catch(() => {});
+      }
       try {
         const raw = JSON.parse(msg.Body!) as SqsMessage;
         const encryptedPayload: EncryptedPayload = {
@@ -150,7 +183,17 @@ async function processLoop(masterKey: Buffer, pipeline: Pipeline): Promise<void>
           ciphertext: raw.ciphertext,
         };
         const plaintext = decryptPayload(encryptedPayload, privateKey);
-        await pipeline.handle(plaintext, raw.source);
+        const fact = await pipeline.handle(plaintext, raw.source);
+        if (fact) {
+          await sqs.send(
+            new SendMessageCommand({
+              QueueUrl: PROCESSED_QUEUE_URL,
+              MessageBody: JSON.stringify(fact),
+              MessageGroupId: fact.orgId,
+              MessageDeduplicationId: fact.factId,
+            }),
+          );
+        }
         await sqs.send(
           new DeleteMessageCommand({ QueueUrl: QUEUE_URL, ReceiptHandle: msg.ReceiptHandle! }),
         );
@@ -164,20 +207,7 @@ async function processLoop(masterKey: Buffer, pipeline: Pipeline): Promise<void>
 
 const masterKey = await boot();
 const hnsw = await HnswStore.load(s3, keyring, PROCESSED_OUTPUTS_BUCKET, TENANT_ID);
-const pipeline = new Pipeline(
-  new EnclaveFactPersister(
-    createDb(),
-    keyring,
-    s3,
-    neo4j.driver(process.env['MEMGRAPH_URL'] ?? 'bolt://localhost:7687'),
-    PROCESSED_OUTPUTS_BUCKET,
-  ),
-  hnsw,
-  s3,
-  keyring,
-  PROCESSED_OUTPUTS_BUCKET,
-  TENANT_ID,
-);
+const pipeline = new Pipeline(hnsw, s3, keyring, PROCESSED_OUTPUTS_BUCKET, TENANT_ID);
 
 async function shutdown(): Promise<void> {
   console.log('enclave shutting down — saving hnsw index');

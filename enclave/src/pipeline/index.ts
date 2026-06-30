@@ -1,9 +1,12 @@
+import { randomUUID, createHash } from 'node:crypto';
+import { buildClient, CommitmentPolicy } from '@aws-crypto/client-node';
+import { PutObjectCommand, type S3Client } from '@aws-sdk/client-s3';
 import { embedText } from '../inference/ollama.js';
 import { PrAnalyzer, type PrFile } from './pr-analyzer.js';
-import type { EnclaveFactPersister, PersistArgs } from '../db/persist.js';
 import type { HnswStore } from '../hnsw/index.js';
-import type { S3Client } from '@aws-sdk/client-s3';
 import type { KmsKeyringNode } from '@aws-crypto/client-node';
+
+const { encrypt } = buildClient(CommitmentPolicy.REQUIRE_ENCRYPT_REQUIRE_DECRYPT);
 
 type SourceKind = 'github' | 'slack' | 'linear' | 'notion' | 'intercom';
 
@@ -44,11 +47,20 @@ function extractPrData(
   };
 }
 
+export interface ProcessedFact {
+  factId: string;
+  orgId: string;
+  sourceKind: string;
+  sourceFactId: string;
+  occurredAt: string; // ISO8601
+  bodyS3Key: string;
+  bodyHash: string;
+}
+
 export class Pipeline {
   private readonly prAnalyzer = new PrAnalyzer();
 
   constructor(
-    private readonly persister: EnclaveFactPersister,
     private readonly hnsw: HnswStore,
     private readonly s3: S3Client,
     private readonly keyring: KmsKeyringNode,
@@ -56,10 +68,10 @@ export class Pipeline {
     private readonly orgId: string,
   ) {}
 
-  async handle(plaintext: Buffer, source: string): Promise<void> {
+  async handle(plaintext: Buffer, source: string): Promise<ProcessedFact | null> {
     if (!isKnownSource(source)) {
       console.warn('unknown source kind — dropping', { source });
-      return;
+      return null;
     }
 
     let body: unknown;
@@ -67,7 +79,7 @@ export class Pipeline {
       body = JSON.parse(plaintext.toString('utf8'));
     } catch {
       console.warn('failed to parse event body — dropping', { source });
-      return;
+      return null;
     }
 
     if (source === 'github') {
@@ -80,20 +92,38 @@ export class Pipeline {
       }
     }
 
-    const args: PersistArgs = {
-      orgId: this.orgId,
-      sourceKind: source,
-      sourceFactId: extractSourceFactId(body),
-      occurredAt: new Date(),
-      body: JSON.stringify(body),
-    };
+    const factId = randomUUID();
+    const sourceFactId = extractSourceFactId(body);
+    const bodyStr = JSON.stringify(body);
+    const bodyBytes = Buffer.from(bodyStr, 'utf8');
+    const bodyHash = createHash('sha256').update(bodyBytes).digest('hex');
 
-    const [embedding, factId] = await Promise.all([
-      embedText(args.body),
-      this.persister.persist(args),
-    ]);
+    const { result } = await encrypt(this.keyring, bodyBytes, {
+      encryptionContext: { factId, orgId: this.orgId, purpose: 'fact-body', sha256: bodyHash },
+    });
+    const bodyS3Key = `facts/${this.orgId}/${factId}`;
+    await this.s3.send(
+      new PutObjectCommand({
+        Bucket: this.processedBucket,
+        Key: bodyS3Key,
+        Body: result.toString('base64'),
+        ContentType: 'text/plain',
+        Metadata: { 'body-sha256': bodyHash },
+      }),
+    );
 
+    const embedding = await embedText(bodyStr);
     this.hnsw.insert(factId, embedding);
     await this.hnsw.maybeSave(this.s3, this.keyring, this.processedBucket, this.orgId);
+
+    return {
+      factId,
+      orgId: this.orgId,
+      sourceKind: source,
+      sourceFactId,
+      occurredAt: new Date().toISOString(),
+      bodyS3Key,
+      bodyHash,
+    };
   }
 }
