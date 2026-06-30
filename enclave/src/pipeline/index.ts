@@ -1,4 +1,5 @@
 import { embedText } from '../inference/ollama.js';
+import { PrAnalyzer, type PrFile } from './pr-analyzer.js';
 import type { EnclaveFactPersister, PersistArgs } from '../db/persist.js';
 
 type SourceKind = 'github' | 'slack' | 'linear' | 'notion' | 'intercom';
@@ -15,11 +16,34 @@ function extractSourceFactId(body: unknown): string {
     const id = b['id'] ?? b['node_id'] ?? b['ts'] ?? b['identifier'];
     if (typeof id === 'string' || typeof id === 'number') return String(id);
   }
-  // sha256 fingerprint when no explicit id field is present
   return Buffer.from(JSON.stringify(body)).toString('base64url').slice(0, 64);
 }
 
+interface PullRequestPayload {
+  pull_request?: {
+    number?: number;
+    title?: string;
+    body?: string | null;
+    __files?: PrFile[];
+  };
+}
+
+function extractPrData(
+  body: unknown,
+): { title: string; prBody: string | null; files: PrFile[] } | null {
+  const b = body as PullRequestPayload;
+  const pr = b?.pull_request;
+  if (!pr?.title) return null;
+  return {
+    title: pr.title,
+    prBody: pr.body ?? null,
+    files: Array.isArray(pr.__files) ? (pr.__files as PrFile[]) : [],
+  };
+}
+
 export class Pipeline {
+  private readonly prAnalyzer = new PrAnalyzer();
+
   constructor(
     private readonly persister: EnclaveFactPersister,
     private readonly orgId: string,
@@ -39,6 +63,16 @@ export class Pipeline {
       return;
     }
 
+    if (source === 'github') {
+      const prData = extractPrData(body);
+      if (prData) {
+        const analysis = await this.prAnalyzer.analyze(prData.title, prData.prBody, prData.files);
+        if (analysis) {
+          (body as Record<string, unknown>)['__pr_analysis'] = analysis;
+        }
+      }
+    }
+
     const args: PersistArgs = {
       orgId: this.orgId,
       sourceKind: source,
@@ -47,9 +81,6 @@ export class Pipeline {
       body: JSON.stringify(body),
     };
 
-    // Embedding used for the in-enclave HNSW index (ADL #34).
-    // OLLAMA_HOST=localhost:11434 when Ollama is baked into the EIF;
-    // returns a zero vector when unset so tests and dev builds pass without a model.
     const embedding = await embedText(args.body);
     void embedding; // TODO(ADL #34): write to in-enclave HNSW index
 

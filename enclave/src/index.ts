@@ -4,7 +4,7 @@ import { SSMClient, PutParameterCommand } from '@aws-sdk/client-ssm';
 import { KMSClient } from '@aws-sdk/client-kms';
 import { KmsKeyringNode } from '@aws-crypto/client-node';
 import neo4j from 'neo4j-driver';
-import { generateMasterKey, deriveIngestKeypair } from './sealing/keygen.js';
+import { generateMasterKey, deriveIngestKeypair, deriveMnemonic } from './sealing/keygen.js';
 import { sealMasterKey, unsealMasterKey } from './sealing/seal.js';
 import { decryptPayload, type EncryptedPayload } from './ingest/receiver.js';
 import { createDb } from './db/client.js';
@@ -94,6 +94,9 @@ async function boot(): Promise<Buffer> {
   );
 
   console.log('FIRST_BOOT', { tenant: TENANT_ID });
+  // Show once — customer must record this; Folklore never stores it (ADL #12, #30)
+  const mnemonic = deriveMnemonic(masterKey);
+  console.log('RECOVERY_PHRASE', { mnemonic });
   return masterKey;
 }
 

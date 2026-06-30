@@ -35,11 +35,24 @@ function httpPost(host: string, path: string, body: unknown): Promise<unknown> {
   });
 }
 
+const EMBED_MODEL = 'nomic-embed-text';
+const GENERATE_MODEL = process.env['OLLAMA_MODEL'] ?? 'llama3.2:3b';
+
 export async function embedText(text: string): Promise<number[]> {
   if (!HOST) return new Array(768).fill(0) as number[];
   const res = (await httpPost(HOST, '/api/embeddings', {
-    model: 'nomic-embed-text',
+    model: EMBED_MODEL,
     prompt: text,
   })) as { embedding: number[] };
   return res.embedding;
+}
+
+export async function generate(prompt: string): Promise<string> {
+  if (!HOST) return '';
+  const res = (await httpPost(HOST, '/api/generate', {
+    model: GENERATE_MODEL,
+    prompt,
+    stream: false,
+  })) as { response: string };
+  return res.response;
 }
