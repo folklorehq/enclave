@@ -1,4 +1,4 @@
-import { generate } from '../inference/ollama.js';
+import { generate } from '../inference/phala.js';
 
 export type PrChangeType = 'feat' | 'fix' | 'refactor' | 'chore' | 'docs' | 'test' | 'unknown';
 

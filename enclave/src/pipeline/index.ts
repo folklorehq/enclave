@@ -1,7 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { buildClient, CommitmentPolicy } from '@aws-crypto/client-node';
 import { PutObjectCommand, type S3Client } from '@aws-sdk/client-s3';
-import { embedText } from '../inference/ollama.js';
+import { embedText } from '../inference/phala.js';
 import { PrAnalyzer, type PrFile } from './pr-analyzer.js';
 import type { HnswStore } from '../hnsw/index.js';
 import type { KmsKeyringNode } from '@aws-crypto/client-node';
