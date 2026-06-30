@@ -1,4 +1,5 @@
 import { hkdfSync, createPrivateKey, createPublicKey, KeyObject } from 'crypto';
+import { entropyToMnemonic } from 'bip39';
 import { getEntropy } from './nsm.js';
 
 export function generateMasterKey(): Buffer {
@@ -7,6 +8,16 @@ export function generateMasterKey(): Buffer {
 
 export function deriveKey(masterKey: Buffer, purpose: string, length = 32): Buffer {
   return Buffer.from(hkdfSync('sha256', masterKey, Buffer.alloc(0), purpose, length));
+}
+
+/**
+ * Derives a BIP39 24-word recovery phrase from the master key.
+ * Shown exactly once at first boot and never stored by Folklore.
+ * The customer must record this phrase to recover keys if the sealed blob is lost.
+ */
+export function deriveMnemonic(masterKey: Buffer): string {
+  // BIP39 requires exactly 256 bits (32 bytes) of entropy for a 24-word mnemonic.
+  return entropyToMnemonic(masterKey.toString('hex'));
 }
 
 export interface IngestKeypair {

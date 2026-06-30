@@ -1,12 +1,8 @@
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 
-let _db: ReturnType<typeof drizzle> | null = null;
+export type Db = ReturnType<typeof createDb>;
 
-export function getDb() {
-  if (!_db) {
-    const client = postgres(process.env['DB_URL']!);
-    _db = drizzle(client);
-  }
-  return _db;
+export function createDb() {
+  return drizzle(postgres(process.env['DB_URL']!));
 }
