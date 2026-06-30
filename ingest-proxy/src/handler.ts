@@ -48,12 +48,51 @@ function deriveAesKey(
   return Buffer.from(hkdfSync('sha256', sharedSecret, Buffer.alloc(0), info, 32));
 }
 
+function extractEventType(
+  source: string,
+  headers: Record<string, string | undefined>,
+  body: string,
+): string {
+  switch (source) {
+    case 'github':
+      return headers['x-github-event'] ?? '';
+    case 'slack': {
+      try {
+        return (JSON.parse(body) as { type?: string }).type ?? '';
+      } catch {
+        return '';
+      }
+    }
+    case 'linear': {
+      try {
+        return (JSON.parse(body) as { type?: string }).type ?? '';
+      } catch {
+        return '';
+      }
+    }
+    case 'notion': {
+      try {
+        return (JSON.parse(body) as { type?: string }).type ?? '';
+      } catch {
+        return '';
+      }
+    }
+    case 'intercom':
+      return headers['x-intercom-topic'] ?? '';
+    case 'meeting':
+      return headers['x-meeting-event'] ?? '';
+    default:
+      return '';
+  }
+}
+
 export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   const tenantId = event.pathParameters?.['tenant_id'];
   const source = event.pathParameters?.['source'];
   if (!tenantId || !source) return { statusCode: 400 };
 
   const body = event.body ?? '';
+  const eventType = extractEventType(source, event.headers, body);
   const recipientPubBytes = await fetchPublicKey(tenantId);
 
   const recipientPub = createPublicKey({
@@ -81,6 +120,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       MessageBody: JSON.stringify({
         tenant_id: tenantId,
         source,
+        eventType,
         ephemeralPublicKey: ephemeralPubBytes.toString('hex'),
         nonce: nonce.toString('hex'),
         ciphertext: ciphertextWithTag.toString('hex'),

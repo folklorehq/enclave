@@ -48,6 +48,7 @@ const keyring = new KmsKeyringNode({
 interface SqsMessage {
   tenant_id: string;
   source: string;
+  eventType?: string;
   ephemeralPublicKey: string;
   nonce: string;
   ciphertext: string;
@@ -183,8 +184,8 @@ async function processLoop(masterKey: Buffer, pipeline: Pipeline): Promise<void>
           ciphertext: raw.ciphertext,
         };
         const plaintext = decryptPayload(encryptedPayload, privateKey);
-        const fact = await pipeline.handle(plaintext, raw.source);
-        if (fact) {
+        const facts = await pipeline.handle(plaintext, raw.source, raw.eventType ?? '');
+        for (const fact of facts) {
           await sqs.send(
             new SendMessageCommand({
               QueueUrl: PROCESSED_QUEUE_URL,
