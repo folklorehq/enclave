@@ -1,6 +1,9 @@
 import { embedText } from '../inference/ollama.js';
 import { PrAnalyzer, type PrFile } from './pr-analyzer.js';
 import type { EnclaveFactPersister, PersistArgs } from '../db/persist.js';
+import type { HnswStore } from '../hnsw/index.js';
+import type { S3Client } from '@aws-sdk/client-s3';
+import type { KmsKeyringNode } from '@aws-crypto/client-node';
 
 type SourceKind = 'github' | 'slack' | 'linear' | 'notion' | 'intercom';
 
@@ -46,6 +49,10 @@ export class Pipeline {
 
   constructor(
     private readonly persister: EnclaveFactPersister,
+    private readonly hnsw: HnswStore,
+    private readonly s3: S3Client,
+    private readonly keyring: KmsKeyringNode,
+    private readonly processedBucket: string,
     private readonly orgId: string,
   ) {}
 
@@ -81,9 +88,12 @@ export class Pipeline {
       body: JSON.stringify(body),
     };
 
-    const embedding = await embedText(args.body);
-    void embedding; // TODO(ADL #34): write to in-enclave HNSW index
+    const [embedding, factId] = await Promise.all([
+      embedText(args.body),
+      this.persister.persist(args),
+    ]);
 
-    await this.persister.persist(args);
+    this.hnsw.insert(factId, embedding);
+    await this.hnsw.maybeSave(this.s3, this.keyring, this.processedBucket, this.orgId);
   }
 }

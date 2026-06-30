@@ -10,6 +10,8 @@ import { decryptPayload, type EncryptedPayload } from './ingest/receiver.js';
 import { createDb } from './db/client.js';
 import { EnclaveFactPersister } from './db/persist.js';
 import { Pipeline } from './pipeline/index.js';
+import { HnswStore } from './hnsw/index.js';
+import { startHealthServer } from './http/server.js';
 
 const REGION = process.env['AWS_REGION']!;
 const TENANT_ID = process.env['TENANT_ID']!;
@@ -37,17 +39,6 @@ const keyring = new KmsKeyringNode({
   clientProvider: (r?: string) =>
     new KMSClient({ region: r ?? REGION, endpoint: proxyEndpoint }) as never,
 });
-
-const pipeline = new Pipeline(
-  new EnclaveFactPersister(
-    createDb(),
-    keyring,
-    s3,
-    neo4j.driver(process.env['MEMGRAPH_URL'] ?? 'bolt://localhost:7687'),
-    PROCESSED_OUTPUTS_BUCKET,
-  ),
-  TENANT_ID,
-);
 
 interface SqsMessage {
   tenant_id: string;
@@ -100,7 +91,7 @@ async function boot(): Promise<Buffer> {
   return masterKey;
 }
 
-async function processLoop(masterKey: Buffer): Promise<void> {
+async function processLoop(masterKey: Buffer, pipeline: Pipeline): Promise<void> {
   const { privateKey } = deriveIngestKeypair(masterKey);
   console.log('processing loop started', { queue: QUEUE_URL });
 
@@ -171,4 +162,31 @@ async function processLoop(masterKey: Buffer): Promise<void> {
   }
 }
 
-processLoop(await boot());
+const masterKey = await boot();
+const hnsw = await HnswStore.load(s3, keyring, PROCESSED_OUTPUTS_BUCKET, TENANT_ID);
+const pipeline = new Pipeline(
+  new EnclaveFactPersister(
+    createDb(),
+    keyring,
+    s3,
+    neo4j.driver(process.env['MEMGRAPH_URL'] ?? 'bolt://localhost:7687'),
+    PROCESSED_OUTPUTS_BUCKET,
+  ),
+  hnsw,
+  s3,
+  keyring,
+  PROCESSED_OUTPUTS_BUCKET,
+  TENANT_ID,
+);
+
+async function shutdown(): Promise<void> {
+  console.log('enclave shutting down — saving hnsw index');
+  await hnsw.save(s3, keyring, PROCESSED_OUTPUTS_BUCKET, TENANT_ID);
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => void shutdown());
+process.on('SIGINT', () => void shutdown());
+
+startHealthServer(3000);
+void processLoop(masterKey, pipeline);
