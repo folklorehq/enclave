@@ -20,6 +20,8 @@ export interface ProcessedFact {
   containerRefs: string[];
   explicitLinks: string[];
   sourceThreadId?: string;
+  /** Container seeds for containers the fact belongs to; worker upserts these. */
+  containerSeeds: { sourceContainerId: string; label: string; shape: string }[];
   /** Top-K nearest neighbors from the HNSW index, searched before this fact
    *  was inserted. Used by the worker for semantic similarity scoring (ADL #34). */
   hnswNeighbors: { factId: string; similarity: number }[];
@@ -50,10 +52,16 @@ export class Pipeline {
       return [];
     }
 
-    const { facts: normalizedFacts } = normalizeWebhookEvent(source, eventType, payload);
+    const { facts: normalizedFacts, containers } = normalizeWebhookEvent(
+      source,
+      eventType,
+      payload,
+    );
     if (normalizedFacts.length === 0) {
       return [];
     }
+
+    const containerByRef = new Map(containers.map((c) => [c.sourceContainerId, c]));
 
     const results: ProcessedFact[] = [];
 
@@ -100,6 +108,10 @@ export class Pipeline {
         containerRefs: fact.containerRefs,
         explicitLinks: fact.content?.explicitLinks ?? [],
         sourceThreadId: fact.sourceThreadId,
+        containerSeeds: fact.containerRefs
+          .map((ref) => containerByRef.get(ref))
+          .filter((c): c is NonNullable<typeof c> => c != null)
+          .map((c) => ({ sourceContainerId: c.sourceContainerId, label: c.label, shape: c.shape })),
         hnswNeighbors,
       });
     }
