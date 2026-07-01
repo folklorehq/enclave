@@ -10,7 +10,7 @@ const ENCRYPTION_CONTEXT = { purpose: 'master-key', version: '1' };
 function kmsClient(): KMSClient {
   return new KMSClient({
     region: REGION,
-    endpoint: `http://localhost:${PROXY_PORT}`,
+    endpoint: `https://localhost:${PROXY_PORT}`,
   });
 }
 

@@ -10,7 +10,7 @@ let _backend: TeeEndpointBackend | null = null;
 function getBackend(): TeeEndpointBackend {
   if (!_backend) {
     _backend = new TeeEndpointBackend({
-      baseUrl: PROXY_PORT ? `http://localhost:${PROXY_PORT}` : 'https://api.phala.com/v1',
+      baseUrl: PROXY_PORT ? `https://localhost:${PROXY_PORT}` : 'https://api.phala.com/v1',
       apiKey: API_KEY,
       embedModel: EMBED_MODEL,
       generateModel: GENERATE_MODEL,
@@ -24,7 +24,7 @@ export async function embedText(text: string): Promise<number[]> {
   return getBackend().embed(text);
 }
 
-export async function generate(prompt: string): Promise<string> {
+export async function generate(prompt: string, systemPrompt?: string): Promise<string> {
   if (!PROXY_PORT && !API_KEY) return '';
-  return getBackend().generate(prompt);
+  return getBackend().generate(prompt, { systemPrompt });
 }

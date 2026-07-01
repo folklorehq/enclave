@@ -1,12 +1,44 @@
 import { randomUUID, createHash } from 'node:crypto';
-import { buildClient, CommitmentPolicy } from '@aws-crypto/client-node';
 import { PutObjectCommand, type S3Client } from '@aws-sdk/client-s3';
 import { embedText } from '../inference/phala.js';
-import { normalizeWebhookEvent } from '@folklore/connectors';
+import {
+  normalizeWebhookEvent,
+  type NormalizedFact,
+  type NormalizedContainer,
+} from '@folklore/connectors';
+import { EnclaveCrypto } from '../crypto/esdk.js';
 import type { HnswStore } from '../hnsw/index.js';
 import type { KmsKeyringNode } from '@aws-crypto/client-node';
 
-const { encrypt } = buildClient(CommitmentPolicy.REQUIRE_ENCRYPT_REQUIRE_DECRYPT);
+const FILE_PATH_RE = /(?:^|[\s(,])([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_./-]+\.[a-z]{1,6})\b/g;
+const ISSUE_REF_RE = /(?:^|\s)(#\d{1,6})\b/g;
+const JIRA_KEY_RE = /\b([A-Z]{2,10}-\d{1,6})\b/g;
+const BACKTICK_RE = /`([^`\n]{2,60})`/g;
+const PR_REF_RE = /\bpr\s*#?(\d{1,6})\b/gi;
+const MENTION_RE = /@([\w-]{2,39})\b/g;
+const REPO_RE = /\b([\w.-]{1,39})\/([\w.-]{1,100})\b/g;
+const MAX_ENTITIES = 100;
+
+function extractEntities(text: string): string[] {
+  const set = new Set<string>();
+  for (const m of text.matchAll(FILE_PATH_RE)) if (m[1]) set.add(m[1].toLowerCase());
+  for (const m of text.matchAll(ISSUE_REF_RE)) if (m[1]) set.add(m[1]);
+  for (const m of text.matchAll(JIRA_KEY_RE)) if (m[1]) set.add(m[1]);
+  for (const m of text.matchAll(BACKTICK_RE)) if (m[1]) set.add(m[1]);
+  for (const m of text.matchAll(PR_REF_RE)) if (m[1]) set.add(`PR#${m[1]}`);
+  for (const m of text.matchAll(MENTION_RE)) if (m[1]) set.add(`@${m[1]}`);
+  for (const m of text.matchAll(REPO_RE)) {
+    const full = (m[0] ?? '').trim();
+    if (!full.includes('.')) set.add(full.toLowerCase());
+  }
+  return [...set]
+    .map((e) => {
+      if (/^#\d+$/.test(e)) return `issue:${e.slice(1)}`;
+      const jira = /^[A-Z]{2,10}-(\d+)$/.exec(e);
+      return jira ? `issue:${jira[1]!}` : e;
+    })
+    .slice(0, MAX_ENTITIES);
+}
 
 export interface ProcessedFact {
   factId: string;
@@ -20,6 +52,9 @@ export interface ProcessedFact {
   containerRefs: string[];
   explicitLinks: string[];
   sourceThreadId?: string;
+  /** Entities extracted from the fact body before encryption; stored in DB for
+   *  association scoring so the worker never needs to decrypt (ADL #12). */
+  extractedEntities: string[];
   /** Container seeds for containers the fact belongs to; worker upserts these. */
   containerSeeds: { sourceContainerId: string; label: string; shape: string }[];
   /** Top-K nearest neighbors from the HNSW index, searched before this fact
@@ -30,13 +65,17 @@ export interface ProcessedFact {
 const KNOWN_SOURCES = new Set(['github', 'slack', 'linear', 'notion', 'intercom', 'meeting']);
 
 export class Pipeline {
+  private readonly crypto: EnclaveCrypto;
+
   constructor(
     private readonly hnsw: HnswStore,
     private readonly s3: S3Client,
     private readonly keyring: KmsKeyringNode,
     private readonly processedBucket: string,
     private readonly orgId: string,
-  ) {}
+  ) {
+    this.crypto = new EnclaveCrypto(keyring);
+  }
 
   async handle(plaintext: Buffer, source: string, eventType: string): Promise<ProcessedFact[]> {
     if (!KNOWN_SOURCES.has(source)) {
@@ -61,8 +100,34 @@ export class Pipeline {
       return [];
     }
 
-    const containerByRef = new Map(containers.map((c) => [c.sourceContainerId, c]));
+    return this.processFacts(normalizedFacts, containers, source);
+  }
 
+  async handleNormalized(plaintext: Buffer, sourceKind: string): Promise<ProcessedFact[]> {
+    let parsed: { facts: NormalizedFact[]; containers: NormalizedContainer[] };
+    try {
+      parsed = JSON.parse(plaintext.toString('utf8')) as typeof parsed;
+    } catch {
+      console.warn('pull-normalized: failed to parse payload — dropping');
+      return [];
+    }
+
+    const facts = parsed.facts.map((f) => ({
+      ...f,
+      occurredAt: new Date(f.occurredAt as unknown as string),
+    }));
+
+    if (facts.length === 0) return [];
+
+    return this.processFacts(facts, parsed.containers, sourceKind);
+  }
+
+  private async processFacts(
+    normalizedFacts: NormalizedFact[],
+    containers: NormalizedContainer[],
+    source: string,
+  ): Promise<ProcessedFact[]> {
+    const containerByRef = new Map(containers.map((c) => [c.sourceContainerId, c]));
     const results: ProcessedFact[] = [];
 
     for (const fact of normalizedFacts) {
@@ -71,18 +136,21 @@ export class Pipeline {
         fact.content?.body ?? fact.transition?.transitionType ?? JSON.stringify(fact.raw);
 
       const bodyStr = JSON.stringify(fact);
+      const extractedEntities = extractEntities(bodyStr);
       const bodyBytes = Buffer.from(bodyStr, 'utf8');
       const bodyHash = createHash('sha256').update(bodyBytes).digest('hex');
 
-      const { result } = await encrypt(this.keyring, bodyBytes, {
-        encryptionContext: { factId, orgId: this.orgId, purpose: 'fact-body', sha256: bodyHash },
+      const encrypted = await this.crypto.encryptFactBody(bodyBytes, {
+        factId,
+        orgId: this.orgId,
+        sha256: bodyHash,
       });
       const bodyS3Key = `facts/${this.orgId}/${factId}`;
       await this.s3.send(
         new PutObjectCommand({
           Bucket: this.processedBucket,
           Key: bodyS3Key,
-          Body: result.toString('base64'),
+          Body: encrypted.toString('base64'),
           ContentType: 'text/plain',
           Metadata: { 'body-sha256': bodyHash },
         }),
@@ -108,6 +176,7 @@ export class Pipeline {
         containerRefs: fact.containerRefs,
         explicitLinks: fact.content?.explicitLinks ?? [],
         sourceThreadId: fact.sourceThreadId,
+        extractedEntities,
         containerSeeds: fact.containerRefs
           .map((ref) => containerByRef.get(ref))
           .filter((c): c is NonNullable<typeof c> => c != null)

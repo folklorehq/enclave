@@ -1,13 +1,19 @@
-import { createServer } from 'node:http';
+import { Hono } from 'hono';
+import { serve } from '@hono/node-server';
+import { serveStatic } from '@hono/node-server/serve-static';
 
-export function startHealthServer(port = 3000): void {
-  createServer((req, res) => {
-    if (req.url === '/health') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true }));
-    } else {
-      res.writeHead(404).end();
-    }
-  }).listen(port, '127.0.0.1');
-  console.log('health server listening', { port });
+export class BoxServer {
+  private readonly app: Hono;
+
+  constructor(private readonly port = 3000) {
+    this.app = new Hono();
+    this.app.get('/health', (c) => c.json({ ok: true }));
+    this.app.use('/*', serveStatic({ root: './dist/box' }));
+    this.app.get('/*', serveStatic({ path: './dist/box/index.html' }));
+  }
+
+  start(): void {
+    serve({ fetch: this.app.fetch, port: this.port });
+    console.log('box server listening', { port: this.port });
+  }
 }

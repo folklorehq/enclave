@@ -13,6 +13,7 @@ import {
   timingSafeEqual,
 } from 'crypto';
 import type { APIGatewayProxyHandlerV2 } from 'aws-lambda';
+import { checkRateLimit } from './rate-limiter.js';
 
 const ssm = new SSMClient({});
 const sqs = new SQSClient({});
@@ -178,6 +179,10 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     if (!verifySignature(source, event.headers, body, hmacSecret)) {
       return { statusCode: 401 };
     }
+  }
+
+  if (!(await checkRateLimit(tenantId, source))) {
+    return { statusCode: 429 };
   }
 
   const eventType = extractEventType(source, event.headers, body);

@@ -13,7 +13,8 @@ import { sealMasterKey, unsealMasterKey } from './sealing/seal.js';
 import { decryptPayload, type EncryptedPayload } from './ingest/receiver.js';
 import { Pipeline } from './pipeline/index.js';
 import { HnswStore } from './hnsw/index.js';
-import { startHealthServer } from './http/server.js';
+import { BoxServer } from './http/server.js';
+import { SynthesisConsumer } from './workers/synthesis-consumer.js';
 
 const REGION = process.env['AWS_REGION']!;
 const TENANT_ID = process.env['TENANT_ID']!;
@@ -23,6 +24,7 @@ const QUEUE_URL = process.env['QUEUE_URL']!;
 const PROCESSED_OUTPUTS_BUCKET = process.env['PROCESSED_OUTPUTS_BUCKET']!;
 const PROCESSED_QUEUE_URL = process.env['PROCESSED_QUEUE_URL']!;
 const RAW_PAYLOADS_BUCKET = process.env['RAW_PAYLOADS_BUCKET'] ?? '';
+const SYNTHESIS_REQUEST_QUEUE_URL = process.env['SYNTHESIS_REQUEST_QUEUE_URL'] ?? '';
 const PROXY_PORT = process.env['VSOCK_KMS_PROXY_PORT'] ?? '8000';
 
 const SEALED_BLOB_KEY = `sealed-keys/${TENANT_ID}/master.blob`;
@@ -33,7 +35,7 @@ const IDLE_SSM_PATH = `/folklore/${TENANT_ID}/idle`;
 const IDLE_POLL_THRESHOLD = 15;
 
 // vsock proxy on the parent EC2 routes all AWS SDK calls without internet egress
-const proxyEndpoint = `http://localhost:${PROXY_PORT}`;
+const proxyEndpoint = `https://localhost:${PROXY_PORT}`;
 
 const s3 = new S3Client({ region: REGION, endpoint: proxyEndpoint });
 const sqs = new SQSClient({ region: REGION, endpoint: proxyEndpoint });
@@ -49,6 +51,7 @@ interface SqsMessage {
   tenant_id: string;
   source: string;
   eventType?: string;
+  type?: string;
   ephemeralPublicKey: string;
   nonce: string;
   ciphertext: string;
@@ -184,7 +187,10 @@ async function processLoop(masterKey: Buffer, pipeline: Pipeline): Promise<void>
           ciphertext: raw.ciphertext,
         };
         const plaintext = decryptPayload(encryptedPayload, privateKey);
-        const facts = await pipeline.handle(plaintext, raw.source, raw.eventType ?? '');
+        const facts =
+          raw.type === 'pull-normalized'
+            ? await pipeline.handleNormalized(plaintext, raw.source)
+            : await pipeline.handle(plaintext, raw.source, raw.eventType ?? '');
         for (const fact of facts) {
           await sqs.send(
             new SendMessageCommand({
@@ -210,6 +216,19 @@ const masterKey = await boot();
 const hnsw = await HnswStore.load(s3, keyring, PROCESSED_OUTPUTS_BUCKET, TENANT_ID);
 const pipeline = new Pipeline(hnsw, s3, keyring, PROCESSED_OUTPUTS_BUCKET, TENANT_ID);
 
+new BoxServer().start();
+
+if (SYNTHESIS_REQUEST_QUEUE_URL) {
+  new SynthesisConsumer({
+    sqs,
+    s3,
+    keyring,
+    processedBucket: PROCESSED_OUTPUTS_BUCKET,
+    synthesisQueueUrl: SYNTHESIS_REQUEST_QUEUE_URL,
+    processedQueueUrl: PROCESSED_QUEUE_URL,
+  }).start();
+}
+
 async function shutdown(): Promise<void> {
   console.log('enclave shutting down — saving hnsw index');
   await hnsw.save(s3, keyring, PROCESSED_OUTPUTS_BUCKET, TENANT_ID);
@@ -219,5 +238,4 @@ async function shutdown(): Promise<void> {
 process.on('SIGTERM', () => void shutdown());
 process.on('SIGINT', () => void shutdown());
 
-startHealthServer(3000);
 void processLoop(masterKey, pipeline);
