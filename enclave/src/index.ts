@@ -5,7 +5,7 @@ import {
   DeleteMessageCommand,
   SendMessageCommand,
 } from '@aws-sdk/client-sqs';
-import { SSMClient, PutParameterCommand } from '@aws-sdk/client-ssm';
+import { SSMClient, PutParameterCommand, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { KMSClient } from '@aws-sdk/client-kms';
 import { KmsKeyringNode } from '@aws-crypto/client-node';
 import { generateMasterKey, deriveIngestKeypair, deriveMnemonic } from './sealing/keygen.js';
@@ -25,6 +25,7 @@ const PROCESSED_OUTPUTS_BUCKET = process.env['PROCESSED_OUTPUTS_BUCKET']!;
 const PROCESSED_QUEUE_URL = process.env['PROCESSED_QUEUE_URL']!;
 const RAW_PAYLOADS_BUCKET = process.env['RAW_PAYLOADS_BUCKET'] ?? '';
 const SYNTHESIS_REQUEST_QUEUE_URL = process.env['SYNTHESIS_REQUEST_QUEUE_URL'] ?? '';
+const TEE_API_KEY_SSM_PATH = process.env['TEE_API_KEY_SSM_PATH'] ?? '';
 const PROXY_PORT = process.env['VSOCK_KMS_PROXY_PORT'] ?? '8000';
 
 const SEALED_BLOB_KEY = `sealed-keys/${TENANT_ID}/master.blob`;
@@ -112,6 +113,18 @@ async function boot(): Promise<Buffer> {
     if (!(err instanceof Error) || err.name !== 'ParameterAlreadyExists') throw err;
   }
   return masterKey;
+}
+
+async function loadInferenceKey(): Promise<void> {
+  if (!TEE_API_KEY_SSM_PATH || process.env['TEE_API_KEY']) return;
+  try {
+    const resp = await ssm.send(
+      new GetParameterCommand({ Name: TEE_API_KEY_SSM_PATH, WithDecryption: true }),
+    );
+    if (resp.Parameter?.Value) process.env['TEE_API_KEY'] = resp.Parameter.Value;
+  } catch (err) {
+    console.error('failed to load inference key from SSM', { err });
+  }
 }
 
 async function processLoop(masterKey: Buffer, pipeline: Pipeline): Promise<void> {
@@ -213,6 +226,7 @@ async function processLoop(masterKey: Buffer, pipeline: Pipeline): Promise<void>
 }
 
 const masterKey = await boot();
+await loadInferenceKey();
 const hnsw = await HnswStore.load(s3, keyring, PROCESSED_OUTPUTS_BUCKET, TENANT_ID);
 const pipeline = new Pipeline(hnsw, s3, keyring, PROCESSED_OUTPUTS_BUCKET, TENANT_ID);
 
