@@ -30,10 +30,10 @@ interface SynthesisResult {
 }
 
 const SYSTEM_PROMPT =
-  'You are a precise technical writer creating internal wiki articles for engineering teams. ' +
-  'Write only from the provided source activity. Use GitHub-flavored Markdown. ' +
-  'Structure: ## Overview, ## Key Activity, ## Contributors. ' +
-  'Be factual and concise. Do not speculate beyond the provided evidence.';
+  'You are a staff engineer writing a durable internal wiki page a teammate reads to understand a ' +
+  'topic — not a changelog. Synthesize the source activity into knowledge: what this is and why it ' +
+  'matters, how it works or what changed, and its current state. Organize by theme, never by date. ' +
+  'Ground every claim in the provided sources; do not speculate beyond them. Use GitHub-flavored Markdown.';
 
 const MAX_FACT_REFS = 30;
 
@@ -126,21 +126,24 @@ export class SynthesisConsumer {
       req.audiences.map(async (audience) => {
         const audienceNote =
           audience.id === null
-            ? 'General audience — accessible to everyone in the org.'
-            : `Tailor depth and tone for the "${audience.name}" audience.`;
+            ? 'General — for anyone in the org; explain plainly.'
+            : `For the "${audience.name}" audience — outcomes and impact, concise, minimal code detail.`;
 
         const prompt = [
-          `Concept: ${req.conceptName}`,
+          `Topic: ${req.conceptName}`,
           `Audience: ${audienceNote}`,
-          `Contributors: ${req.contributorCount}`,
           '',
-          'Facts (chronological):',
+          'Write a wiki page with these sections:',
+          '## Summary — 2-3 sentences: what this is and why it matters.',
+          '## How it works — synthesized explanation (mechanisms, components, behavior), by theme, not a timeline.',
+          '## Current state — where this stands now (done / in progress / known issues), if evident.',
+          '## Sources — bullet each source below with its date, as a citation.',
+          '',
+          'Source activity to synthesize from (do NOT just replay it chronologically):',
           factLines || '(none)',
+          relatedStr ? `\nRelated topics:\n${relatedStr}` : '',
           '',
-          'Related concepts:',
-          relatedStr || '(none)',
-          '',
-          'Write the wiki article now.',
+          'Write the page now — synthesize into knowledge, organized by theme.',
         ].join('\n');
 
         const content = await generate(prompt, SYSTEM_PROMPT).catch(() => '');
