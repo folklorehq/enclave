@@ -233,6 +233,7 @@ const pipeline = new Pipeline(hnsw, s3, keyring, PROCESSED_OUTPUTS_BUCKET, TENAN
 new BoxServer().start();
 
 if (SYNTHESIS_REQUEST_QUEUE_URL) {
+  // One consumer handles both wiki and concept synthesis requests (dispatched by `type`).
   new SynthesisConsumer({
     sqs,
     s3,

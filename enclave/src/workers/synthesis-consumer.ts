@@ -9,6 +9,11 @@ import type { S3Client } from '@aws-sdk/client-s3';
 import type { SQSClient } from '@aws-sdk/client-sqs';
 import { EnclaveCrypto } from '../crypto/esdk.js';
 import { generate } from '../inference/phala.js';
+import {
+  synthesizeConcepts,
+  type ConceptSynthesisRequest,
+  type ConceptSynthesisResult,
+} from './concept-synthesis.js';
 
 export interface SynthesisRequest {
   requestId: string;
@@ -70,14 +75,19 @@ export class SynthesisConsumer {
         for (const msg of resp.Messages ?? []) {
           if (!msg.Body || !msg.ReceiptHandle) continue;
           try {
-            const req = JSON.parse(msg.Body) as SynthesisRequest;
-            const result = await this.synthesize(req);
+            const raw = JSON.parse(msg.Body) as { type?: string };
+            const result: SynthesisResult | ConceptSynthesisResult =
+              raw.type === 'concept_synthesis'
+                ? await synthesizeConcepts(raw as ConceptSynthesisRequest, (s3Key, ref) =>
+                    this.decryptBody(s3Key, ref),
+                  )
+                : await this.synthesize(raw as unknown as SynthesisRequest);
             await this.deps.sqs.send(
               new SendMessageCommand({
                 QueueUrl: this.deps.processedQueueUrl,
                 MessageBody: JSON.stringify(result),
-                MessageGroupId: req.orgId,
-                MessageDeduplicationId: req.requestId,
+                MessageGroupId: result.orgId,
+                MessageDeduplicationId: result.requestId,
               }),
             );
             await this.deps.sqs.send(
