@@ -10,18 +10,18 @@ import type { SQSClient } from '@aws-sdk/client-sqs';
 import { EnclaveCrypto } from '../crypto/esdk.js';
 import { generate } from '../inference/phala.js';
 import {
-  synthesizeConcepts,
-  type ConceptSynthesisRequest,
-  type ConceptSynthesisResult,
-} from './concept-synthesis.js';
+  synthesizeThemes,
+  type ThemeSynthesisRequest,
+  type ThemeSynthesisResult,
+} from './theme-synthesis.js';
 
 export interface SynthesisRequest {
   requestId: string;
-  conceptId: string;
+  themeId: string;
   orgId: string;
-  conceptName: string;
+  themeName: string;
   factRefs: { factId: string; s3Key: string; occurredAt: string; kind: string; score: number }[];
-  relatedConcepts: { conceptId: string; name: string; similarity: number }[];
+  relatedThemes: { themeId: string; name: string; similarity: number }[];
   contributorCount: number;
   audiences: { id: string | null; name: string }[];
 }
@@ -29,7 +29,7 @@ export interface SynthesisRequest {
 interface SynthesisResult {
   type: 'wiki_synthesis';
   requestId: string;
-  conceptId: string;
+  themeId: string;
   orgId: string;
   articles: { audienceId: string | null; content: string; factCount: number }[];
 }
@@ -76,9 +76,9 @@ export class SynthesisConsumer {
           if (!msg.Body || !msg.ReceiptHandle) continue;
           try {
             const raw = JSON.parse(msg.Body) as { type?: string };
-            const result: SynthesisResult | ConceptSynthesisResult =
-              raw.type === 'concept_synthesis'
-                ? await synthesizeConcepts(raw as ConceptSynthesisRequest, (s3Key, ref) =>
+            const result: SynthesisResult | ThemeSynthesisResult =
+              raw.type === 'theme_synthesis'
+                ? await synthesizeThemes(raw as ThemeSynthesisRequest, (s3Key, ref) =>
                     this.decryptBody(s3Key, ref),
                   )
                 : await this.synthesize(raw as unknown as SynthesisRequest);
@@ -114,7 +114,7 @@ export class SynthesisConsumer {
         .map((ref) => this.decryptBody(ref.s3Key, { factId: ref.factId, orgId: req.orgId })),
     );
 
-    const relatedStr = req.relatedConcepts
+    const relatedStr = req.relatedThemes
       .slice(0, 5)
       .map((r) => `- ${r.name} (similarity: ${r.similarity.toFixed(2)})`)
       .join('\n');
@@ -140,7 +140,7 @@ export class SynthesisConsumer {
             : `For the "${audience.name}" audience — outcomes and impact, concise, minimal code detail.`;
 
         const prompt = [
-          `Topic: ${req.conceptName}`,
+          `Topic: ${req.themeName}`,
           `Audience: ${audienceNote}`,
           '',
           'Write a wiki page with these sections:',
@@ -164,7 +164,7 @@ export class SynthesisConsumer {
     return {
       type: 'wiki_synthesis',
       requestId: req.requestId,
-      conceptId: req.conceptId,
+      themeId: req.themeId,
       orgId: req.orgId,
       articles,
     };

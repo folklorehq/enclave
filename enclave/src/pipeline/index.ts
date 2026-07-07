@@ -122,6 +122,20 @@ export class Pipeline {
     return this.processFacts(facts, parsed.containers, sourceKind);
   }
 
+  /**
+   * Entry point for the in-enclave pull loop (ADL #42): the connector already ran
+   * in-process, so there's no ciphertext to decrypt — just hand the already-normalized
+   * records straight to the same processing path webhooks use.
+   */
+  async handlePulled(
+    facts: NormalizedFact[],
+    containers: NormalizedContainer[],
+    sourceKind: string,
+  ): Promise<ProcessedFact[]> {
+    if (facts.length === 0) return [];
+    return this.processFacts(facts, containers, sourceKind);
+  }
+
   private async processFacts(
     normalizedFacts: NormalizedFact[],
     containers: NormalizedContainer[],

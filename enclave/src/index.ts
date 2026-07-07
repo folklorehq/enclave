@@ -15,6 +15,7 @@ import { Pipeline } from './pipeline/index.js';
 import { HnswStore } from './hnsw/index.js';
 import { BoxServer } from './http/server.js';
 import { SynthesisConsumer } from './workers/synthesis-consumer.js';
+import { runPull, type PullDueMessage } from './pull/pull-runner.js';
 
 const REGION = process.env['AWS_REGION']!;
 const TENANT_ID = process.env['TENANT_ID']!;
@@ -27,6 +28,13 @@ const RAW_PAYLOADS_BUCKET = process.env['RAW_PAYLOADS_BUCKET'] ?? '';
 const SYNTHESIS_REQUEST_QUEUE_URL = process.env['SYNTHESIS_REQUEST_QUEUE_URL'] ?? '';
 const TEE_API_KEY_SSM_PATH = process.env['TEE_API_KEY_SSM_PATH'] ?? '';
 const PROXY_PORT = process.env['VSOCK_KMS_PROXY_PORT'] ?? '8000';
+// ADL #42: pull transports run in-enclave. The control plane only ever hands back
+// ciphertext (source OAuth tokens ECIES-encrypted to this enclave's public key);
+// this shared deployment secret (the same one `apps/agent` uses to check in) is
+// what authenticates the enclave's fetch of those encrypted connections.
+const CONTROL_PLANE_URL = process.env['CONTROL_PLANE_URL'] ?? '';
+const DEPLOYMENT_ID = process.env['DEPLOYMENT_ID'] ?? '';
+const AGENT_TOKEN_SSM_PATH = process.env['AGENT_TOKEN_SSM_PATH'] ?? '';
 
 const SEALED_BLOB_KEY = `sealed-keys/${TENANT_ID}/master.blob`;
 const RECOVERY_PHRASE_SSM_PATH = `/folklore/${TENANT_ID}/recovery-phrase`;
@@ -56,6 +64,10 @@ interface SqsMessage {
   ephemeralPublicKey: string;
   nonce: string;
   ciphertext: string;
+}
+
+function isPullDueMessage(raw: { type?: string }): raw is PullDueMessage {
+  return raw.type === 'pull-due';
 }
 
 async function boot(): Promise<Buffer> {
@@ -127,6 +139,18 @@ async function loadInferenceKey(): Promise<void> {
   }
 }
 
+async function loadAgentToken(): Promise<void> {
+  if (!AGENT_TOKEN_SSM_PATH || process.env['AGENT_TOKEN']) return;
+  try {
+    const resp = await ssm.send(
+      new GetParameterCommand({ Name: AGENT_TOKEN_SSM_PATH, WithDecryption: true }),
+    );
+    if (resp.Parameter?.Value) process.env['AGENT_TOKEN'] = resp.Parameter.Value;
+  } catch (err) {
+    console.error('failed to load agent token from SSM', { err });
+  }
+}
+
 async function processLoop(masterKey: Buffer, pipeline: Pipeline): Promise<void> {
   const { privateKey } = deriveIngestKeypair(masterKey);
   console.log('processing loop started', { queue: QUEUE_URL });
@@ -193,17 +217,27 @@ async function processLoop(masterKey: Buffer, pipeline: Pipeline): Promise<void>
           .catch(() => {});
       }
       try {
-        const raw = JSON.parse(msg.Body!) as SqsMessage;
-        const encryptedPayload: EncryptedPayload = {
-          ephemeralPublicKey: raw.ephemeralPublicKey,
-          nonce: raw.nonce,
-          ciphertext: raw.ciphertext,
-        };
-        const plaintext = decryptPayload(encryptedPayload, privateKey);
-        const facts =
-          raw.type === 'pull-normalized'
-            ? await pipeline.handleNormalized(plaintext, raw.source)
-            : await pipeline.handle(plaintext, raw.source, raw.eventType ?? '');
+        const raw = JSON.parse(msg.Body!) as SqsMessage | PullDueMessage;
+        const facts = isPullDueMessage(raw)
+          ? await runPull(raw, {
+              ssm,
+              privateKey,
+              controlPlaneUrl: CONTROL_PLANE_URL,
+              deploymentId: DEPLOYMENT_ID,
+              agentToken: process.env['AGENT_TOKEN'] ?? '',
+              pipeline,
+            })
+          : await (async () => {
+              const encryptedPayload: EncryptedPayload = {
+                ephemeralPublicKey: raw.ephemeralPublicKey,
+                nonce: raw.nonce,
+                ciphertext: raw.ciphertext,
+              };
+              const plaintext = decryptPayload(encryptedPayload, privateKey);
+              return raw.type === 'pull-normalized'
+                ? pipeline.handleNormalized(plaintext, raw.source)
+                : pipeline.handle(plaintext, raw.source, raw.eventType ?? '');
+            })();
         for (const fact of facts) {
           await sqs.send(
             new SendMessageCommand({
@@ -227,13 +261,14 @@ async function processLoop(masterKey: Buffer, pipeline: Pipeline): Promise<void>
 
 const masterKey = await boot();
 await loadInferenceKey();
+await loadAgentToken();
 const hnsw = await HnswStore.load(s3, keyring, PROCESSED_OUTPUTS_BUCKET, TENANT_ID);
 const pipeline = new Pipeline(hnsw, s3, keyring, PROCESSED_OUTPUTS_BUCKET, TENANT_ID);
 
 new BoxServer().start();
 
 if (SYNTHESIS_REQUEST_QUEUE_URL) {
-  // One consumer handles both wiki and concept synthesis requests (dispatched by `type`).
+  // One consumer handles both wiki and theme synthesis requests (dispatched by `type`).
   new SynthesisConsumer({
     sqs,
     s3,

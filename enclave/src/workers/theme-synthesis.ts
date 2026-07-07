@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { embedText, generate } from '../inference/phala.js';
 
-export interface ConceptSynthesisRequest {
-  type: 'concept_synthesis';
+export interface ThemeSynthesisRequest {
+  type: 'theme_synthesis';
   requestId: string;
   orgId: string;
   containers: {
@@ -13,8 +13,8 @@ export interface ConceptSynthesisRequest {
   }[];
 }
 
-interface ConceptOut {
-  conceptId: string;
+interface ThemeOut {
+  themeId: string;
   name: string;
   kind: 'topic' | 'ceremony';
   team: string;
@@ -24,12 +24,12 @@ interface ConceptOut {
   factIds: string[];
 }
 
-export interface ConceptSynthesisResult {
-  type: 'concept_synthesis';
+export interface ThemeSynthesisResult {
+  type: 'theme_synthesis';
   requestId: string;
   orgId: string;
-  concepts: ConceptOut[];
-  related: { fromConceptId: string; toConceptId: string; similarity: number }[];
+  themes: ThemeOut[];
+  related: { fromThemeId: string; toThemeId: string; similarity: number }[];
 }
 
 export type DecryptBody = (
@@ -101,7 +101,7 @@ interface Doc {
   vec: number[];
 }
 interface Cluster {
-  conceptId: string;
+  themeId: string;
   kind: 'topic' | 'ceremony';
   team: string;
   members: Doc[];
@@ -111,10 +111,10 @@ interface Cluster {
   importance: number;
 }
 
-export async function synthesizeConcepts(
-  req: ConceptSynthesisRequest,
+export async function synthesizeThemes(
+  req: ThemeSynthesisRequest,
   decryptBody: DecryptBody,
-): Promise<ConceptSynthesisResult> {
+): Promise<ThemeSynthesisResult> {
   const docs: Doc[] = [];
   for (const c of req.containers) {
     if (VENUE_LABELS.has(c.label) || c.factRefs.length < MIN_FACTS) continue;
@@ -147,14 +147,14 @@ export async function synthesizeConcepts(
     cl.importance = importanceFromTags(cl);
   }
 
-  const related: ConceptSynthesisResult['related'] = [];
+  const related: ThemeSynthesisResult['related'] = [];
   for (let i = 0; i < clusters.length; i++) {
     for (let j = i + 1; j < clusters.length; j++) {
       const s = cosine(clusters[i]!.centroid, clusters[j]!.centroid);
       if (s >= RELATE_THRESHOLD) {
         related.push({
-          fromConceptId: clusters[i]!.conceptId,
-          toConceptId: clusters[j]!.conceptId,
+          fromThemeId: clusters[i]!.themeId,
+          toThemeId: clusters[j]!.themeId,
           similarity: s,
         });
       }
@@ -162,11 +162,11 @@ export async function synthesizeConcepts(
   }
 
   return {
-    type: 'concept_synthesis',
+    type: 'theme_synthesis',
     requestId: req.requestId,
     orgId: req.orgId,
-    concepts: clusters.map((cl) => ({
-      conceptId: cl.conceptId,
+    themes: clusters.map((cl) => ({
+      themeId: cl.themeId,
       name: cl.name,
       kind: cl.kind,
       team: cl.team,
@@ -209,9 +209,9 @@ function clusterDocs(orgId: string, docs: Doc[]): Cluster[] {
 
 function newCluster(orgId: string, kind: Cluster['kind'], seed: Doc, key: string): Cluster {
   const h = createHash('sha256').update(`${orgId}:${key}`).digest('hex');
-  const conceptId = `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+  const themeId = `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
   return {
-    conceptId,
+    themeId,
     kind,
     team: seed.team,
     members: [seed],
