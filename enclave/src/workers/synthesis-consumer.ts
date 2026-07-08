@@ -32,6 +32,7 @@ interface SynthesisResult {
   themeId: string;
   orgId: string;
   articles: { audienceId: string | null; content: string; factCount: number }[];
+  citedFactIds: string[];
 }
 
 const SYSTEM_PROMPT =
@@ -119,18 +120,19 @@ export class SynthesisConsumer {
       .map((r) => `- ${r.name} (similarity: ${r.similarity.toFixed(2)})`)
       .join('\n');
 
-    const factLines = req.factRefs
-      .slice(0, MAX_FACT_REFS)
-      .map((ref, i) => {
-        const body = bodies[i];
-        if (!body) return null;
-        const when = ref.occurredAt.slice(0, 10);
-        return `- [${when}] (${ref.kind}) ${body.slice(0, 280)}`;
-      })
-      .filter((l): l is string => l !== null)
-      .join('\n');
-
-    const factCount = bodies.filter(Boolean).length;
+    const cited: { factId: string; line: string }[] = [];
+    req.factRefs.slice(0, MAX_FACT_REFS).forEach((ref, i) => {
+      const body = bodies[i];
+      if (!body) return;
+      const when = ref.occurredAt.slice(0, 10);
+      cited.push({
+        factId: ref.factId,
+        line: `- [${cited.length + 1}] [${when}] (${ref.kind}) ${body.slice(0, 280)}`,
+      });
+    });
+    const factLines = cited.map((c) => c.line).join('\n');
+    const citedFactIds = cited.map((c) => c.factId);
+    const factCount = cited.length;
 
     const articles = await Promise.all(
       req.audiences.map(async (audience) => {
@@ -147,9 +149,10 @@ export class SynthesisConsumer {
           '## Summary — 2-3 sentences: what this is and why it matters.',
           '## How it works — synthesized explanation (mechanisms, components, behavior), by theme, not a timeline.',
           '## Current state — where this stands now (done / in progress / known issues), if evident.',
-          '## Sources — bullet each source below with its date, as a citation.',
           '',
-          'Source activity to synthesize from (do NOT just replay it chronologically):',
+          'Cite the numbered sources you draw each claim from inline as [n]. Do not add a sources section.',
+          '',
+          'Numbered sources to synthesize from (do NOT just replay them chronologically):',
           factLines || '(none)',
           relatedStr ? `\nRelated topics:\n${relatedStr}` : '',
           '',
@@ -167,6 +170,7 @@ export class SynthesisConsumer {
       themeId: req.themeId,
       orgId: req.orgId,
       articles,
+      citedFactIds,
     };
   }
 
