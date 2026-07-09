@@ -16,6 +16,9 @@ import { HnswStore } from './hnsw/index.js';
 import { BoxServer } from './http/server.js';
 import { SynthesisConsumer } from './workers/synthesis-consumer.js';
 import { runPull, type PullDueMessage } from './pull/pull-runner.js';
+import { HaltGate, HALT_POLL_INTERVAL_MS } from './control/halt-gate.js';
+import { createContainer, type ApiContainer } from '@folklore/api';
+import { RedisCache } from '@folklore/cache';
 
 const REGION = process.env['AWS_REGION']!;
 const TENANT_ID = process.env['TENANT_ID']!;
@@ -35,6 +38,10 @@ const PROXY_PORT = process.env['VSOCK_KMS_PROXY_PORT'] ?? '8000';
 const CONTROL_PLANE_URL = process.env['CONTROL_PLANE_URL'] ?? '';
 const DEPLOYMENT_ID = process.env['DEPLOYMENT_ID'] ?? '';
 const AGENT_TOKEN_SSM_PATH = process.env['AGENT_TOKEN_SSM_PATH'] ?? '';
+// Break-glass halt flag lives in the shared Redis, reached over the in-enclave
+// vsock proxy (ADL #13, #31). Absent only in local/dev runs — then halt gating
+// is skipped, matching the worker's deploymentId-gated behavior.
+const REDIS_URL = process.env['REDIS_URL'] ?? '';
 
 const SEALED_BLOB_KEY = `sealed-keys/${TENANT_ID}/master.blob`;
 const RECOVERY_PHRASE_SSM_PATH = `/folklore/${TENANT_ID}/recovery-phrase`;
@@ -151,14 +158,18 @@ async function loadAgentToken(): Promise<void> {
   }
 }
 
-async function processLoop(masterKey: Buffer, pipeline: Pipeline): Promise<void> {
+async function processLoop(
+  masterKey: Buffer,
+  pipeline: Pipeline,
+  haltGate?: HaltGate,
+): Promise<void> {
   const { privateKey } = deriveIngestKeypair(masterKey);
   console.log('processing loop started', { queue: QUEUE_URL });
 
   let idlePolls = 0;
   let isIdle = false;
 
-  for (;;) {
+  const drainBatch = async (): Promise<void> => {
     const resp = await sqs.send(
       new ReceiveMessageCommand({
         QueueUrl: QUEUE_URL,
@@ -256,6 +267,17 @@ async function processLoop(masterKey: Buffer, pipeline: Pipeline): Promise<void>
         // Leave in queue — visibility timeout retries, DLQ after 3 attempts
       }
     }
+  };
+
+  for (;;) {
+    if (!haltGate) {
+      await drainBatch();
+      continue;
+    }
+    // Gate before any dequeue: a halted box must not receive, decrypt, or
+    // persist. When halted, idle without touching the queue and re-check.
+    const processed = await haltGate.guard(drainBatch);
+    if (!processed) await new Promise((resolve) => setTimeout(resolve, HALT_POLL_INTERVAL_MS));
   }
 }
 
@@ -265,7 +287,31 @@ await loadAgentToken();
 const hnsw = await HnswStore.load(s3, keyring, PROCESSED_OUTPUTS_BUCKET, TENANT_ID);
 const pipeline = new Pipeline(hnsw, s3, keyring, PROCESSED_OUTPUTS_BUCKET, TENANT_ID);
 
-new BoxServer().start();
+let haltCache: RedisCache | undefined;
+let haltGate: HaltGate | undefined;
+if (DEPLOYMENT_ID && REDIS_URL) {
+  haltCache = new RedisCache(REDIS_URL);
+  haltGate = new HaltGate(haltCache, DEPLOYMENT_ID);
+} else {
+  console.warn('HALT_GATE_DISABLED', {
+    deploymentId: Boolean(DEPLOYMENT_ID),
+    redis: Boolean(REDIS_URL),
+  });
+}
+
+// ADL #31: the box API is composed and served in-process. Every /api/* request
+// reads decrypted content over the in-enclave Postgres proxy and never leaves.
+let apiContainer: ApiContainer | undefined;
+try {
+  apiContainer = createContainer();
+  await apiContainer.start();
+} catch (err) {
+  // Degraded, not silent: the SPA still serves but /api/* returns 503 and /health
+  // reports api:unavailable so the outage is observable instead of looking healthy.
+  console.error('BOX_API_DEGRADED', { reason: 'container failed to start', err });
+}
+
+new BoxServer(apiContainer?.app.fetch).start();
 
 if (SYNTHESIS_REQUEST_QUEUE_URL) {
   // One consumer handles both wiki and theme synthesis requests (dispatched by `type`).
@@ -282,10 +328,12 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
 async function shutdown(): Promise<void> {
   console.log('enclave shutting down — saving hnsw index');
   await hnsw.save(s3, keyring, PROCESSED_OUTPUTS_BUCKET, TENANT_ID);
+  if (apiContainer) await apiContainer.close().catch(() => {});
+  if (haltCache) await haltCache.close().catch(() => {});
   process.exit(0);
 }
 
 process.on('SIGTERM', () => void shutdown());
 process.on('SIGINT', () => void shutdown());
 
-void processLoop(masterKey, pipeline);
+void processLoop(masterKey, pipeline, haltGate);
