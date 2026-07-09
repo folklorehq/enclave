@@ -8,7 +8,7 @@
 import type { KeyObject } from 'node:crypto';
 import { GetParameterCommand, PutParameterCommand, type SSMClient } from '@aws-sdk/client-ssm';
 import type { Logger } from '@folklore/core';
-import { github } from '@folklore/connectors';
+import { type Connector, github, intercom, linear, notion, slack } from '@folklore/connectors';
 import type { Pipeline, ProcessedFact } from '../pipeline/index.js';
 import { getDecryptedConnectionForKind } from './source-connections-client.js';
 
@@ -74,12 +74,26 @@ async function saveCursor(
   );
 }
 
-function buildConnector(kind: string, token: string): github.GitHubConnector | null {
+export function buildConnector(kind: string, token: string): Connector | null {
   switch (kind) {
     case 'github':
       return new github.GitHubConnector(
         { logger: consoleLogger },
         new github.OctokitGitHubClient(token),
+      );
+    case 'slack':
+      return new slack.SlackConnector({ logger: consoleLogger }, new slack.HttpSlackClient(token));
+    case 'notion':
+      return new notion.NotionConnector({ logger: consoleLogger }, new notion.NotionClient(token));
+    case 'linear':
+      return new linear.LinearConnector(
+        { logger: consoleLogger },
+        new linear.LinearSdkClient(token),
+      );
+    case 'intercom':
+      return new intercom.IntercomConnector(
+        { logger: consoleLogger },
+        new intercom.IntercomSdkClient(token),
       );
     default:
       return null;
