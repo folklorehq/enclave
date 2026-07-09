@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { cosine, median } from '@folklore/utils';
 import { embedText, generate } from '../inference/phala.js';
 
 export interface ThemeSynthesisRequest {
@@ -291,22 +292,4 @@ function extractJson(raw: string): string {
   const start = raw.indexOf('{');
   const end = raw.lastIndexOf('}');
   return start === -1 || end <= start ? '{}' : raw.slice(start, end + 1);
-}
-
-function median(xs: number[]): number {
-  const s = xs.filter((x) => !Number.isNaN(x)).sort((a, b) => a - b);
-  return s[Math.floor(s.length / 2)] ?? 0;
-}
-
-function cosine(a: number[], b: number[]): number {
-  let d = 0;
-  let na = 0;
-  let nb = 0;
-  const n = Math.min(a.length, b.length);
-  for (let i = 0; i < n; i++) {
-    d += a[i]! * b[i]!;
-    na += a[i]! * a[i]!;
-    nb += b[i]! * b[i]!;
-  }
-  return na && nb ? d / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
 }
