@@ -18,6 +18,7 @@ import { SynthesisConsumer } from './workers/synthesis-consumer.js';
 import { runPull, type PullDueMessage } from './pull/pull-runner.js';
 import { HaltGate, HALT_POLL_INTERVAL_MS } from './control/halt-gate.js';
 import { EnclaveFactRetriever } from './retrieval/fact-retriever.js';
+import { EnclaveWikiContentDecryptor } from './wiki/content-decryptor.js';
 import { createContainer, type ApiContainer } from '@folklore/api';
 import { RedisCache } from '@folklore/cache';
 
@@ -315,6 +316,9 @@ try {
         keyring,
         processedBucket: PROCESSED_OUTPUTS_BUCKET,
       }),
+    // ADL #12: synthesized wiki text is ciphertext at rest; the read path decrypts
+    // audience-visible blocks here, in-enclave, over the sealed key.
+    wikiContentDecryptor: new EnclaveWikiContentDecryptor(keyring),
   });
   await apiContainer.start();
 } catch (err) {

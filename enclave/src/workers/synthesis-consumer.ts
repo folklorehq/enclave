@@ -8,6 +8,7 @@ import type { KmsKeyringNode } from '@aws-crypto/client-node';
 import type { S3Client } from '@aws-sdk/client-s3';
 import type { SQSClient } from '@aws-sdk/client-sqs';
 import { buildArticlePrompt, redactForAudience } from '@folklore/wiki/synthesis';
+import { articleToBlocks, type BlockDraft } from '@folklore/wiki';
 import { EnclaveCrypto } from '../crypto/esdk.js';
 import { generate } from '../inference/phala.js';
 import {
@@ -29,12 +30,37 @@ export interface SynthesisRequest {
   audiences: { id: string | null; name: string; publicEligible: boolean }[];
 }
 
+// ESDK ciphertext (base64) bound to the block's (org, theme, audience, type). The
+// worker persists this verbatim into `wiki_blocks.body`; only the in-enclave API
+// decrypts it (ADL #12). `sourceKinds` is filled in the worker from `factIds`, so
+// the audience gate keeps running on cleartext metadata.
+const WIKI_CONTENT_FORMAT = 'esdk-v1';
+
+interface EncryptedBody {
+  format: typeof WIKI_CONTENT_FORMAT;
+  ciphertext: string;
+}
+
+interface EmittedBlock {
+  type: string;
+  sensitivityLevel: BlockDraft['sensitivityLevel'];
+  audienceId: string | null;
+  factIds: string[];
+  body: EncryptedBody;
+}
+
 interface SynthesisResult {
   type: 'wiki_synthesis';
   requestId: string;
   themeId: string;
   orgId: string;
-  articles: { audienceId: string | null; content: string; factCount: number }[];
+  articles: {
+    audienceId: string | null;
+    content: string;
+    contentFormat: typeof WIKI_CONTENT_FORMAT | 'plaintext';
+    factCount: number;
+  }[];
+  blocks: EmittedBlock[];
   citedFactIds: string[];
 }
 
@@ -137,8 +163,9 @@ export class SynthesisConsumer {
 
     // One body per audience off the SAME fact spine (ADL #51): the theme type picks the
     // section skeleton (ADR / postmortem / runbook / …), the audience projects it, and a
-    // public body is hard-redacted before it leaves the enclave (ADL #28).
-    const articles = await Promise.all(
+    // public body is hard-redacted before it leaves the enclave (ADL #28). Each drafted
+    // body is then ESDK-encrypted (ADL #12) before it leaves the enclave.
+    const drafted = await Promise.all(
       req.audiences.map(async (audience) => {
         const { system, prompt } = buildArticlePrompt({
           themeType: req.themeType,
@@ -150,9 +177,19 @@ export class SynthesisConsumer {
 
         const generated = (await generate(prompt, system).catch(() => '')).trim();
         const content = redactForAudience(generated, audience.publicEligible, internalNames).text;
-        return { audienceId: audience.id, content, factCount };
+        return { audienceId: audience.id, content };
       }),
     );
+
+    const articles = await Promise.all(
+      drafted.map((d) => this.encryptArticle(req, d.audienceId, d.content, factCount)),
+    );
+
+    const blocks = (
+      await Promise.all(
+        drafted.map((d) => this.encryptBlocks(req, d.audienceId, d.content, citedFactIds)),
+      )
+    ).flat();
 
     return {
       type: 'wiki_synthesis',
@@ -160,8 +197,64 @@ export class SynthesisConsumer {
       themeId: req.themeId,
       orgId: req.orgId,
       articles,
+      blocks,
       citedFactIds,
     };
+  }
+
+  private async encryptArticle(
+    req: SynthesisRequest,
+    audienceId: string | null,
+    content: string,
+    factCount: number,
+  ): Promise<SynthesisResult['articles'][number]> {
+    if (!content) {
+      return { audienceId, content: '', contentFormat: 'plaintext', factCount };
+    }
+    const ciphertext = await this.crypto.encryptWikiArticle(Buffer.from(content, 'utf8'), {
+      orgId: req.orgId,
+      themeId: req.themeId,
+      audienceId,
+    });
+    return {
+      audienceId,
+      content: ciphertext.toString('base64'),
+      contentFormat: WIKI_CONTENT_FORMAT,
+      factCount,
+    };
+  }
+
+  // The article is parsed into blocks in-enclave (the worker never sees prose);
+  // each block body is encrypted, bound to its (org, theme, audience, type). Source
+  // kinds are left to the worker to fill from `factIds` so the read gate stays on
+  // cleartext metadata.
+  private async encryptBlocks(
+    req: SynthesisRequest,
+    audienceId: string | null,
+    content: string,
+    citedFactIds: string[],
+  ): Promise<EmittedBlock[]> {
+    if (!content) return [];
+    const drafts = articleToBlocks(content, {
+      citedFactIds,
+      relatedThemes: req.relatedThemes.map((r) => ({ themeId: r.themeId, name: r.name })),
+      factSources: new Map(),
+    });
+    return Promise.all(
+      drafts.map(async (draft) => {
+        const ciphertext = await this.crypto.encryptWikiBlock(
+          Buffer.from(JSON.stringify(draft.body), 'utf8'),
+          { orgId: req.orgId, themeId: req.themeId, audienceId, blockType: draft.type },
+        );
+        return {
+          type: draft.type,
+          sensitivityLevel: draft.sensitivityLevel,
+          audienceId,
+          factIds: draft.provenance.factIds ?? [],
+          body: { format: WIKI_CONTENT_FORMAT, ciphertext: ciphertext.toString('base64') },
+        };
+      }),
+    );
   }
 
   private async decryptBody(
