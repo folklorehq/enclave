@@ -7,6 +7,7 @@ import {
 import type { KmsKeyringNode } from '@aws-crypto/client-node';
 import type { S3Client } from '@aws-sdk/client-s3';
 import type { SQSClient } from '@aws-sdk/client-sqs';
+import { buildArticlePrompt, redactForAudience } from '@folklore/wiki/synthesis';
 import { EnclaveCrypto } from '../crypto/esdk.js';
 import { generate } from '../inference/phala.js';
 import {
@@ -20,10 +21,12 @@ export interface SynthesisRequest {
   themeId: string;
   orgId: string;
   themeName: string;
+  themeType: string;
+  parentThemeCount: number;
   factRefs: { factId: string; s3Key: string; occurredAt: string; kind: string; score: number }[];
   relatedThemes: { themeId: string; name: string; similarity: number }[];
   contributorCount: number;
-  audiences: { id: string | null; name: string }[];
+  audiences: { id: string | null; name: string; publicEligible: boolean }[];
 }
 
 interface SynthesisResult {
@@ -34,12 +37,6 @@ interface SynthesisResult {
   articles: { audienceId: string | null; content: string; factCount: number }[];
   citedFactIds: string[];
 }
-
-const SYSTEM_PROMPT =
-  'You are a staff engineer writing a durable internal wiki page a teammate reads to understand a ' +
-  'topic — not a changelog. Synthesize the source activity into knowledge: what this is and why it ' +
-  'matters, how it works or what changed, and its current state. Organize by theme, never by date. ' +
-  'Ground every claim in the provided sources; do not speculate beyond them. Use GitHub-flavored Markdown.';
 
 const MAX_FACT_REFS = 30;
 
@@ -109,13 +106,17 @@ export class SynthesisConsumer {
   }
 
   private async synthesize(req: SynthesisRequest): Promise<SynthesisResult> {
-    const bodies = await Promise.all(
+    const records = await Promise.all(
       req.factRefs
         .slice(0, MAX_FACT_REFS)
-        .map((ref) => this.decryptBody(ref.s3Key, { factId: ref.factId, orgId: req.orgId })),
+        .map((ref) => this.decryptFactRecord(ref.s3Key, { factId: ref.factId, orgId: req.orgId })),
     );
+    const bodies = records.map((r) => r.body);
+    // Contributor/system names decrypted here for synthesis double as the redaction
+    // deny-list — a prompt cannot be trusted to keep them out of a public body (ADL #28).
+    const internalNames = [...new Set(records.flatMap((r) => r.names))];
 
-    const relatedStr = req.relatedThemes
+    const relatedLines = req.relatedThemes
       .slice(0, 5)
       .map((r) => `- ${r.name} (similarity: ${r.similarity.toFixed(2)})`)
       .join('\n');
@@ -134,33 +135,22 @@ export class SynthesisConsumer {
     const citedFactIds = cited.map((c) => c.factId);
     const factCount = cited.length;
 
+    // One body per audience off the SAME fact spine (ADL #51): the theme type picks the
+    // section skeleton (ADR / postmortem / runbook / …), the audience projects it, and a
+    // public body is hard-redacted before it leaves the enclave (ADL #28).
     const articles = await Promise.all(
       req.audiences.map(async (audience) => {
-        const audienceNote =
-          audience.id === null
-            ? 'General — for anyone in the org; explain plainly.'
-            : `For the "${audience.name}" audience — outcomes and impact, concise, minimal code detail.`;
+        const { system, prompt } = buildArticlePrompt({
+          themeType: req.themeType,
+          themeName: req.themeName,
+          audience,
+          factLines,
+          relatedLines,
+        });
 
-        const prompt = [
-          `Topic: ${req.themeName}`,
-          `Audience: ${audienceNote}`,
-          '',
-          'Write a wiki page with these sections:',
-          '## Summary — 2-3 sentences: what this is and why it matters.',
-          '## How it works — synthesized explanation (mechanisms, components, behavior), by theme, not a timeline.',
-          '## Current state — where this stands now (done / in progress / known issues), if evident.',
-          '',
-          'Cite the numbered sources you draw each claim from inline as [n]. Do not add a sources section.',
-          '',
-          'Numbered sources to synthesize from (do NOT just replay them chronologically):',
-          factLines || '(none)',
-          relatedStr ? `\nRelated topics:\n${relatedStr}` : '',
-          '',
-          'Write the page now — synthesize into knowledge, organized by theme.',
-        ].join('\n');
-
-        const content = await generate(prompt, SYSTEM_PROMPT).catch(() => '');
-        return { audienceId: audience.id, content: content.trim(), factCount };
+        const generated = (await generate(prompt, system).catch(() => '')).trim();
+        const content = redactForAudience(generated, audience.publicEligible, internalNames).text;
+        return { audienceId: audience.id, content, factCount };
       }),
     );
 
@@ -178,6 +168,13 @@ export class SynthesisConsumer {
     s3Key: string,
     ref: { factId: string; orgId: string },
   ): Promise<string | null> {
+    return (await this.decryptFactRecord(s3Key, ref)).body;
+  }
+
+  private async decryptFactRecord(
+    s3Key: string,
+    ref: { factId: string; orgId: string },
+  ): Promise<{ body: string | null; names: string[] }> {
     try {
       const obj = await this.deps.s3.send(
         new GetObjectCommand({ Bucket: this.deps.processedBucket, Key: s3Key }),
@@ -189,13 +186,22 @@ export class SynthesisConsumer {
       const fact = JSON.parse(plaintext.toString('utf8')) as Record<string, unknown>;
       const content = fact['content'] as Record<string, unknown> | undefined;
       const transition = fact['transition'] as Record<string, unknown> | undefined;
-      return (
+      const body =
         (content?.['body'] as string | undefined) ??
         (transition?.['transitionType'] as string | undefined) ??
-        null
-      );
+        null;
+      return { body, names: this.actorNames(fact['authors']) };
     } catch {
-      return null;
+      return { body: null, names: [] };
     }
+  }
+
+  private actorNames(authors: unknown): string[] {
+    if (!Array.isArray(authors)) return [];
+    return authors
+      .map((a) =>
+        a && typeof a === 'object' ? (a as Record<string, unknown>)['displayName'] : undefined,
+      )
+      .filter((n): n is string => typeof n === 'string' && n.trim().length > 0);
   }
 }
