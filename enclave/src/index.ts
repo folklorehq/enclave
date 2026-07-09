@@ -17,6 +17,7 @@ import { BoxServer } from './http/server.js';
 import { SynthesisConsumer } from './workers/synthesis-consumer.js';
 import { runPull, type PullDueMessage } from './pull/pull-runner.js';
 import { HaltGate, HALT_POLL_INTERVAL_MS } from './control/halt-gate.js';
+import { EnclaveFactRetriever } from './retrieval/fact-retriever.js';
 import { createContainer, type ApiContainer } from '@folklore/api';
 import { RedisCache } from '@folklore/cache';
 
@@ -303,7 +304,18 @@ if (DEPLOYMENT_ID && REDIS_URL) {
 // reads decrypted content over the in-enclave Postgres proxy and never leaves.
 let apiContainer: ApiContainer | undefined;
 try {
-  apiContainer = createContainer();
+  // ADL #34/#6: search + wiki/recommend are served by the in-enclave retriever —
+  // embed, ANN over the loaded index, decrypt, and audience-gate, all in-process.
+  apiContainer = createContainer({
+    retrieverFactory: (retrieverDeps) =>
+      new EnclaveFactRetriever({
+        ...retrieverDeps,
+        hnsw,
+        s3,
+        keyring,
+        processedBucket: PROCESSED_OUTPUTS_BUCKET,
+      }),
+  });
   await apiContainer.start();
 } catch (err) {
   // Degraded, not silent: the SPA still serves but /api/* returns 503 and /health

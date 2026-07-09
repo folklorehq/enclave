@@ -124,6 +124,13 @@ export class HnswStore {
     this.insertsSinceSave++;
   }
 
+  // Org-guarded query surface: this store only ever answers for the org it was
+  // loaded for, so one tenant's index can never be searched under another's id.
+  query(orgId: string, queryVec: number[], k: number): { factId: string; distance: number }[] {
+    if (orgId !== this.orgId) return [];
+    return this.search(queryVec, k);
+  }
+
   search(queryVec: number[], k: number): { factId: string; distance: number }[] {
     const currentCount: number = this.index.getCurrentCount();
     if (currentCount === 0) return [];
