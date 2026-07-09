@@ -18,6 +18,7 @@ import {
 } from './theme-synthesis.js';
 
 export interface SynthesisRequest {
+  type: 'wiki_synthesis';
   requestId: string;
   themeId: string;
   orgId: string;
@@ -99,13 +100,11 @@ export class SynthesisConsumer {
         for (const msg of resp.Messages ?? []) {
           if (!msg.Body || !msg.ReceiptHandle) continue;
           try {
-            const raw = JSON.parse(msg.Body) as { type?: string };
+            const raw = JSON.parse(msg.Body) as SynthesisRequest | ThemeSynthesisRequest;
             const result: SynthesisResult | ThemeSynthesisResult =
               raw.type === 'theme_synthesis'
-                ? await synthesizeThemes(raw as ThemeSynthesisRequest, (s3Key, ref) =>
-                    this.decryptBody(s3Key, ref),
-                  )
-                : await this.synthesize(raw as unknown as SynthesisRequest);
+                ? await synthesizeThemes(raw, (s3Key, ref) => this.decryptBody(s3Key, ref))
+                : await this.synthesize(raw);
             await this.deps.sqs.send(
               new SendMessageCommand({
                 QueueUrl: this.deps.processedQueueUrl,
