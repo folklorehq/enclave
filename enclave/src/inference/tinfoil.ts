@@ -1,4 +1,5 @@
 import { request } from 'node:http';
+import { EMBED_DIM } from './phala.js';
 
 const PORT = process.env['TINFOIL_PORT'];
 
@@ -35,7 +36,7 @@ function httpPost(port: string, path: string, body: unknown): Promise<unknown> {
 }
 
 export async function embedText(text: string): Promise<number[]> {
-  if (!PORT) return new Array(768).fill(0) as number[];
+  if (!PORT) return new Array(EMBED_DIM).fill(0) as number[];
   const res = (await httpPost(PORT, '/embed', { text })) as { embedding: number[] };
   return res.embedding;
 }

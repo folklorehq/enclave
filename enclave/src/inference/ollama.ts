@@ -1,4 +1,5 @@
 import { request } from 'node:http';
+import { EMBED_DIM } from './phala.js';
 
 const HOST = process.env['OLLAMA_HOST'] ?? '';
 
@@ -39,7 +40,7 @@ const EMBED_MODEL = 'nomic-embed-text';
 const GENERATE_MODEL = process.env['OLLAMA_MODEL'] ?? 'llama3.2:3b';
 
 export async function embedText(text: string): Promise<number[]> {
-  if (!HOST) return new Array(768).fill(0) as number[];
+  if (!HOST) return new Array(EMBED_DIM).fill(0) as number[];
   const res = (await httpPost(HOST, '/api/embeddings', {
     model: EMBED_MODEL,
     prompt: text,

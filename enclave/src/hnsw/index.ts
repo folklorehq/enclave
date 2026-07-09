@@ -2,6 +2,7 @@ import { buildClient, CommitmentPolicy, type KmsKeyringNode } from '@aws-crypto/
 import { GetObjectCommand, PutObjectCommand, type S3Client } from '@aws-sdk/client-s3';
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
+import { EMBED_DIM } from '../inference/phala.js';
 
 const { encrypt, decrypt } = buildClient(CommitmentPolicy.REQUIRE_ENCRYPT_REQUIRE_DECRYPT);
 
@@ -21,7 +22,6 @@ async function getHnswClass(): Promise<HierarchicalNSW> {
   return _HierarchicalNSW;
 }
 
-const DIM = 768;
 const INITIAL_MAX_ELEMENTS = 10_000;
 const SAVE_INTERVAL = 50;
 const INDEX_S3_KEY = (orgId: string) => `hnsw/${orgId}/index.bin`;
@@ -50,34 +50,60 @@ export class HnswStore {
   ): Promise<HnswStore> {
     const HierarchicalNSW = await getHnswClass();
 
-    const index = new HierarchicalNSW('cosine', DIM);
-    const store = new HnswStore(index, orgId);
+    const store = new HnswStore(new HierarchicalNSW('cosine', EMBED_DIM), orgId);
 
     const indexBlob = await downloadBlob(s3, keyring, bucket, INDEX_S3_KEY(orgId));
     const labelsBlob = await downloadBlob(s3, keyring, bucket, LABELS_S3_KEY(orgId));
 
-    if (indexBlob && labelsBlob) {
-      writeFileSync(TMP_INDEX(orgId), indexBlob);
-
-      index.readIndex(TMP_INDEX(orgId), INITIAL_MAX_ELEMENTS);
-      unlinkSync(TMP_INDEX(orgId));
-
-      const labels = JSON.parse(labelsBlob.toString('utf8')) as {
-        labelToFactId: [number, string][];
-        nextLabel: number;
-      };
-      store.labelToFactId = new Map(labels.labelToFactId);
-      for (const [label, factId] of store.labelToFactId) {
-        store.factIdToLabel.set(factId, label);
-      }
-      store.nextLabel = labels.nextLabel;
+    if (indexBlob && labelsBlob && (await store.restorePersisted(indexBlob, labelsBlob, orgId))) {
       console.log('hnsw loaded', { orgId, elements: store.labelToFactId.size });
     } else {
-      index.initIndex(INITIAL_MAX_ELEMENTS);
+      store.index = new HierarchicalNSW('cosine', EMBED_DIM);
+      store.index.initIndex(INITIAL_MAX_ELEMENTS);
       console.log('hnsw initialized (empty)', { orgId });
     }
 
     return store;
+  }
+
+  private async restorePersisted(
+    indexBlob: Buffer,
+    labelsBlob: Buffer,
+    orgId: string,
+  ): Promise<boolean> {
+    writeFileSync(TMP_INDEX(orgId), indexBlob);
+    try {
+      await this.index.readIndex(TMP_INDEX(orgId), INITIAL_MAX_ELEMENTS);
+    } catch (err) {
+      console.warn('hnsw index unreadable — rebuilding empty', {
+        orgId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    } finally {
+      unlinkSync(TMP_INDEX(orgId));
+    }
+
+    const loadedDim: number = this.index.getNumDimensions();
+    if (loadedDim !== EMBED_DIM) {
+      console.warn('hnsw index dimension mismatch — rebuilding empty', {
+        orgId,
+        loadedDim,
+        expected: EMBED_DIM,
+      });
+      return false;
+    }
+
+    const labels = JSON.parse(labelsBlob.toString('utf8')) as {
+      labelToFactId: [number, string][];
+      nextLabel: number;
+    };
+    this.labelToFactId = new Map(labels.labelToFactId);
+    for (const [label, factId] of this.labelToFactId) {
+      this.factIdToLabel.set(factId, label);
+    }
+    this.nextLabel = labels.nextLabel;
+    return true;
   }
 
   insert(factId: string, vector: number[]): void {
