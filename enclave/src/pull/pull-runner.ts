@@ -8,7 +8,16 @@
 import type { KeyObject } from 'node:crypto';
 import { GetParameterCommand, PutParameterCommand, type SSMClient } from '@aws-sdk/client-ssm';
 import type { Logger } from '@folklore/core';
-import { type Connector, github, intercom, linear, notion, slack } from '@folklore/connectors';
+import {
+  type Connector,
+  type PullOptions,
+  type SyncCursor,
+  github,
+  intercom,
+  linear,
+  notion,
+  slack,
+} from '@folklore/connectors';
 import type { Pipeline, ProcessedFact } from '../pipeline/index.js';
 import { getDecryptedConnectionForKind } from './source-connections-client.js';
 
@@ -17,6 +26,27 @@ export interface PullDueMessage {
   tenant_id: string;
   sourceId: string;
   kind: string;
+  backfill: boolean;
+}
+
+// ADL #29: the enclave (not the worker signal) owns the uniform 12-month backfill horizon,
+// so no wire message can widen how far back a pull reaches.
+const BACKFILL_WINDOW_MONTHS = 12;
+
+export interface PullWindow {
+  cursor: SyncCursor;
+  options: PullOptions;
+}
+
+/** Backfill resets the cursor to re-pull from the 12-month window start; otherwise resume from it. */
+export function resolvePullWindow(
+  backfill: boolean,
+  storedCursor: string | null,
+  now: Date = new Date(),
+): PullWindow {
+  const since = new Date(now);
+  since.setUTCMonth(since.getUTCMonth() - BACKFILL_WINDOW_MONTHS);
+  return { cursor: { value: backfill ? null : storedCursor }, options: { since } };
 }
 
 export interface PullRunnerDeps {
@@ -123,8 +153,9 @@ export async function runPull(
     return [];
   }
 
-  const cursorValue = await loadCursor(deps.ssm, message.tenant_id, message.sourceId);
-  const result = await connector.pull({ value: cursorValue });
+  const storedCursor = await loadCursor(deps.ssm, message.tenant_id, message.sourceId);
+  const window = resolvePullWindow(message.backfill, storedCursor);
+  const result = await connector.pull(window.cursor, window.options);
 
   await saveCursor(deps.ssm, message.tenant_id, message.sourceId, result.cursor.value);
 
