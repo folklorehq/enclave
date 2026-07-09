@@ -20,6 +20,8 @@ const sqs = new SQSClient({});
 
 const QUEUE_URL = process.env['QUEUE_URL']!;
 
+const SIGNABLE_SOURCES = new Set(['github', 'slack', 'linear', 'intercom', 'notion', 'meeting']);
+
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const publicKeyCache = new Map<string, { key: Buffer; expiresAt: number }>();
 const hmacSecretCache = new Map<string, { secret: string | null; expiresAt: number }>();
@@ -39,12 +41,17 @@ async function fetchPublicKey(tenantId: string): Promise<Buffer> {
   return key;
 }
 
-async function fetchHmacSecret(tenantId: string, source: string): Promise<string | null> {
+type SecretLookup =
+  | { status: 'found'; secret: string }
+  | { status: 'absent' }
+  | { status: 'error' };
+
+async function fetchHmacSecret(tenantId: string, source: string): Promise<SecretLookup> {
   const cacheKey = `${tenantId}/${source}`;
   const cached = hmacSecretCache.get(cacheKey);
-  if (cached && Date.now() < cached.expiresAt) return cached.secret;
+  if (cached && Date.now() < cached.expiresAt) return resolveSecret(cached.secret);
 
-  let secret: string | null = null;
+  let secret: string | null;
   try {
     const result = await ssm.send(
       new GetParameterCommand({
@@ -53,12 +60,21 @@ async function fetchHmacSecret(tenantId: string, source: string): Promise<string
       }),
     );
     secret = result.Parameter?.Value ?? null;
-  } catch {
-    // ParameterNotFound or access denied — no secret configured yet
+  } catch (err) {
+    if (!isParameterNotFound(err)) return { status: 'error' };
+    secret = null;
   }
 
   hmacSecretCache.set(cacheKey, { secret, expiresAt: Date.now() + CACHE_TTL_MS });
-  return secret;
+  return resolveSecret(secret);
+}
+
+function resolveSecret(secret: string | null): SecretLookup {
+  return secret === null ? { status: 'absent' } : { status: 'found', secret };
+}
+
+function isParameterNotFound(err: unknown): boolean {
+  return err instanceof Error && err.name === 'ParameterNotFound';
 }
 
 function verifySignature(
@@ -107,9 +123,27 @@ function verifySignature(
       return expected.length === computed.length && timingSafeEqual(expected, computed);
     }
 
+    case 'notion': {
+      // Notion signs with the subscription verification_token, not an app secret.
+      const sig = headers['x-notion-signature'];
+      if (!sig?.startsWith('sha256=')) return false;
+      const expected = Buffer.from(sig.slice(7), 'hex');
+      const computed = createHmac('sha256', secret).update(bodyBuf).digest();
+      return expected.length === computed.length && timingSafeEqual(expected, computed);
+    }
+
+    case 'meeting': {
+      // Fireflies-style HMAC over the raw body (no basestring, unlike Slack).
+      const sig = headers['x-meeting-signature'];
+      if (!sig?.startsWith('sha256=')) return false;
+      const expected = Buffer.from(sig.slice(7), 'hex');
+      const computed = createHmac('sha256', secret).update(bodyBuf).digest();
+      return expected.length === computed.length && timingSafeEqual(expected, computed);
+    }
+
     default:
-      // No known signature scheme for this source — allow through
-      return true;
+      // Fail closed: a source with no known signature scheme is never admitted.
+      return false;
   }
 }
 
@@ -168,17 +202,19 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   const tenantId = event.pathParameters?.['tenant_id'];
   const source = event.pathParameters?.['source'];
   if (!tenantId || !source) return { statusCode: 400 };
+  if (!SIGNABLE_SOURCES.has(source)) return { statusCode: 400 };
 
   const body = event.body ?? '';
 
-  // Verify HMAC signature if a secret is configured for this tenant+source.
-  // Fail-open when no secret exists (connector not yet onboarded);
-  // reject with 401 when a secret is present but the signature is wrong.
-  const hmacSecret = await fetchHmacSecret(tenantId, source);
-  if (hmacSecret !== null) {
-    if (!verifySignature(source, event.headers, body, hmacSecret)) {
-      return { statusCode: 401 };
-    }
+  // Fail closed: a supported source is admitted only when a provisioned secret
+  // verifies the signature. An absent secret or a bad signature is a 401
+  // (forged-event injection guard); a transient SSM error is a 503 so the
+  // provider retries rather than the webhook being dropped (durability).
+  const lookup = await fetchHmacSecret(tenantId, source);
+  if (lookup.status === 'error') return { statusCode: 503 };
+  if (lookup.status === 'absent') return { statusCode: 401 };
+  if (!verifySignature(source, event.headers, body, lookup.secret)) {
+    return { statusCode: 401 };
   }
 
   if (!(await checkRateLimit(tenantId, source))) {

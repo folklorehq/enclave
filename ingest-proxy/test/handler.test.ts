@@ -60,8 +60,16 @@ function intercomSig(body: string, secret: string) {
   return 'sha1=' + createHmac('sha1', secret).update(body).digest('hex');
 }
 
+function notionSig(body: string, secret: string) {
+  return 'sha256=' + createHmac('sha256', secret).update(body).digest('hex');
+}
+
+function meetingSig(body: string, secret: string) {
+  return 'sha256=' + createHmac('sha256', secret).update(body).digest('hex');
+}
+
 beforeAll(() => {
-  // Default: public key lookup succeeds, HMAC secret lookup throws (fail-open)
+  // Default: public key lookup succeeds, HMAC secret lookup throws (no secret provisioned)
   mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
     if (cmd.Name?.endsWith('/ingest-public-key')) {
       return { Parameter: { Value: testPubHex } };
@@ -211,20 +219,160 @@ describe('HMAC signature verification — Intercom', () => {
   });
 });
 
-describe('fail-open when no secret configured', () => {
-  it('returns 200 and sends to SQS when ParameterNotFound for secret', async () => {
-    const event = makeEvent('tenant-fo', 'notion', JSON.stringify({ type: 'page.created' }), {});
+describe('HMAC signature verification — Notion', () => {
+  const tid = 'tenant-no';
+  const body = JSON.stringify({ type: 'page.created', page: { id: 'p1' } });
+
+  it('returns 200 when sha256 signature is valid', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name?.includes('/webhook-secrets/notion'))
+        return { Parameter: { Value: TEST_SECRET } };
+      throw new Error('ParameterNotFound');
+    });
+
+    const event = makeEvent(tid, 'notion', body, {
+      'x-notion-signature': notionSig(body, TEST_SECRET),
+    });
     const result = await handler(event as never, {} as never, vi.fn());
     expect(result).toMatchObject({ statusCode: 200 });
-    expect(mockSqsSend).toHaveBeenCalledOnce();
+  });
+
+  it('returns 401 when signature is wrong', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name?.includes('/webhook-secrets/notion'))
+        return { Parameter: { Value: TEST_SECRET } };
+      throw new Error('ParameterNotFound');
+    });
+
+    const event = makeEvent(tid, 'notion', body, {
+      'x-notion-signature': notionSig(body, 'wrong-secret'),
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+  });
+
+  it('returns 401 (fail closed) when no secret is configured', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      throw Object.assign(new Error('ParameterNotFound'), { name: 'ParameterNotFound' });
+    });
+
+    const event = makeEvent('tenant-no-open', 'notion', body, {
+      'x-notion-signature': notionSig(body, TEST_SECRET),
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+});
+
+describe('HMAC signature verification — Meeting', () => {
+  const tid = 'tenant-me';
+  const body = JSON.stringify({ meetingId: 'm1', title: 'Standup' });
+
+  it('returns 200 when sha256 signature is valid', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name?.includes('/webhook-secrets/meeting'))
+        return { Parameter: { Value: TEST_SECRET } };
+      throw new Error('ParameterNotFound');
+    });
+
+    const event = makeEvent(tid, 'meeting', body, {
+      'x-meeting-event': 'fireflies_complete',
+      'x-meeting-signature': meetingSig(body, TEST_SECRET),
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 200 });
+  });
+
+  it('returns 401 when signature is wrong', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name?.includes('/webhook-secrets/meeting'))
+        return { Parameter: { Value: TEST_SECRET } };
+      throw new Error('ParameterNotFound');
+    });
+
+    const event = makeEvent(tid, 'meeting', body, {
+      'x-meeting-event': 'fireflies_complete',
+      'x-meeting-signature': meetingSig(body, 'wrong-secret'),
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+  });
+
+  it('returns 401 (fail closed) when no secret is configured', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      throw Object.assign(new Error('ParameterNotFound'), { name: 'ParameterNotFound' });
+    });
+
+    const event = makeEvent('tenant-me-open', 'meeting', body, {
+      'x-meeting-event': 'fireflies_complete',
+      'x-meeting-signature': meetingSig(body, TEST_SECRET),
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+});
+
+describe('fail closed when no secret configured', () => {
+  it('returns 401 and does not send to SQS when ParameterNotFound for secret', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      throw Object.assign(new Error('ParameterNotFound'), { name: 'ParameterNotFound' });
+    });
+
+    const event = makeEvent('tenant-fo', 'notion', JSON.stringify({ type: 'page.created' }), {});
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+});
+
+describe('unknown source rejection', () => {
+  it('returns 400 for an unsupported source before any crypto work', async () => {
+    const event = makeEvent('tenant-unk', 'pagerduty', JSON.stringify({ type: 'incident' }), {});
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 400 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+});
+
+describe('transient SSM error on secret lookup', () => {
+  it('returns 503 (retryable), not 401 or 200, and does not send to SQS', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      throw Object.assign(new Error('rate exceeded'), { name: 'ThrottlingException' });
+    });
+
+    const body = JSON.stringify({ type: 'page.created' });
+    const event = makeEvent('tenant-transient', 'notion', body, {
+      'x-notion-signature': notionSig(body, TEST_SECRET),
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 503 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
   });
 });
 
 describe('SQS message shape', () => {
   it('sends message with correct tenant, source, and encrypted fields', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name?.includes('/webhook-secrets/github'))
+        return { Parameter: { Value: TEST_SECRET } };
+      throw new Error('ParameterNotFound');
+    });
+
     const body = JSON.stringify({ action: 'push' });
     const event = makeEvent('tenant-shape', 'github', body, {
       'x-github-event': 'push',
+      'x-hub-signature-256': githubSig(body, TEST_SECRET),
     });
     await handler(event as never, {} as never, vi.fn());
 
@@ -245,15 +393,19 @@ describe('SQS message shape', () => {
 
 describe('event type extraction', () => {
   beforeEach(() => {
-    // HMAC tests override mockSsmSend; restore fail-open behavior for event-type tests
     mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
       if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
-      throw Object.assign(new Error('ParameterNotFound'), { name: 'ParameterNotFound' });
+      if (cmd.Name?.includes('/webhook-secrets/')) return { Parameter: { Value: TEST_SECRET } };
+      throw new Error('ParameterNotFound');
     });
   });
 
   it('extracts github event type from x-github-event header', async () => {
-    const event = makeEvent('tenant-et1', 'github', '{}', { 'x-github-event': 'issues' });
+    const body = '{}';
+    const event = makeEvent('tenant-et1', 'github', body, {
+      'x-github-event': 'issues',
+      'x-hub-signature-256': githubSig(body, TEST_SECRET),
+    });
     await handler(event as never, {} as never, vi.fn());
     const msg = mockSqsSend.mock.calls[0]![0] as Record<string, unknown>;
     const payload = JSON.parse(msg['MessageBody'] as string) as Record<string, string>;
@@ -262,7 +414,11 @@ describe('event type extraction', () => {
 
   it('extracts slack event type from JSON body', async () => {
     const body = JSON.stringify({ type: 'app_mention' });
-    const event = makeEvent('tenant-et2', 'slack', body, {});
+    const ts = String(Math.floor(Date.now() / 1000));
+    const event = makeEvent('tenant-et2', 'slack', body, {
+      'x-slack-signature': slackSig(body, TEST_SECRET, ts),
+      'x-slack-request-timestamp': ts,
+    });
     await handler(event as never, {} as never, vi.fn());
     const msg = mockSqsSend.mock.calls[0]![0] as Record<string, unknown>;
     const payload = JSON.parse(msg['MessageBody'] as string) as Record<string, string>;
@@ -270,8 +426,10 @@ describe('event type extraction', () => {
   });
 
   it('extracts intercom event type from x-intercom-topic header', async () => {
-    const event = makeEvent('tenant-et3', 'intercom', '{}', {
+    const body = '{}';
+    const event = makeEvent('tenant-et3', 'intercom', body, {
       'x-intercom-topic': 'conversation.user.replied',
+      'x-hub-signature': intercomSig(body, TEST_SECRET),
     });
     await handler(event as never, {} as never, vi.fn());
     const msg = mockSqsSend.mock.calls[0]![0] as Record<string, unknown>;
