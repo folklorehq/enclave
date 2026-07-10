@@ -19,7 +19,10 @@ import {
   slack,
 } from '@folklore/connectors';
 import type { Pipeline, ProcessedFact } from '../pipeline/index.js';
-import { getDecryptedConnectionForKind } from './source-connections-client.js';
+import {
+  getDecryptedConnectionForKind,
+  type DecryptedSourceConnection,
+} from './source-connections-client.js';
 
 export interface PullDueMessage {
   type: 'pull-due';
@@ -32,6 +35,11 @@ export interface PullDueMessage {
 // ADL #29: the enclave (not the worker signal) owns the uniform 12-month backfill horizon,
 // so no wire message can widen how far back a pull reaches.
 const BACKFILL_WINDOW_MONTHS = 12;
+
+// The GitHub App id + private key are Folklore-held credentials read at runtime (ADL #35);
+// only the SSM paths appear in this public-mirrored source, never the key material.
+const GITHUB_APP_ID_SSM_PATH = '/folklore/github-app/app-id';
+const GITHUB_APP_PRIVATE_KEY_SSM_PATH = '/folklore/github-app/private-key';
 
 export interface PullWindow {
   cursor: SyncCursor;
@@ -104,6 +112,41 @@ async function saveCursor(
   );
 }
 
+async function getRequiredParameter(
+  ssm: SSMClient,
+  name: string,
+  withDecryption: boolean,
+): Promise<string> {
+  const resp = await ssm.send(
+    new GetParameterCommand({ Name: name, WithDecryption: withDecryption }),
+  );
+  const value = resp.Parameter?.Value;
+  if (!value) throw new Error(`missing SSM parameter ${name}`);
+  return value;
+}
+
+async function loadGitHubAppCredentials(ssm: SSMClient): Promise<github.GitHubAppCredentials> {
+  const [appId, privateKey] = await Promise.all([
+    getRequiredParameter(ssm, GITHUB_APP_ID_SSM_PATH, false),
+    getRequiredParameter(ssm, GITHUB_APP_PRIVATE_KEY_SSM_PATH, true),
+  ]);
+  return { appId, privateKey };
+}
+
+// GitHub is a GitHub App: the stored connection is the installation id, so mint a
+// short-lived installation token here rather than treating it as a bearer token.
+export async function resolveSourceToken(
+  kind: string,
+  connection: DecryptedSourceConnection,
+  ssm: SSMClient,
+): Promise<string> {
+  if (kind === 'github') {
+    const credentials = await loadGitHubAppCredentials(ssm);
+    return github.mintInstallationToken(credentials, connection.accessToken);
+  }
+  return connection.accessToken;
+}
+
 export function buildConnector(kind: string, token: string): Connector | null {
   switch (kind) {
     case 'github':
@@ -147,7 +190,8 @@ export async function runPull(
     return [];
   }
 
-  const connector = buildConnector(message.kind, connection.accessToken);
+  const token = await resolveSourceToken(message.kind, connection, deps.ssm);
+  const connector = buildConnector(message.kind, token);
   if (!connector) {
     console.warn('pull-due: no connector implementation for kind', message.kind);
     return [];
