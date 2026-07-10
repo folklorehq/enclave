@@ -8,7 +8,13 @@ import type { KmsKeyringNode } from '@aws-crypto/client-node';
 import type { S3Client } from '@aws-sdk/client-s3';
 import type { SQSClient } from '@aws-sdk/client-sqs';
 import { buildArticlePrompt, redactForAudience } from '@folklore/wiki/synthesis';
-import { articleToBlocks, type BlockDraft } from '@folklore/wiki';
+import {
+  articleToBlocks,
+  enrichEmbedDrafts,
+  type BlockDraft,
+  type LinkPreviewFetcher,
+} from '@folklore/wiki';
+import type { LinkPreview } from '@folklore/contracts';
 import { EnclaveCrypto } from '../crypto/esdk.js';
 import { generate } from '../inference/phala.js';
 import {
@@ -74,6 +80,13 @@ export interface SynthesisConsumerDeps {
   processedBucket: string;
   synthesisQueueUrl: string;
   processedQueueUrl: string;
+  // Egress-proxy link-preview fetch (ADL #54); absent in local/dev — embeds stay bare.
+  previewFetcher?: LinkPreviewFetcher;
+}
+
+interface EmbedEnrichment {
+  fetchPreview: LinkPreviewFetcher;
+  redactNames: string[];
 }
 
 export class SynthesisConsumer {
@@ -176,7 +189,7 @@ export class SynthesisConsumer {
 
         const generated = (await generate(prompt, system).catch(() => '')).trim();
         const content = redactForAudience(generated, audience.publicEligible, internalNames).text;
-        return { audienceId: audience.id, content };
+        return { audienceId: audience.id, content, publicEligible: audience.publicEligible };
       }),
     );
 
@@ -184,9 +197,15 @@ export class SynthesisConsumer {
       drafted.map((d) => this.encryptArticle(req, d.audienceId, d.content, factCount)),
     );
 
+    const fetchPreview = this.memoizedPreviewFetcher();
     const blocks = (
       await Promise.all(
-        drafted.map((d) => this.encryptBlocks(req, d.audienceId, d.content, citedFactIds)),
+        drafted.map((d) =>
+          this.encryptBlocks(req, d.audienceId, d.content, citedFactIds, {
+            fetchPreview,
+            redactNames: d.publicEligible ? internalNames : [],
+          }),
+        ),
       )
     ).flat();
 
@@ -198,6 +217,17 @@ export class SynthesisConsumer {
       articles,
       blocks,
       citedFactIds,
+    };
+  }
+
+  private memoizedPreviewFetcher(): LinkPreviewFetcher {
+    const cache = new Map<string, LinkPreview | null>();
+    const fetcher = this.deps.previewFetcher;
+    return async (url) => {
+      if (cache.has(url)) return cache.get(url) ?? null;
+      const result = fetcher ? await fetcher(url) : null;
+      cache.set(url, result);
+      return result;
     };
   }
 
@@ -232,6 +262,7 @@ export class SynthesisConsumer {
     audienceId: string | null,
     content: string,
     citedFactIds: string[],
+    enrichment: EmbedEnrichment,
   ): Promise<EmittedBlock[]> {
     if (!content) return [];
     const drafts = articleToBlocks(content, {
@@ -239,8 +270,11 @@ export class SynthesisConsumer {
       relatedThemes: req.relatedThemes.map((r) => ({ themeId: r.themeId, name: r.name })),
       factSources: new Map(),
     });
+    const enriched = await enrichEmbedDrafts(drafts, enrichment.fetchPreview, {
+      names: enrichment.redactNames,
+    });
     return Promise.all(
-      drafts.map(async (draft) => {
+      enriched.map(async (draft) => {
         const ciphertext = await this.crypto.encryptWikiBlock(
           Buffer.from(JSON.stringify(draft.body), 'utf8'),
           { orgId: req.orgId, themeId: req.themeId, audienceId, blockType: draft.type },

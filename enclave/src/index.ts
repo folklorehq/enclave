@@ -15,6 +15,7 @@ import { Pipeline } from './pipeline/index.js';
 import { HnswStore } from './hnsw/index.js';
 import { BoxServer } from './http/server.js';
 import { SynthesisConsumer } from './workers/synthesis-consumer.js';
+import { fetchLinkPreview } from './preview/preview-client.js';
 import { runPull, type PullDueMessage } from './pull/pull-runner.js';
 import { HaltGate, HALT_POLL_INTERVAL_MS } from './control/halt-gate.js';
 import { EnclaveFactRetriever } from './retrieval/fact-retriever.js';
@@ -338,6 +339,7 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
     processedBucket: PROCESSED_OUTPUTS_BUCKET,
     synthesisQueueUrl: SYNTHESIS_REQUEST_QUEUE_URL,
     processedQueueUrl: PROCESSED_QUEUE_URL,
+    previewFetcher: fetchLinkPreview,
   }).start();
 }
 
