@@ -148,7 +148,7 @@ function verifySignature(
   }
 }
 
-function deriveAesKey(
+export function deriveAesKey(
   sharedSecret: Buffer,
   ephemeralPubBytes: Buffer,
   recipientPubBytes: Buffer,

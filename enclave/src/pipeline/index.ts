@@ -9,6 +9,9 @@ import {
 import { EnclaveCrypto } from '../crypto/esdk.js';
 import type { HnswStore } from '../hnsw/index.js';
 import type { KmsKeyringNode } from '@aws-crypto/client-node';
+import type { ProcessedFact } from '@folklore/contracts/enclave';
+
+export type { ProcessedFact };
 
 const FILE_PATH_RE = /(?:^|[\s(,])([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_./-]+\.[a-z]{1,6})\b/g;
 const ISSUE_REF_RE = /(?:^|\s)(#\d{1,6})\b/g;
@@ -38,28 +41,6 @@ function extractEntities(text: string): string[] {
       return jira ? `issue:${jira[1]!}` : e;
     })
     .slice(0, MAX_ENTITIES);
-}
-
-export interface ProcessedFact {
-  factId: string;
-  orgId: string;
-  sourceKind: string;
-  sourceFactId: string;
-  occurredAt: string; // ISO8601
-  bodyS3Key: string;
-  bodyHash: string;
-  kind: 'content' | 'transition';
-  containerRefs: string[];
-  explicitLinks: string[];
-  sourceThreadId?: string;
-  /** Entities extracted from the fact body before encryption; stored in DB for
-   *  association scoring so the worker never needs to decrypt (ADL #12). */
-  extractedEntities: string[];
-  /** Container seeds for containers the fact belongs to; worker upserts these. */
-  containerSeeds: { sourceContainerId: string; label: string; shape: string }[];
-  /** Top-K nearest neighbors from the HNSW index, searched before this fact
-   *  was inserted. Used by the worker for semantic similarity scoring (ADL #34). */
-  hnswNeighbors: { factId: string; similarity: number }[];
 }
 
 const KNOWN_SOURCES = new Set(['github', 'slack', 'linear', 'notion', 'intercom', 'meeting']);

@@ -18,19 +18,14 @@ import {
   notion,
   slack,
 } from '@folklore/connectors';
+import type { PullDueMessage } from '@folklore/contracts/enclave';
 import type { Pipeline, ProcessedFact } from '../pipeline/index.js';
 import {
   getDecryptedConnectionForKind,
   type DecryptedSourceConnection,
 } from './source-connections-client.js';
 
-export interface PullDueMessage {
-  type: 'pull-due';
-  tenant_id: string;
-  sourceId: string;
-  kind: string;
-  backfill: boolean;
-}
+export type { PullDueMessage };
 
 // Content-free completion signal the worker uses to advance sync health (ADL #38); the
 // enclave has no DB access, so this is how last_successful_sync_at gets written worker-side.
