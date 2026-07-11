@@ -16,7 +16,7 @@ import { HnswStore } from './hnsw/index.js';
 import { BoxServer } from './http/server.js';
 import { SynthesisConsumer } from './workers/synthesis-consumer.js';
 import { fetchLinkPreview } from './preview/preview-client.js';
-import { runPull, type PullDueMessage } from './pull/pull-runner.js';
+import { runPull, buildPullCompleteSignal, type PullDueMessage } from './pull/pull-runner.js';
 import { HaltGate, HALT_POLL_INTERVAL_MS } from './control/halt-gate.js';
 import { EnclaveFactRetriever } from './retrieval/fact-retriever.js';
 import { EnclaveWikiContentDecryptor } from './wiki/content-decryptor.js';
@@ -259,6 +259,19 @@ async function processLoop(
               MessageBody: JSON.stringify(fact),
               MessageGroupId: fact.orgId,
               MessageDeduplicationId: fact.factId,
+            }),
+          );
+        }
+        // A completed pull (even one that yielded no new facts) advances sync health so the
+        // scheduler's staleness-based recovery backfill works (ADL #38); worker owns the DB write.
+        if (isPullDueMessage(raw)) {
+          const signal = buildPullCompleteSignal(raw);
+          await sqs.send(
+            new SendMessageCommand({
+              QueueUrl: PROCESSED_QUEUE_URL,
+              MessageBody: JSON.stringify(signal),
+              MessageGroupId: signal.orgId,
+              MessageDeduplicationId: `pull-complete-${signal.sourceId}-${signal.completedAt}`,
             }),
           );
         }

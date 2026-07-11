@@ -32,6 +32,29 @@ export interface PullDueMessage {
   backfill: boolean;
 }
 
+// Content-free completion signal the worker uses to advance sync health (ADL #38); the
+// enclave has no DB access, so this is how last_successful_sync_at gets written worker-side.
+export interface PullCompleteSignal {
+  type: 'pull-complete';
+  orgId: string;
+  sourceKind: string;
+  sourceId: string;
+  completedAt: string;
+}
+
+export function buildPullCompleteSignal(
+  message: PullDueMessage,
+  completedAt: Date = new Date(),
+): PullCompleteSignal {
+  return {
+    type: 'pull-complete',
+    orgId: message.tenant_id,
+    sourceKind: message.kind,
+    sourceId: message.sourceId,
+    completedAt: completedAt.toISOString(),
+  };
+}
+
 // ADL #29: the enclave (not the worker signal) owns the uniform 12-month backfill horizon,
 // so no wire message can widen how far back a pull reaches.
 const BACKFILL_WINDOW_MONTHS = 12;
