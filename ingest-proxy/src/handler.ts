@@ -107,7 +107,8 @@ function verifySignature(
     }
 
     case 'linear': {
-      const sig = headers['x-linear-signature'];
+      // Linear sends `Linear-Signature`, which arrives lowercased through API Gateway.
+      const sig = headers['linear-signature'];
       if (!sig) return false;
       const expected = Buffer.from(sig, 'hex');
       const computed = createHmac('sha256', secret).update(bodyBuf).digest();
