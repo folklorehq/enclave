@@ -191,7 +191,7 @@ describe('HMAC signature verification — Linear', () => {
     });
 
     const event = makeEvent(tid, 'linear', body, {
-      'x-linear-signature': linearSig(body, TEST_SECRET),
+      'linear-signature': linearSig(body, TEST_SECRET),
     });
     const result = await handler(event as never, {} as never, vi.fn());
     expect(result).toMatchObject({ statusCode: 200 });
