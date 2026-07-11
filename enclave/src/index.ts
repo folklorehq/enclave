@@ -20,6 +20,7 @@ import { runPull, buildPullCompleteSignal, type PullDueMessage } from './pull/pu
 import { HaltGate, HALT_POLL_INTERVAL_MS } from './control/halt-gate.js';
 import { EnclaveFactRetriever } from './retrieval/fact-retriever.js';
 import { EnclaveWikiContentDecryptor } from './wiki/content-decryptor.js';
+import { assertInferenceConfigured } from './inference/phala.js';
 import { createContainer, type ApiContainer } from '@folklore/api';
 import { RedisCache } from '@folklore/cache';
 
@@ -42,8 +43,7 @@ const CONTROL_PLANE_URL = process.env['CONTROL_PLANE_URL'] ?? '';
 const DEPLOYMENT_ID = process.env['DEPLOYMENT_ID'] ?? '';
 const AGENT_TOKEN_SSM_PATH = process.env['AGENT_TOKEN_SSM_PATH'] ?? '';
 // Break-glass halt flag lives in the shared Redis, reached over the in-enclave
-// vsock proxy (ADL #13, #31). Absent only in local/dev runs — then halt gating
-// is skipped, matching the worker's deploymentId-gated behavior.
+// vsock proxy (ADL #13, #31). Required — the enclave refuses to boot without it (see below).
 const REDIS_URL = process.env['REDIS_URL'] ?? '';
 
 const SEALED_BLOB_KEY = `sealed-keys/${TENANT_ID}/master.blob`;
@@ -164,7 +164,7 @@ async function loadAgentToken(): Promise<void> {
 async function processLoop(
   masterKey: Buffer,
   pipeline: Pipeline,
-  haltGate?: HaltGate,
+  haltGate: HaltGate,
 ): Promise<void> {
   const { privateKey } = deriveIngestKeypair(masterKey);
   console.log('processing loop started', { queue: QUEUE_URL });
@@ -286,10 +286,6 @@ async function processLoop(
   };
 
   for (;;) {
-    if (!haltGate) {
-      await drainBatch();
-      continue;
-    }
     // Gate before any dequeue: a halted box must not receive, decrypt, or
     // persist. When halted, idle without touching the queue and re-check.
     const processed = await haltGate.guard(drainBatch);
@@ -299,21 +295,20 @@ async function processLoop(
 
 const masterKey = await boot();
 await loadInferenceKey();
+assertInferenceConfigured();
 await loadAgentToken();
 const hnsw = await HnswStore.load(s3, keyring, PROCESSED_OUTPUTS_BUCKET, TENANT_ID);
 const pipeline = new Pipeline(hnsw, s3, keyring, PROCESSED_OUTPUTS_BUCKET, TENANT_ID);
 
-let haltCache: RedisCache | undefined;
-let haltGate: HaltGate | undefined;
-if (DEPLOYMENT_ID && REDIS_URL) {
-  haltCache = new RedisCache(REDIS_URL);
-  haltGate = new HaltGate(haltCache, DEPLOYMENT_ID);
-} else {
-  console.warn('HALT_GATE_DISABLED', {
-    deploymentId: Boolean(DEPLOYMENT_ID),
-    redis: Boolean(REDIS_URL),
-  });
+// ADL #13: the break-glass halt and billing suspension gate every dequeue. Without a
+// halt gate the loop would drain/decrypt fail-open, so refuse to boot rather than run ungated.
+if (!DEPLOYMENT_ID || !REDIS_URL) {
+  throw new Error(
+    'refusing to start: halt gate unavailable (DEPLOYMENT_ID and REDIS_URL required)',
+  );
 }
+const haltCache = new RedisCache(REDIS_URL);
+const haltGate = new HaltGate(haltCache, DEPLOYMENT_ID);
 
 // ADL #31: the box API is composed and served in-process. Every /api/* request
 // reads decrypted content over the in-enclave Postgres proxy and never leaves.
@@ -360,7 +355,7 @@ async function shutdown(): Promise<void> {
   console.log('enclave shutting down — saving hnsw index');
   await hnsw.save(s3, keyring, PROCESSED_OUTPUTS_BUCKET, TENANT_ID);
   if (apiContainer) await apiContainer.close().catch(() => {});
-  if (haltCache) await haltCache.close().catch(() => {});
+  await haltCache.close().catch(() => {});
   process.exit(0);
 }
 

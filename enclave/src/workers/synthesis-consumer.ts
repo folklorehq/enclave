@@ -178,19 +178,9 @@ export class SynthesisConsumer {
     // public body is hard-redacted before it leaves the enclave (ADL #28). Each drafted
     // body is then ESDK-encrypted (ADL #12) before it leaves the enclave.
     const drafted = await Promise.all(
-      req.audiences.map(async (audience) => {
-        const { system, prompt } = buildArticlePrompt({
-          themeType: req.themeType,
-          themeName: req.themeName,
-          audience,
-          factLines,
-          relatedLines,
-        });
-
-        const generated = (await generate(prompt, system).catch(() => '')).trim();
-        const content = redactForAudience(generated, audience.publicEligible, internalNames).text;
-        return { audienceId: audience.id, content, publicEligible: audience.publicEligible };
-      }),
+      req.audiences.map((audience) =>
+        this.draftBody(req, audience, factLines, relatedLines, internalNames),
+      ),
     );
 
     const articles = await Promise.all(
@@ -218,6 +208,34 @@ export class SynthesisConsumer {
       blocks,
       citedFactIds,
     };
+  }
+
+  private async draftBody(
+    req: SynthesisRequest,
+    audience: SynthesisRequest['audiences'][number],
+    factLines: string,
+    relatedLines: string,
+    internalNames: string[],
+  ): Promise<{ audienceId: string | null; content: string; publicEligible: boolean }> {
+    const { system, prompt } = buildArticlePrompt({
+      themeType: req.themeType,
+      themeName: req.themeName,
+      audience,
+      factLines,
+      relatedLines,
+    });
+    const generated = (await generate(prompt, system)).trim();
+    if (!generated) {
+      // An empty generation must not persist as a finished wiki — surface for retry/DLQ (ADL #18: ids only).
+      console.error('WIKI_SYNTHESIS_EMPTY', {
+        requestId: req.requestId,
+        themeId: req.themeId,
+        audienceId: audience.id,
+      });
+      throw new Error('wiki synthesis produced empty content');
+    }
+    const content = redactForAudience(generated, audience.publicEligible, internalNames).text;
+    return { audienceId: audience.id, content, publicEligible: audience.publicEligible };
   }
 
   private memoizedPreviewFetcher(): LinkPreviewFetcher {
@@ -318,6 +336,8 @@ export class SynthesisConsumer {
         null;
       return { body, names: this.actorNames(fact['authors']) };
     } catch {
+      // A dropped fact silently thins the synthesis corpus — count it (ADL #18: id only).
+      console.warn('WIKI_FACT_DECRYPT_FAILED', { factId: ref.factId });
       return { body: null, names: [] };
     }
   }

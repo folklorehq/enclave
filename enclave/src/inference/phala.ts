@@ -30,8 +30,16 @@ function getBackend(): TeeEndpointBackend {
   return _backend;
 }
 
+// ADL #40: a missing endpoint must fail loudly — a silent zero-vector / empty-string
+// fallback would poison the HNSW index and persist empty wikis as if synthesis worked.
+export function assertInferenceConfigured(): void {
+  if (!PROXY_PORT && !apiKey()) {
+    throw new Error('inference not configured: set VSOCK_INFERENCE_PROXY_PORT or TEE_API_KEY');
+  }
+}
+
 export async function embedText(text: string): Promise<number[]> {
-  if (!PROXY_PORT && !apiKey()) return new Array(EMBED_DIM).fill(0) as number[];
+  assertInferenceConfigured();
   const vector = await getBackend().embed(text);
   if (vector.length !== EMBED_DIM) {
     throw new Error(`embedding dimension mismatch: expected ${EMBED_DIM}, got ${vector.length}`);
@@ -40,6 +48,6 @@ export async function embedText(text: string): Promise<number[]> {
 }
 
 export async function generate(prompt: string, systemPrompt?: string): Promise<string> {
-  if (!PROXY_PORT && !apiKey()) return '';
+  assertInferenceConfigured();
   return getBackend().generate(prompt, { systemPrompt });
 }
