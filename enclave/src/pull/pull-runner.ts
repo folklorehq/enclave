@@ -14,6 +14,7 @@ import {
   slack,
 } from '@folklore/connectors';
 import type { PullDueMessage } from '@folklore/contracts/enclave';
+import { externalHttpsProxyAgent } from '../egress/proxy.js';
 import type { Pipeline, ProcessedFact } from '../pipeline/index.js';
 import {
   getDecryptedConnectionForKind,
@@ -160,6 +161,9 @@ export async function resolveSourceToken(
   return connection.accessToken;
 }
 
+// Every client here MUST egress via the proxy — either the global undici dispatcher
+// (fetch-based SDKs) or an explicit agent (axios/node:http SDKs like Slack), else its
+// pull dials the internet directly and fails closed on real hardware (ADL #42).
 export function buildConnector(kind: string, token: string): Connector | null {
   switch (kind) {
     case 'github':
@@ -168,7 +172,11 @@ export function buildConnector(kind: string, token: string): Connector | null {
         new github.OctokitGitHubClient(token),
       );
     case 'slack':
-      return new slack.SlackConnector({ logger: consoleLogger }, new slack.HttpSlackClient(token));
+      // Slack's axios client ignores the global undici dispatcher, so hand it the proxy agent.
+      return new slack.SlackConnector(
+        { logger: consoleLogger },
+        new slack.HttpSlackClient(token, externalHttpsProxyAgent()),
+      );
     case 'notion':
       return new notion.NotionConnector({ logger: consoleLogger }, new notion.NotionClient(token));
     case 'linear':

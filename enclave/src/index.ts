@@ -28,9 +28,14 @@ import {
   EnclaveWikiSnapshotSealer,
 } from './wiki/content-sealers.js';
 import { assertInferenceConfigured, setInferenceTelemetry } from './inference/phala.js';
+import { installGlobalEgressDispatcher } from './egress/proxy.js';
 import { createContainer, type ApiContainer } from '@folklore/api';
 import { RedisCache } from '@folklore/cache';
 import { BufferedOpsTelemetryClient, RedisOpsEventChannel } from '@folklore/control-plane';
+
+// ADL #42: route external egress through the parent CONNECT proxy — before any client is
+// built, so undici SDKs pick up the dispatcher (loopback bypasses it, keeping AWS/inference).
+installGlobalEgressDispatcher();
 
 const REGION = process.env['AWS_REGION']!;
 const TENANT_ID = process.env['TENANT_ID']!;
