@@ -3,11 +3,16 @@ import {
   parseModelAllowlist,
   TeeEndpointBackend,
   type InferenceResponseVerifier,
+  type ToolSpec,
 } from '@folklore/inference';
 
 const PROXY_PORT = process.env['VSOCK_INFERENCE_PROXY_PORT'] ?? '';
 const EMBED_MODEL = process.env['EMBED_MODEL'] ?? 'qwen/qwen3-embedding-8b';
 const GENERATE_MODEL = process.env['GENERATE_MODEL'] ?? 'z-ai/glm-5.2';
+// The relevance/citation judge — a smaller allowlisted TEE-verified model; decrypted content
+// still goes only to a verified upstream (ADL #30/#40). Low temperature: this is classification.
+const JUDGE_MODEL = process.env['JUDGE_MODEL'] ?? 'qwen/qwen3-32b';
+const JUDGE_MAX_TOKENS = Number(process.env['JUDGE_MAX_TOKENS'] ?? '4096');
 
 // Fail-closed guard: only these live-verified TEE-confidential models may receive decrypted
 // content (ADL #30/#40). inference.phala.com serves unverified models on the same endpoint.
@@ -91,7 +96,34 @@ export async function embedText(text: string): Promise<number[]> {
   return vector;
 }
 
-export async function generate(prompt: string, systemPrompt?: string): Promise<string> {
+export async function generate(
+  prompt: string,
+  systemPrompt?: string,
+  temperature?: number,
+): Promise<string> {
   assertInferenceConfigured();
-  return getBackend().generate(prompt, { systemPrompt, maxTokens: GENERATE_MAX_TOKENS });
+  return getBackend().generate(prompt, {
+    systemPrompt,
+    maxTokens: GENERATE_MAX_TOKENS,
+    temperature,
+  });
+}
+
+export async function generateStructured(
+  prompt: string,
+  tool: ToolSpec,
+  systemPrompt?: string,
+): Promise<unknown> {
+  assertInferenceConfigured();
+  const backend = getBackend();
+  if (!backend.generateStructured) {
+    throw new Error('inference backend does not support tool calling');
+  }
+  return backend.generateStructured(prompt, {
+    tool,
+    systemPrompt,
+    model: JUDGE_MODEL,
+    maxTokens: JUDGE_MAX_TOKENS,
+    temperature: 0,
+  });
 }
