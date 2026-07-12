@@ -3,8 +3,10 @@ import {
   parseModelAllowlist,
   TeeEndpointBackend,
   type InferenceResponseVerifier,
+  type ReceiptVerificationPolicy,
   type ToolSpec,
 } from '@folklore/inference';
+import { createTelemetryClient, type TelemetryClient } from '@folklore/telemetry';
 
 const PROXY_PORT = process.env['VSOCK_INFERENCE_PROXY_PORT'] ?? '';
 const EMBED_MODEL = process.env['EMBED_MODEL'] ?? 'qwen/qwen3-embedding-8b';
@@ -22,6 +24,11 @@ const MODEL_ALLOWLIST = parseModelAllowlist(process.env['INFERENCE_MODEL_ALLOWLI
 // infra; signature enforcement stays a separate opt-in until reconciled with live receipts.
 const VERIFY_RECEIPTS = process.env['INFERENCE_ACI_VERIFY'] === '1';
 const ENFORCE_RECEIPT_SIGNATURE = process.env['INFERENCE_ACI_ENFORCE_SIGNATURE'] === '1';
+
+// Enclave synthesis is async (not user-latency-critical), so verify every receipt — this
+// catches a gateway that reroutes a mid-session call to an unverified upstream (ADL #30/#40).
+export const RECEIPT_POLICY: ReceiptVerificationPolicy =
+  process.env['INFERENCE_ACI_POLICY'] === 'first-call' ? 'first-call' : 'per-call';
 
 // z-ai/glm-5.2 is a reasoning model: reasoning tokens count against max_tokens, so a
 // tight cap returns empty content (the budget is spent thinking). Keep it generous for
@@ -54,13 +61,22 @@ function resolveBaseUrl(): string {
 }
 
 let _backend: TeeEndpointBackend | null = null;
+let _telemetry: TelemetryClient | null = null;
 
-function buildReceiptVerifier(): InferenceResponseVerifier | undefined {
+function telemetry(): TelemetryClient {
+  return (_telemetry ??= createTelemetryClient());
+}
+
+export function buildReceiptVerifier(
+  telemetryClient: TelemetryClient = telemetry(),
+): InferenceResponseVerifier | undefined {
   if (!VERIFY_RECEIPTS) return undefined;
   return new AciReceiptVerifier({
     baseUrl: resolveBaseUrl(),
     apiKey: apiKey(),
+    policy: RECEIPT_POLICY,
     enforceReceiptSignature: ENFORCE_RECEIPT_SIGNATURE,
+    telemetry: telemetryClient,
   });
 }
 
