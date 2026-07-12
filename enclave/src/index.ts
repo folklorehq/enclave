@@ -22,6 +22,11 @@ import { HaltGate, HALT_POLL_INTERVAL_MS } from './control/halt-gate.js';
 import { EnclaveFactRetriever } from './retrieval/fact-retriever.js';
 import { EnclaveWikiContentDecryptor } from './wiki/content-decryptor.js';
 import { EnclaveWikiEditSealer } from './wiki/edit-sealer.js';
+import {
+  EnclaveWikiCommentSealer,
+  EnclaveWikiFeedbackSealer,
+  EnclaveWikiSnapshotSealer,
+} from './wiki/content-sealers.js';
 import { assertInferenceConfigured, setInferenceTelemetry } from './inference/phala.js';
 import { createContainer, type ApiContainer } from '@folklore/api';
 import { RedisCache } from '@folklore/cache';
@@ -342,6 +347,11 @@ try {
     wikiContentDecryptor: new EnclaveWikiContentDecryptor(keyring),
     // ADL #12/#45: mined draft→edit prose is sealed to the same key, in-enclave only.
     wikiEditSealer: new EnclaveWikiEditSealer(keyring),
+    // ADL #12: live-collab Yjs snapshots, comments, and feedback corrections are sealed to the
+    // same key, in-enclave only.
+    wikiSnapshotSealer: new EnclaveWikiSnapshotSealer(keyring),
+    wikiCommentSealer: new EnclaveWikiCommentSealer(keyring),
+    wikiFeedbackSealer: new EnclaveWikiFeedbackSealer(keyring),
   });
   await apiContainer.start();
 } catch (err) {
