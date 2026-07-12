@@ -282,8 +282,9 @@ async function processLoop(
         await sqs.send(
           new DeleteMessageCommand({ QueueUrl: QUEUE_URL, ReceiptHandle: msg.ReceiptHandle! }),
         );
-      } catch (err) {
-        console.error('failed to process message', { id: msg.MessageId, err });
+      } catch {
+        // Content-free SQS id only — err could carry a decrypted-content snippet (ADL #18).
+        console.error('failed to process message', { id: msg.MessageId });
         // Leave in queue — visibility timeout retries, DLQ after 3 attempts
       }
     }
