@@ -20,7 +20,15 @@ const sqs = new SQSClient({});
 
 const QUEUE_URL = process.env['QUEUE_URL']!;
 
-const SIGNABLE_SOURCES = new Set(['github', 'slack', 'linear', 'intercom', 'notion', 'meeting']);
+const SIGNABLE_SOURCES = new Set([
+  'github',
+  'slack',
+  'linear',
+  'jira',
+  'intercom',
+  'notion',
+  'meeting',
+]);
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const publicKeyCache = new Map<string, { key: Buffer; expiresAt: number }>();
@@ -124,6 +132,15 @@ function verifySignature(
       return expected.length === computed.length && timingSafeEqual(expected, computed);
     }
 
+    case 'jira': {
+      // Jira has no native webhook signing; a customer Automation rule HMAC-SHA256s the body.
+      const sig = headers['x-atlassian-webhook-signature'];
+      if (!sig?.startsWith('sha256=')) return false;
+      const expected = Buffer.from(sig.slice(7), 'hex');
+      const computed = createHmac('sha256', secret).update(bodyBuf).digest();
+      return expected.length === computed.length && timingSafeEqual(expected, computed);
+    }
+
     case 'notion': {
       // Notion signs with the subscription verification_token, not an app secret.
       const sig = headers['x-notion-signature'];
@@ -179,6 +196,13 @@ function extractEventType(
     case 'linear': {
       try {
         return (JSON.parse(body) as { type?: string }).type ?? '';
+      } catch {
+        return '';
+      }
+    }
+    case 'jira': {
+      try {
+        return (JSON.parse(body) as { webhookEvent?: string }).webhookEvent ?? '';
       } catch {
         return '';
       }

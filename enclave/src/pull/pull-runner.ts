@@ -14,6 +14,7 @@ import {
   type SyncCursor,
   github,
   intercom,
+  jira,
   linear,
   notion,
   slack,
@@ -181,6 +182,8 @@ export function buildConnector(kind: string, token: string): Connector | null {
         { logger: consoleLogger },
         new linear.LinearSdkClient(token),
       );
+    case 'jira':
+      return new jira.JiraConnector({ logger: consoleLogger }, new jira.JiraHttpClient(token));
     case 'intercom':
       return new intercom.IntercomConnector(
         { logger: consoleLogger },
