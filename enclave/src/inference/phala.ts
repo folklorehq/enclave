@@ -63,6 +63,13 @@ function resolveBaseUrl(): string {
 let _backend: TeeEndpointBackend | null = null;
 let _telemetry: TelemetryClient | null = null;
 
+// In-enclave there is no PostHog egress, so boot injects a sink that buffers ops events
+// onto the check-in (ADL #18). Absent an injection (dev/local) this falls back to the
+// env-resolved client, which is a Noop without POSTHOG_API_KEY.
+export function setInferenceTelemetry(client: TelemetryClient): void {
+  _telemetry = client;
+}
+
 function telemetry(): TelemetryClient {
   return (_telemetry ??= createTelemetryClient());
 }
@@ -89,6 +96,7 @@ function getBackend(): TeeEndpointBackend {
       generateModel: GENERATE_MODEL,
       modelAllowlist: MODEL_ALLOWLIST,
       responseVerifier: buildReceiptVerifier(),
+      telemetry: telemetry(),
     });
   }
   return _backend;

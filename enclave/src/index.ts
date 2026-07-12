@@ -21,9 +21,10 @@ import { runPull, buildPullCompleteSignal, type PullDueMessage } from './pull/pu
 import { HaltGate, HALT_POLL_INTERVAL_MS } from './control/halt-gate.js';
 import { EnclaveFactRetriever } from './retrieval/fact-retriever.js';
 import { EnclaveWikiContentDecryptor } from './wiki/content-decryptor.js';
-import { assertInferenceConfigured } from './inference/phala.js';
+import { assertInferenceConfigured, setInferenceTelemetry } from './inference/phala.js';
 import { createContainer, type ApiContainer } from '@folklore/api';
 import { RedisCache } from '@folklore/cache';
+import { BufferedOpsTelemetryClient, RedisOpsEventChannel } from '@folklore/control-plane';
 
 const REGION = process.env['AWS_REGION']!;
 const TENANT_ID = process.env['TENANT_ID']!;
@@ -311,6 +312,13 @@ if (!DEPLOYMENT_ID || !REDIS_URL) {
 }
 const haltCache = new RedisCache(REDIS_URL);
 const haltGate = new HaltGate(haltCache, DEPLOYMENT_ID);
+
+// ADL #18: the enclave has no PostHog egress, so inference ops telemetry (attestation
+// failures, receipt verifications, model-gate rejections) is buffered onto the shared
+// Redis list the box agent drains into its content-free check-in.
+setInferenceTelemetry(
+  new BufferedOpsTelemetryClient(new RedisOpsEventChannel(haltCache.redis, DEPLOYMENT_ID)),
+);
 
 // ADL #31: the box API is composed and served in-process. Every /api/* request
 // reads decrypted content over the in-enclave Postgres proxy and never leaves.
