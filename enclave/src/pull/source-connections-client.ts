@@ -1,9 +1,4 @@
-/**
- * Fetches this deployment's encrypted source-connection tokens from the control
- * plane and decrypts them in-enclave (ADL #42). The control plane only ever holds
- * ciphertext — it stores whatever `SourceOAuthHandler` ECIES-encrypted to this
- * enclave's public key at OAuth-connect time and serves it back unchanged.
- */
+/** Fetches encrypted source-connection tokens from the control plane and decrypts them in-enclave (ADL #42) — the control plane only ever holds ciphertext. */
 import type { KeyObject } from 'node:crypto';
 import { decryptPayload, type EncryptedPayload } from '../ingest/receiver.js';
 

@@ -1,10 +1,4 @@
-/**
- * Drives one connector `pull()` pass entirely inside the enclave (ADL #42): the
- * worker only ever sends a content-free "pull-due" signal (source id/kind, no
- * token); this module fetches+decrypts the OAuth token here, runs the connector,
- * and hands the normalized output straight to the pipeline in-process — plaintext
- * never leaves the enclave.
- */
+/** Drives one connector pull() pass entirely inside the enclave (ADL #42) — plaintext never leaves the enclave. */
 import type { KeyObject } from 'node:crypto';
 import { GetParameterCommand, PutParameterCommand, type SSMClient } from '@aws-sdk/client-ssm';
 import type { Logger } from '@folklore/core';
