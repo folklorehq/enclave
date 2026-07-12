@@ -21,6 +21,7 @@ import { runPull, buildPullCompleteSignal, type PullDueMessage } from './pull/pu
 import { HaltGate, HALT_POLL_INTERVAL_MS } from './control/halt-gate.js';
 import { EnclaveFactRetriever } from './retrieval/fact-retriever.js';
 import { EnclaveWikiContentDecryptor } from './wiki/content-decryptor.js';
+import { EnclaveWikiEditSealer } from './wiki/edit-sealer.js';
 import { assertInferenceConfigured, setInferenceTelemetry } from './inference/phala.js';
 import { createContainer, type ApiContainer } from '@folklore/api';
 import { RedisCache } from '@folklore/cache';
@@ -338,6 +339,8 @@ try {
     // ADL #12: synthesized wiki text is ciphertext at rest; the read path decrypts
     // audience-visible blocks here, in-enclave, over the sealed key.
     wikiContentDecryptor: new EnclaveWikiContentDecryptor(keyring),
+    // ADL #12/#45: mined draft→edit prose is sealed to the same key, in-enclave only.
+    wikiEditSealer: new EnclaveWikiEditSealer(keyring),
   });
   await apiContainer.start();
 } catch (err) {
