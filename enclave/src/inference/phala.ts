@@ -1,8 +1,22 @@
-import { TeeEndpointBackend } from '@folklore/inference';
+import {
+  AciReceiptVerifier,
+  parseModelAllowlist,
+  TeeEndpointBackend,
+  type InferenceResponseVerifier,
+} from '@folklore/inference';
 
 const PROXY_PORT = process.env['VSOCK_INFERENCE_PROXY_PORT'] ?? '';
 const EMBED_MODEL = process.env['EMBED_MODEL'] ?? 'qwen/qwen3-embedding-8b';
 const GENERATE_MODEL = process.env['GENERATE_MODEL'] ?? 'z-ai/glm-5.2';
+
+// Fail-closed guard: only these live-verified TEE-confidential models may receive decrypted
+// content (ADL #30/#40). inference.phala.com serves unverified models on the same endpoint.
+const MODEL_ALLOWLIST = parseModelAllowlist(process.env['INFERENCE_MODEL_ALLOWLIST']);
+
+// ACI receipt verification (attestation pin + per-response upstream.verified). Enabled via
+// infra; signature enforcement stays a separate opt-in until reconciled with live receipts.
+const VERIFY_RECEIPTS = process.env['INFERENCE_ACI_VERIFY'] === '1';
+const ENFORCE_RECEIPT_SIGNATURE = process.env['INFERENCE_ACI_ENFORCE_SIGNATURE'] === '1';
 
 // z-ai/glm-5.2 is a reasoning model: reasoning tokens count against max_tokens, so a
 // tight cap returns empty content (the budget is spent thinking). Keep it generous for
@@ -36,6 +50,15 @@ function resolveBaseUrl(): string {
 
 let _backend: TeeEndpointBackend | null = null;
 
+function buildReceiptVerifier(): InferenceResponseVerifier | undefined {
+  if (!VERIFY_RECEIPTS) return undefined;
+  return new AciReceiptVerifier({
+    baseUrl: resolveBaseUrl(),
+    apiKey: apiKey(),
+    enforceReceiptSignature: ENFORCE_RECEIPT_SIGNATURE,
+  });
+}
+
 function getBackend(): TeeEndpointBackend {
   if (!_backend) {
     _backend = new TeeEndpointBackend({
@@ -43,6 +66,8 @@ function getBackend(): TeeEndpointBackend {
       apiKey: apiKey(),
       embedModel: EMBED_MODEL,
       generateModel: GENERATE_MODEL,
+      modelAllowlist: MODEL_ALLOWLIST,
+      responseVerifier: buildReceiptVerifier(),
     });
   }
   return _backend;
