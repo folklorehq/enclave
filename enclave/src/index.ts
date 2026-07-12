@@ -8,8 +8,9 @@ import {
 import { SSMClient, PutParameterCommand, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { KMSClient } from '@aws-sdk/client-kms';
 import { KmsKeyringNode } from '@aws-crypto/client-node';
-import { generateMasterKey, deriveIngestKeypair, deriveMnemonic } from './sealing/keygen.js';
+import { generateMasterKey, deriveIngestKeypair } from './sealing/keygen.js';
 import { sealMasterKey, unsealMasterKey } from './sealing/seal.js';
+import { assertRecoveryConfigured, sealRecoveryMnemonic } from './sealing/recovery.js';
 import { decryptPayload, type EncryptedPayload } from './ingest/receiver.js';
 import { Pipeline } from './pipeline/index.js';
 import { HnswStore } from './hnsw/index.js';
@@ -45,9 +46,12 @@ const AGENT_TOKEN_SSM_PATH = process.env['AGENT_TOKEN_SSM_PATH'] ?? '';
 // Break-glass halt flag lives in the shared Redis, reached over the in-enclave
 // vsock proxy (ADL #13, #31). Required — the enclave refuses to boot without it (see below).
 const REDIS_URL = process.env['REDIS_URL'] ?? '';
+// ADL #55: customer's X25519 recovery public key (hex, content-free/public). First boot
+// refuses to generate a master key without it — no tenant may hold data with zero recovery path.
+const RECOVERY_PUBKEY = process.env['RECOVERY_PUBKEY'] ?? '';
 
 const SEALED_BLOB_KEY = `sealed-keys/${TENANT_ID}/master.blob`;
-const RECOVERY_PHRASE_SSM_PATH = `/folklore/${TENANT_ID}/recovery-phrase`;
+const RECOVERY_BLOB_KEY = `recovery/${TENANT_ID}/mnemonic.enc`;
 const INGEST_KEY_SSM_PATH = `/folklore/${TENANT_ID}/ingest-public-key`;
 const IDLE_SSM_PATH = `/folklore/${TENANT_ID}/idle`;
 // After 15 consecutive empty long-polls (~5 min) the enclave signals idle.
@@ -100,7 +104,22 @@ async function boot(): Promise<Buffer> {
   }
 
   console.log('first boot — generating master key');
+  // Fail closed before generating a key we could never let the customer recover (ADL #55).
+  const recoveryKey = assertRecoveryConfigured(RECOVERY_PUBKEY);
   const masterKey = generateMasterKey();
+
+  // Store only ciphertext the customer alone can open; write it before persisting the
+  // master blob so a recovery-store failure leaves no ingestible tenant behind.
+  const recoveryBox = sealRecoveryMnemonic(masterKey, recoveryKey);
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: SEALED_BLOB_BUCKET,
+      Key: RECOVERY_BLOB_KEY,
+      Body: JSON.stringify(recoveryBox),
+      ContentType: 'application/json',
+    }),
+  );
+
   const blob = await sealMasterKey(masterKey, KMS_KEY_ID);
   await s3.send(
     new PutObjectCommand({ Bucket: SEALED_BLOB_BUCKET, Key: SEALED_BLOB_KEY, Body: blob }),
@@ -117,23 +136,6 @@ async function boot(): Promise<Buffer> {
   );
 
   console.log('FIRST_BOOT', { tenant: TENANT_ID });
-  // Show once — customer must record this; Folklore never stores it (ADL #12, #30)
-  const mnemonic = deriveMnemonic(masterKey);
-  console.log('RECOVERY_PHRASE', { mnemonic });
-  // Also persist to SSM SecureString encrypted with customer's KMS key (zero-knowledge to Folklore)
-  try {
-    await ssm.send(
-      new PutParameterCommand({
-        Name: RECOVERY_PHRASE_SSM_PATH,
-        Value: mnemonic,
-        Type: 'SecureString',
-        KeyId: KMS_KEY_ID,
-        Overwrite: false,
-      }),
-    );
-  } catch (err) {
-    if (!(err instanceof Error) || err.name !== 'ParameterAlreadyExists') throw err;
-  }
   return masterKey;
 }
 
