@@ -7,6 +7,7 @@ import {
   diffieHellman,
   hkdfSync,
   createCipheriv,
+  createHash,
   createPublicKey,
   createHmac,
   randomBytes,
@@ -223,6 +224,47 @@ function extractEventType(
   }
 }
 
+function providerDeliveryId(
+  source: string,
+  headers: Record<string, string | undefined>,
+  body: string,
+): string | null {
+  switch (source) {
+    case 'github':
+      return headers['x-github-delivery'] ?? null;
+    case 'slack': {
+      try {
+        const id = (JSON.parse(body) as { event_id?: unknown }).event_id;
+        return typeof id === 'string' ? id : null;
+      } catch {
+        return null;
+      }
+    }
+    case 'intercom': {
+      try {
+        const id = (JSON.parse(body) as { id?: unknown }).id;
+        return typeof id === 'string' ? id : null;
+      } catch {
+        return null;
+      }
+    }
+    default:
+      return null;
+  }
+}
+
+// Key dedup on the delivery, not the per-call ECIES ciphertext, so FIFO drops provider retries.
+function deduplicationId(
+  tenantId: string,
+  source: string,
+  headers: Record<string, string | undefined>,
+  body: string,
+): string {
+  const delivery = providerDeliveryId(source, headers, body) ?? body;
+  const key = [tenantId, source, delivery].join('\n');
+  return createHash('sha256').update(key).digest('hex');
+}
+
 export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   const tenantId = event.pathParameters?.['tenant_id'];
   const source = event.pathParameters?.['source'];
@@ -280,7 +322,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
         ciphertext: ciphertextWithTag.toString('hex'),
       }),
       MessageGroupId: tenantId,
-      MessageDeduplicationId: nonce.toString('hex'),
+      MessageDeduplicationId: deduplicationId(tenantId, source, event.headers, body),
     }),
   );
 

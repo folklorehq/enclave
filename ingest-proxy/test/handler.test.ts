@@ -391,6 +391,146 @@ describe('SQS message shape', () => {
   });
 });
 
+describe('deduplication id determinism', () => {
+  beforeEach(() => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name?.includes('/webhook-secrets/')) return { Parameter: { Value: TEST_SECRET } };
+      throw new Error('ParameterNotFound');
+    });
+  });
+
+  async function dedupIdFor(
+    tenantId: string,
+    source: string,
+    body: string,
+    headers: Record<string, string>,
+  ): Promise<string> {
+    mockSqsSend.mockClear();
+    await handler(makeEvent(tenantId, source, body, headers) as never, {} as never, vi.fn());
+    const msg = mockSqsSend.mock.calls[0]![0] as Record<string, unknown>;
+    return msg['MessageDeduplicationId'] as string;
+  }
+
+  it('is a stable sha256 hex, not the random nonce', async () => {
+    const body = JSON.stringify({ action: 'opened' });
+    const headers = {
+      'x-github-event': 'pull_request',
+      'x-github-delivery': 'delivery-abc',
+      'x-hub-signature-256': githubSig(body, TEST_SECRET),
+    };
+    const id = await dedupIdFor('tenant-d', 'github', body, headers);
+    expect(id).toMatch(/^[0-9a-f]{64}$/);
+
+    const msg = mockSqsSend.mock.calls[0]![0] as Record<string, unknown>;
+    const payload = JSON.parse(msg['MessageBody'] as string) as Record<string, string>;
+    expect(id).not.toBe(payload['nonce']);
+  });
+
+  it('matches for identical redeliveries even though the ciphertext differs', async () => {
+    const body = JSON.stringify({ action: 'opened', number: 7 });
+    const headers = {
+      'x-github-event': 'pull_request',
+      'x-github-delivery': 'delivery-xyz',
+      'x-hub-signature-256': githubSig(body, TEST_SECRET),
+    };
+    const first = await dedupIdFor('tenant-d', 'github', body, headers);
+    const firstCipher = JSON.parse(
+      (mockSqsSend.mock.calls[0]![0] as Record<string, unknown>)['MessageBody'] as string,
+    )['ciphertext'] as string;
+    const second = await dedupIdFor('tenant-d', 'github', body, headers);
+    const secondCipher = JSON.parse(
+      (mockSqsSend.mock.calls[0]![0] as Record<string, unknown>)['MessageBody'] as string,
+    )['ciphertext'] as string;
+
+    expect(second).toBe(first);
+    expect(secondCipher).not.toBe(firstCipher);
+  });
+
+  it('prefers the provider delivery id: same delivery id dedups across differing bodies', async () => {
+    const bodyA = JSON.stringify({ action: 'opened' });
+    const bodyB = JSON.stringify({ action: 'opened', extra: 'retry-jitter' });
+    const headers = (body: string) => ({
+      'x-github-event': 'pull_request',
+      'x-github-delivery': 'delivery-fixed',
+      'x-hub-signature-256': githubSig(body, TEST_SECRET),
+    });
+    const idA = await dedupIdFor('tenant-d', 'github', bodyA, headers(bodyA));
+    const idB = await dedupIdFor('tenant-d', 'github', bodyB, headers(bodyB));
+    expect(idB).toBe(idA);
+  });
+
+  it('differs across tenants for the same delivery', async () => {
+    const body = JSON.stringify({ action: 'opened' });
+    const headers = {
+      'x-github-event': 'pull_request',
+      'x-github-delivery': 'delivery-shared',
+      'x-hub-signature-256': githubSig(body, TEST_SECRET),
+    };
+    const idT1 = await dedupIdFor('tenant-one', 'github', body, headers);
+    const idT2 = await dedupIdFor('tenant-two', 'github', body, headers);
+    expect(idT2).not.toBe(idT1);
+  });
+
+  it('differs across sources for the same tenant and body', async () => {
+    const body = JSON.stringify({ type: 'page.created' });
+    const idNotion = await dedupIdFor('tenant-src', 'notion', body, {
+      'x-notion-signature': notionSig(body, TEST_SECRET),
+    });
+    const idMeeting = await dedupIdFor('tenant-src', 'meeting', body, {
+      'x-meeting-event': 'fireflies_complete',
+      'x-meeting-signature': meetingSig(body, TEST_SECRET),
+    });
+    expect(idMeeting).not.toBe(idNotion);
+  });
+
+  it('falls back to the body when no provider delivery id: same body dedups, different body differs', async () => {
+    const bodyA = JSON.stringify({ type: 'page.created', page: { id: 'p1' } });
+    const bodyB = JSON.stringify({ type: 'page.created', page: { id: 'p2' } });
+    const first = await dedupIdFor('tenant-nb', 'notion', bodyA, {
+      'x-notion-signature': notionSig(bodyA, TEST_SECRET),
+    });
+    const repeat = await dedupIdFor('tenant-nb', 'notion', bodyA, {
+      'x-notion-signature': notionSig(bodyA, TEST_SECRET),
+    });
+    const other = await dedupIdFor('tenant-nb', 'notion', bodyB, {
+      'x-notion-signature': notionSig(bodyB, TEST_SECRET),
+    });
+    expect(repeat).toBe(first);
+    expect(other).not.toBe(first);
+  });
+
+  it('uses the slack event_id: same event_id dedups across differing bodies', async () => {
+    const ts = String(Math.floor(Date.now() / 1000));
+    const bodyA = JSON.stringify({ type: 'message', event_id: 'Ev123', text: 'a' });
+    const bodyB = JSON.stringify({ type: 'message', event_id: 'Ev123', text: 'b' });
+    const idA = await dedupIdFor('tenant-sl-d', 'slack', bodyA, {
+      'x-slack-signature': slackSig(bodyA, TEST_SECRET, ts),
+      'x-slack-request-timestamp': ts,
+    });
+    const idB = await dedupIdFor('tenant-sl-d', 'slack', bodyB, {
+      'x-slack-signature': slackSig(bodyB, TEST_SECRET, ts),
+      'x-slack-request-timestamp': ts,
+    });
+    expect(idB).toBe(idA);
+  });
+
+  it('uses the intercom id: same id dedups across differing bodies', async () => {
+    const bodyA = JSON.stringify({ type: 'notification_event', id: 'notif_1', v: 'a' });
+    const bodyB = JSON.stringify({ type: 'notification_event', id: 'notif_1', v: 'b' });
+    const headers = { 'x-intercom-topic': 'conversation.user.created' };
+    const idA = await dedupIdFor('tenant-ic-d', 'intercom', bodyA, {
+      ...headers,
+      'x-hub-signature': intercomSig(bodyA, TEST_SECRET),
+    });
+    const idB = await dedupIdFor('tenant-ic-d', 'intercom', bodyB, {
+      ...headers,
+      'x-hub-signature': intercomSig(bodyB, TEST_SECRET),
+    });
+    expect(idB).toBe(idA);
+  });
+});
+
 describe('event type extraction', () => {
   beforeEach(() => {
     mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
