@@ -8,6 +8,7 @@ import type {
   RetrievedFact,
   RetrieverDeps,
 } from '@folklore/api';
+import { isSensitivityWithin } from '@folklore/wiki';
 import { EnclaveCrypto } from '../crypto/esdk.js';
 import { embedText } from '../inference/phala.js';
 import type { HnswStore } from '../hnsw/index.js';
@@ -69,6 +70,8 @@ export class EnclaveFactRetriever implements FactRetriever {
   }
 
   private isVisible(meta: FactMetadata, access: AudienceAccess): boolean {
+    // ADL #6 — sensitivity ceiling applies regardless of source-kind grant ('*' included).
+    if (!isSensitivityWithin(meta.sensitivityLevel, access.maxSensitivity)) return false;
     if (access.allowedSourceKinds === '*') return true;
     return access.allowedSourceKinds.has(meta.sourceKind);
   }
