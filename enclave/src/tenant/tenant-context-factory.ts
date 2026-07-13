@@ -72,7 +72,7 @@ export class TenantContextFactory {
 
     if (sealedBlob) {
       console.log('unsealing master key via KMS');
-      const masterKey = await unsealMasterKey(sealedBlob, identity.kmsKeyId);
+      const masterKey = await unsealMasterKey(sealedBlob, identity.kmsKeyId, identity.tenantId);
       console.log('unseal ok');
       return masterKey;
     }
@@ -110,7 +110,7 @@ export class TenantContextFactory {
       }),
     );
 
-    const blob = await sealMasterKey(masterKey, identity.kmsKeyId);
+    const blob = await sealMasterKey(masterKey, identity.kmsKeyId, identity.tenantId);
     await this.deps.s3.send(
       new PutObjectCommand({
         Bucket: this.deps.sealedBlobBucket,

@@ -1,20 +1,17 @@
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
-import {
-  SQSClient,
-  ReceiveMessageCommand,
-  DeleteMessageCommand,
-  SendMessageCommand,
-} from '@aws-sdk/client-sqs';
+import { S3Client } from '@aws-sdk/client-s3';
+import { SQSClient } from '@aws-sdk/client-sqs';
 import { SSMClient, PutParameterCommand, GetParameterCommand } from '@aws-sdk/client-ssm';
-import { decryptPayload, type EncryptedPayload } from './ingest/receiver.js';
-import { DurableAckBatch } from './ingest/durable-ack-batch.js';
 import { TenantContextFactory } from './tenant/tenant-context-factory.js';
 import { TenantRegistry } from './tenant/tenant-registry.js';
+import { parseTenantAssignments } from './tenant/tenant-assignments.js';
+import { TenantMessageRouter } from './tenant/tenant-message-router.js';
+import { QueueSetDrainer } from './tenant/queue-set-drainer.js';
+import { saveAllTenantIndices } from './tenant/index-persistence.js';
+import { assertReadPathSupported } from './tenant/read-path-guard.js';
 import { BoxServer } from './http/server.js';
 import { SynthesisConsumer } from './workers/synthesis-consumer.js';
 import { fetchLinkPreview } from './preview/preview-client.js';
-import { runPull, buildPullCompleteSignal, type PullDueMessage } from './pull/pull-runner.js';
-import { HaltGate, HALT_POLL_INTERVAL_MS } from './control/halt-gate.js';
+import { HaltGate } from './control/halt-gate.js';
 import { EnclaveFactRetriever } from './retrieval/fact-retriever.js';
 import { EnclaveWikiContentDecryptor } from './wiki/content-decryptor.js';
 import { EnclaveWikiEditSealer } from './wiki/edit-sealer.js';
@@ -34,10 +31,7 @@ import { BufferedOpsTelemetryClient, RedisOpsEventChannel } from '@folklore/cont
 installGlobalEgressDispatcher();
 
 const REGION = process.env['AWS_REGION']!;
-const TENANT_ID = process.env['TENANT_ID']!;
-const KMS_KEY_ID = process.env['KMS_KEY_ID']!;
 const SEALED_BLOB_BUCKET = process.env['SEALED_BLOB_BUCKET']!;
-const QUEUE_URL = process.env['QUEUE_URL']!;
 const PROCESSED_OUTPUTS_BUCKET = process.env['PROCESSED_OUTPUTS_BUCKET']!;
 const PROCESSED_QUEUE_URL = process.env['PROCESSED_QUEUE_URL']!;
 const RAW_PAYLOADS_BUCKET = process.env['RAW_PAYLOADS_BUCKET'] ?? '';
@@ -54,12 +48,8 @@ const AGENT_TOKEN_SSM_PATH = process.env['AGENT_TOKEN_SSM_PATH'] ?? '';
 // Break-glass halt flag lives in the shared Redis, reached over the in-enclave
 // vsock proxy (ADL #13, #31). Required — the enclave refuses to boot without it (see below).
 const REDIS_URL = process.env['REDIS_URL'] ?? '';
-// ADL #55: customer's X25519 recovery public key (hex, content-free/public). First boot
-// refuses to generate a master key without it — no tenant may hold data with zero recovery path.
-const RECOVERY_PUBKEY = process.env['RECOVERY_PUBKEY'] ?? '';
 
-const IDLE_SSM_PATH = `/folklore/${TENANT_ID}/idle`;
-// After 15 consecutive empty long-polls (~5 min) the enclave signals idle.
+// After 15 consecutive empty long-polls (~5 min) across ALL assigned queues the enclave signals idle.
 const IDLE_POLL_THRESHOLD = 15;
 
 // vsock proxy on the parent EC2 routes all AWS SDK calls without internet egress
@@ -68,20 +58,6 @@ const proxyEndpoint = `https://localhost:${PROXY_PORT}`;
 const s3 = new S3Client({ region: REGION, endpoint: proxyEndpoint });
 const sqs = new SQSClient({ region: REGION, endpoint: proxyEndpoint });
 const ssm = new SSMClient({ region: REGION, endpoint: proxyEndpoint });
-
-interface SqsMessage {
-  tenant_id: string;
-  source: string;
-  eventType?: string;
-  type?: string;
-  ephemeralPublicKey: string;
-  nonce: string;
-  ciphertext: string;
-}
-
-function isPullDueMessage(raw: { type?: string }): raw is PullDueMessage {
-  return raw.type === 'pull-due';
-}
 
 async function loadInferenceKey(): Promise<void> {
   if (!TEE_API_KEY_SSM_PATH || process.env['TEE_API_KEY']) return;
@@ -107,159 +83,15 @@ async function loadAgentToken(): Promise<void> {
   }
 }
 
-async function processLoop(
-  registry: TenantRegistry,
-  assignedTenantId: string,
-  haltGate: HaltGate,
-): Promise<void> {
-  console.log('processing loop started', { queue: QUEUE_URL });
+// Stage 2 (design §5): boot unseals ONE master key per assigned tenant into its own single-CMK
+// context; the registry keys them by tenantId so no keyed op can reach another tenant's material.
+// N=1 (a dedicated box, the default tier §6.1) is the single-tenant fallback in parseTenantAssignments.
+const assignments = parseTenantAssignments(process.env);
+const primaryTenantId = assignments[0]!.tenantId;
+// Pool-scoped idle is Stage 4 (infra); until the wake Lambda tracks the pool, the idle flag stays
+// on the primary tenant's SSM path so dedicated (N=1) behavior is unchanged.
+const idleSsmPath = `/folklore/${primaryTenantId}/idle`;
 
-  let idlePolls = 0;
-  let isIdle = false;
-
-  const drainBatch = async (): Promise<void> => {
-    const resp = await sqs.send(
-      new ReceiveMessageCommand({
-        QueueUrl: QUEUE_URL,
-        MaxNumberOfMessages: 10,
-        WaitTimeSeconds: 20,
-      }),
-    );
-
-    const messages = resp.Messages ?? [];
-
-    if (messages.length === 0) {
-      idlePolls++;
-      if (idlePolls >= IDLE_POLL_THRESHOLD && !isIdle) {
-        isIdle = true;
-        await ssm
-          .send(
-            new PutParameterCommand({
-              Name: IDLE_SSM_PATH,
-              Value: '1',
-              Type: 'String',
-              Overwrite: true,
-            }),
-          )
-          .catch(() => {}); // non-fatal — parent timer will catch next cycle
-      }
-    } else {
-      if (isIdle) {
-        isIdle = false;
-        await ssm
-          .send(
-            new PutParameterCommand({
-              Name: IDLE_SSM_PATH,
-              Value: '0',
-              Type: 'String',
-              Overwrite: true,
-            }),
-          )
-          .catch(() => {});
-      }
-      idlePolls = 0;
-    }
-
-    const ackBatch = new DurableAckBatch();
-
-    for (const msg of messages) {
-      if (RAW_PAYLOADS_BUCKET && msg.MessageId && msg.Body) {
-        const now = new Date();
-        const archiveKey = `${assignedTenantId}/${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}/${String(now.getUTCDate()).padStart(2, '0')}/${msg.MessageId}`;
-        void s3
-          .send(
-            new PutObjectCommand({
-              Bucket: RAW_PAYLOADS_BUCKET,
-              Key: archiveKey,
-              Body: msg.Body,
-              ContentType: 'text/plain',
-            }),
-          )
-          .catch(() => {});
-      }
-      try {
-        const raw = JSON.parse(msg.Body!) as SqsMessage | PullDueMessage;
-        // Every keyed op takes its tenant from an explicit context, never a process-global
-        // (design §2.2/§2.3). An unassigned tenant_id throws here and the message is left in
-        // queue — it is undecryptable under any assigned key anyway.
-        const context = registry.get(raw.tenant_id);
-        const facts = isPullDueMessage(raw)
-          ? await runPull(raw, {
-              ssm,
-              privateKey: context.ingestPrivateKey,
-              controlPlaneUrl: CONTROL_PLANE_URL,
-              deploymentId: DEPLOYMENT_ID,
-              agentToken: process.env['AGENT_TOKEN'] ?? '',
-              pipeline: context.pipeline,
-            })
-          : await (async () => {
-              const encryptedPayload: EncryptedPayload = {
-                ephemeralPublicKey: raw.ephemeralPublicKey,
-                nonce: raw.nonce,
-                ciphertext: raw.ciphertext,
-              };
-              const plaintext = decryptPayload(encryptedPayload, context.ingestPrivateKey);
-              return raw.type === 'pull-normalized'
-                ? context.pipeline.handleNormalized(plaintext, raw.source)
-                : context.pipeline.handle(plaintext, raw.source, raw.eventType ?? '');
-            })();
-        for (const fact of facts) {
-          await sqs.send(
-            new SendMessageCommand({
-              QueueUrl: PROCESSED_QUEUE_URL,
-              MessageBody: JSON.stringify(fact),
-              MessageGroupId: fact.orgId,
-              MessageDeduplicationId: fact.factId,
-            }),
-          );
-        }
-        // A completed pull (even one that yielded no new facts) advances sync health so the
-        // scheduler's staleness-based recovery backfill works (ADL #38); worker owns the DB write.
-        if (isPullDueMessage(raw)) {
-          const signal = buildPullCompleteSignal(raw);
-          await sqs.send(
-            new SendMessageCommand({
-              QueueUrl: PROCESSED_QUEUE_URL,
-              MessageBody: JSON.stringify(signal),
-              MessageGroupId: signal.orgId,
-              MessageDeduplicationId: `pull-complete-${signal.sourceId}-${signal.completedAt}`,
-            }),
-          );
-        }
-        // Defer the ack: the message is deleted only after its tenant's index is persisted (below),
-        // so a hard crash before that save redelivers the message instead of dropping the insert.
-        ackBatch.add({
-          tenantId: context.tenantId,
-          hasUnsavedInserts: () => context.hnsw.hasUnsavedInserts(),
-          persist: () =>
-            context.hnsw.save(s3, context.keyring, PROCESSED_OUTPUTS_BUCKET, context.tenantId),
-          ack: async () => {
-            await sqs.send(
-              new DeleteMessageCommand({ QueueUrl: QUEUE_URL, ReceiptHandle: msg.ReceiptHandle! }),
-            );
-          },
-        });
-      } catch {
-        // Content-free SQS id only — err could carry a decrypted-content snippet (ADL #18).
-        console.error('failed to process message', { id: msg.MessageId });
-        // Leave in queue — visibility timeout retries, DLQ after 3 attempts
-      }
-    }
-
-    await ackBatch.commit();
-  };
-
-  for (;;) {
-    // Gate before any dequeue: a halted box must not receive, decrypt, or
-    // persist. When halted, idle without touching the queue and re-check.
-    const processed = await haltGate.guard(drainBatch);
-    if (!processed) await new Promise((resolve) => setTimeout(resolve, HALT_POLL_INTERVAL_MS));
-  }
-}
-
-// Stage 1 (shared-tier design §9): the registry holds exactly ONE context, built from
-// TENANT_ID/KMS_KEY_ID. This replaces the former process-global keyring/masterKey/hnsw/pipeline
-// so Stage 2 can build N contexts without any tenant sharing a keyring — pure refactor for now.
 const tenantFactory = new TenantContextFactory({
   s3,
   ssm,
@@ -269,20 +101,25 @@ const tenantFactory = new TenantContextFactory({
   processedOutputsBucket: PROCESSED_OUTPUTS_BUCKET,
 });
 const registry = new TenantRegistry();
-registry.register(
-  await tenantFactory.build({
-    tenantId: TENANT_ID,
-    kmsKeyId: KMS_KEY_ID,
-    recoveryPubkey: RECOVERY_PUBKEY,
-  }),
-);
+for (const assignment of assignments) {
+  registry.register(
+    await tenantFactory.build({
+      tenantId: assignment.tenantId,
+      kmsKeyId: assignment.kmsKeyId,
+      recoveryPubkey: assignment.recoveryPubkey,
+    }),
+  );
+}
+console.log('tenant contexts assigned', { count: registry.size });
+
 await loadInferenceKey();
 assertInferenceConfigured();
 await loadAgentToken();
 
-// Stage 1 keeps single-context read-path wiring, but sourced from the registry rather than a bare
-// global; Stage 2 resolves the context per request from the verified JWT orgId (design §4.2).
-const boxContext = registry.get(TENANT_ID);
+// The in-enclave read path stays wired to the primary context. Per-request keyring selection from
+// the verified JWT orgId (design §4.2) is the read-path follow-up — it needs the apps/api resolver
+// seam and is out of this enclave-scoped PR.
+const boxContext = registry.get(primaryTenantId);
 
 // ADL #13: the break-glass halt and billing suspension gate every dequeue. Without a
 // halt gate the loop would drain/decrypt fail-open, so refuse to boot rather than run ungated.
@@ -292,7 +129,12 @@ if (!DEPLOYMENT_ID || !REDIS_URL) {
   );
 }
 const haltCache = new RedisCache(REDIS_URL);
-const haltGate = new HaltGate(haltCache, DEPLOYMENT_ID);
+// Pool-wide emergency halt (unchanged single-tenant semantics) plus a per-tenant gate each (§6.3),
+// so halting tenant A never stops tenant B's queue.
+const poolHalt = new HaltGate(haltCache, DEPLOYMENT_ID);
+const tenantHaltGates = new Map(
+  assignments.map((a) => [a.tenantId, new HaltGate(haltCache, a.tenantId)] as const),
+);
 
 // ADL #18: the enclave has no PostHog egress, so inference ops telemetry (attestation
 // failures, receipt verifications, model-gate rejections) is buffered onto the shared
@@ -305,6 +147,8 @@ setInferenceTelemetry(
 // reads decrypted content over the in-enclave Postgres proxy and never leaves.
 let apiContainer: ApiContainer | undefined;
 try {
+  // Refuse the single-context read path for a shared pool (N>1) before wiring it (§4.2).
+  assertReadPathSupported(registry.size);
   // ADL #34/#6: search + wiki/recommend are served by the in-enclave retriever —
   // embed, ANN over the loaded index, decrypt, and audience-gate, all in-process.
   apiContainer = createContainer({
@@ -329,14 +173,16 @@ try {
   });
   await apiContainer.start();
 } catch (err) {
-  // Degraded, not silent: the SPA still serves but /api/* returns 503 and /health
-  // reports api:unavailable so the outage is observable instead of looking healthy.
-  console.error('BOX_API_DEGRADED', { reason: 'container failed to start', err });
+  // Degraded, not silent: the SPA still serves but /api/* returns 503 and /health reports
+  // api:unavailable so the outage is observable. For a shared pool this is deliberate — the
+  // read path is §4.2, not yet wired — not a failure.
+  console.error('BOX_API_DEGRADED', { reason: 'read path unavailable', err });
 }
 
 new BoxServer(apiContainer?.app.fetch).start();
 
-if (SYNTHESIS_REQUEST_QUEUE_URL) {
+// The synthesis consumer decrypts over a single context too; keep it off for a shared pool (§4.2).
+if (SYNTHESIS_REQUEST_QUEUE_URL && registry.size === 1) {
   // One consumer handles both wiki and theme synthesis requests (dispatched by `type`).
   new SynthesisConsumer({
     sqs,
@@ -349,9 +195,44 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
   }).start();
 }
 
+async function writeIdleFlag(idle: boolean): Promise<void> {
+  await ssm
+    .send(
+      new PutParameterCommand({
+        Name: idleSsmPath,
+        Value: idle ? '1' : '0',
+        Type: 'String',
+        Overwrite: true,
+      }),
+    )
+    .catch(() => {}); // non-fatal — parent timer will catch next cycle
+}
+
+const router = new TenantMessageRouter({
+  registry,
+  ssm,
+  controlPlaneUrl: CONTROL_PLANE_URL,
+  deploymentId: DEPLOYMENT_ID,
+  agentToken: () => process.env['AGENT_TOKEN'] ?? '',
+});
+
+const drainer = new QueueSetDrainer({
+  sqs,
+  s3,
+  router,
+  assignments: assignments.map((a) => ({ tenantId: a.tenantId, queueUrl: a.queueUrl })),
+  processedQueueUrl: PROCESSED_QUEUE_URL,
+  processedOutputsBucket: PROCESSED_OUTPUTS_BUCKET,
+  rawPayloadsBucket: RAW_PAYLOADS_BUCKET,
+  poolHalt,
+  haltGateFor: (tenantId) => tenantHaltGates.get(tenantId) ?? poolHalt,
+  writeIdle: writeIdleFlag,
+  idlePollThreshold: IDLE_POLL_THRESHOLD,
+});
+
 async function shutdown(): Promise<void> {
-  console.log('enclave shutting down — saving hnsw index');
-  await boxContext.hnsw.save(s3, boxContext.keyring, PROCESSED_OUTPUTS_BUCKET, TENANT_ID);
+  console.log('enclave shutting down — saving hnsw indices', { count: registry.size });
+  await saveAllTenantIndices(registry.all(), s3, PROCESSED_OUTPUTS_BUCKET);
   if (apiContainer) await apiContainer.close().catch(() => {});
   await haltCache.close().catch(() => {});
   process.exit(0);
@@ -360,4 +241,4 @@ async function shutdown(): Promise<void> {
 process.on('SIGTERM', () => void shutdown());
 process.on('SIGINT', () => void shutdown());
 
-void processLoop(registry, TENANT_ID, haltGate);
+void drainer.runForever();

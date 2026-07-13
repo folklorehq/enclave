@@ -9,9 +9,9 @@ export class UnknownTenantError extends Error {
 }
 
 // Maps tenantId → its own TenantContext. There is no global keyring: crypto/storage callers
-// resolve a context here and use only that context's key material, so adding contexts later can
-// never accidentally share a keyring across tenants (shared-tier design §2.2 point 1). Stage 1
-// holds exactly one context, built from TENANT_ID.
+// resolve a context here and use only that context's key material, so no tenant can ever reach
+// another's keyring (shared-tier design §2.2 point 1). Holds 1..N contexts — a dedicated box is
+// simply the registry with one assigned tenant (design §6.1: dedicated is the default tier).
 export class TenantRegistry {
   private readonly contexts = new Map<string, TenantContext>();
 
@@ -27,5 +27,13 @@ export class TenantRegistry {
     const context = this.contexts.get(tenantId);
     if (!context) throw new UnknownTenantError(tenantId);
     return context;
+  }
+
+  all(): TenantContext[] {
+    return [...this.contexts.values()];
+  }
+
+  get size(): number {
+    return this.contexts.size;
   }
 }
