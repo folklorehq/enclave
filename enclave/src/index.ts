@@ -1,4 +1,4 @@
-import { S3Client, GetObjectCommand, PutObjectCommand, NoSuchKey } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import {
   SQSClient,
   ReceiveMessageCommand,
@@ -6,14 +6,9 @@ import {
   SendMessageCommand,
 } from '@aws-sdk/client-sqs';
 import { SSMClient, PutParameterCommand, GetParameterCommand } from '@aws-sdk/client-ssm';
-import { KMSClient } from '@aws-sdk/client-kms';
-import { KmsKeyringNode } from '@aws-crypto/client-node';
-import { generateMasterKey, deriveIngestKeypair } from './sealing/keygen.js';
-import { sealMasterKey, unsealMasterKey } from './sealing/seal.js';
-import { assertRecoveryConfigured, sealRecoveryMnemonic } from './sealing/recovery.js';
 import { decryptPayload, type EncryptedPayload } from './ingest/receiver.js';
-import { Pipeline } from './pipeline/index.js';
-import { HnswStore } from './hnsw/index.js';
+import { TenantContextFactory } from './tenant/tenant-context-factory.js';
+import { TenantRegistry } from './tenant/tenant-registry.js';
 import { BoxServer } from './http/server.js';
 import { SynthesisConsumer } from './workers/synthesis-consumer.js';
 import { fetchLinkPreview } from './preview/preview-client.js';
@@ -62,9 +57,6 @@ const REDIS_URL = process.env['REDIS_URL'] ?? '';
 // refuses to generate a master key without it — no tenant may hold data with zero recovery path.
 const RECOVERY_PUBKEY = process.env['RECOVERY_PUBKEY'] ?? '';
 
-const SEALED_BLOB_KEY = `sealed-keys/${TENANT_ID}/master.blob`;
-const RECOVERY_BLOB_KEY = `recovery/${TENANT_ID}/mnemonic.enc`;
-const INGEST_KEY_SSM_PATH = `/folklore/${TENANT_ID}/ingest-public-key`;
 const IDLE_SSM_PATH = `/folklore/${TENANT_ID}/idle`;
 // After 15 consecutive empty long-polls (~5 min) the enclave signals idle.
 const IDLE_POLL_THRESHOLD = 15;
@@ -75,12 +67,6 @@ const proxyEndpoint = `https://localhost:${PROXY_PORT}`;
 const s3 = new S3Client({ region: REGION, endpoint: proxyEndpoint });
 const sqs = new SQSClient({ region: REGION, endpoint: proxyEndpoint });
 const ssm = new SSMClient({ region: REGION, endpoint: proxyEndpoint });
-
-const keyring = new KmsKeyringNode({
-  generatorKeyId: KMS_KEY_ID,
-  clientProvider: (r?: string) =>
-    new KMSClient({ region: r ?? REGION, endpoint: proxyEndpoint }) as never,
-});
 
 interface SqsMessage {
   tenant_id: string;
@@ -94,61 +80,6 @@ interface SqsMessage {
 
 function isPullDueMessage(raw: { type?: string }): raw is PullDueMessage {
   return raw.type === 'pull-due';
-}
-
-async function boot(): Promise<Buffer> {
-  let sealedBlob: Buffer | null = null;
-
-  try {
-    const obj = await s3.send(
-      new GetObjectCommand({ Bucket: SEALED_BLOB_BUCKET, Key: SEALED_BLOB_KEY }),
-    );
-    sealedBlob = Buffer.from(await obj.Body!.transformToByteArray());
-  } catch (err) {
-    if (!(err instanceof NoSuchKey)) throw err;
-  }
-
-  if (sealedBlob) {
-    console.log('unsealing master key via KMS');
-    const masterKey = await unsealMasterKey(sealedBlob, KMS_KEY_ID);
-    console.log('unseal ok');
-    return masterKey;
-  }
-
-  console.log('first boot — generating master key');
-  // Fail closed before generating a key we could never let the customer recover (ADL #55).
-  const recoveryKey = assertRecoveryConfigured(RECOVERY_PUBKEY);
-  const masterKey = generateMasterKey();
-
-  // Store only ciphertext the customer alone can open; write it before persisting the
-  // master blob so a recovery-store failure leaves no ingestible tenant behind.
-  const recoveryBox = sealRecoveryMnemonic(masterKey, recoveryKey);
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: SEALED_BLOB_BUCKET,
-      Key: RECOVERY_BLOB_KEY,
-      Body: JSON.stringify(recoveryBox),
-      ContentType: 'application/json',
-    }),
-  );
-
-  const blob = await sealMasterKey(masterKey, KMS_KEY_ID);
-  await s3.send(
-    new PutObjectCommand({ Bucket: SEALED_BLOB_BUCKET, Key: SEALED_BLOB_KEY, Body: blob }),
-  );
-
-  const { publicKeyRaw } = deriveIngestKeypair(masterKey);
-  await ssm.send(
-    new PutParameterCommand({
-      Name: INGEST_KEY_SSM_PATH,
-      Value: publicKeyRaw.toString('hex'),
-      Type: 'String',
-      Overwrite: true,
-    }),
-  );
-
-  console.log('FIRST_BOOT', { tenant: TENANT_ID });
-  return masterKey;
 }
 
 async function loadInferenceKey(): Promise<void> {
@@ -176,11 +107,10 @@ async function loadAgentToken(): Promise<void> {
 }
 
 async function processLoop(
-  masterKey: Buffer,
-  pipeline: Pipeline,
+  registry: TenantRegistry,
+  assignedTenantId: string,
   haltGate: HaltGate,
 ): Promise<void> {
-  const { privateKey } = deriveIngestKeypair(masterKey);
   console.log('processing loop started', { queue: QUEUE_URL });
 
   let idlePolls = 0;
@@ -232,7 +162,7 @@ async function processLoop(
     for (const msg of messages) {
       if (RAW_PAYLOADS_BUCKET && msg.MessageId && msg.Body) {
         const now = new Date();
-        const archiveKey = `${TENANT_ID}/${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}/${String(now.getUTCDate()).padStart(2, '0')}/${msg.MessageId}`;
+        const archiveKey = `${assignedTenantId}/${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}/${String(now.getUTCDate()).padStart(2, '0')}/${msg.MessageId}`;
         void s3
           .send(
             new PutObjectCommand({
@@ -246,14 +176,18 @@ async function processLoop(
       }
       try {
         const raw = JSON.parse(msg.Body!) as SqsMessage | PullDueMessage;
+        // Every keyed op takes its tenant from an explicit context, never a process-global
+        // (design §2.2/§2.3). An unassigned tenant_id throws here and the message is left in
+        // queue — it is undecryptable under any assigned key anyway.
+        const context = registry.get(raw.tenant_id);
         const facts = isPullDueMessage(raw)
           ? await runPull(raw, {
               ssm,
-              privateKey,
+              privateKey: context.ingestPrivateKey,
               controlPlaneUrl: CONTROL_PLANE_URL,
               deploymentId: DEPLOYMENT_ID,
               agentToken: process.env['AGENT_TOKEN'] ?? '',
-              pipeline,
+              pipeline: context.pipeline,
             })
           : await (async () => {
               const encryptedPayload: EncryptedPayload = {
@@ -261,10 +195,10 @@ async function processLoop(
                 nonce: raw.nonce,
                 ciphertext: raw.ciphertext,
               };
-              const plaintext = decryptPayload(encryptedPayload, privateKey);
+              const plaintext = decryptPayload(encryptedPayload, context.ingestPrivateKey);
               return raw.type === 'pull-normalized'
-                ? pipeline.handleNormalized(plaintext, raw.source)
-                : pipeline.handle(plaintext, raw.source, raw.eventType ?? '');
+                ? context.pipeline.handleNormalized(plaintext, raw.source)
+                : context.pipeline.handle(plaintext, raw.source, raw.eventType ?? '');
             })();
         for (const fact of facts) {
           await sqs.send(
@@ -308,12 +242,32 @@ async function processLoop(
   }
 }
 
-const masterKey = await boot();
+// Stage 1 (shared-tier design §9): the registry holds exactly ONE context, built from
+// TENANT_ID/KMS_KEY_ID. This replaces the former process-global keyring/masterKey/hnsw/pipeline
+// so Stage 2 can build N contexts without any tenant sharing a keyring — pure refactor for now.
+const tenantFactory = new TenantContextFactory({
+  s3,
+  ssm,
+  region: REGION,
+  proxyEndpoint,
+  sealedBlobBucket: SEALED_BLOB_BUCKET,
+  processedOutputsBucket: PROCESSED_OUTPUTS_BUCKET,
+});
+const registry = new TenantRegistry();
+registry.register(
+  await tenantFactory.build({
+    tenantId: TENANT_ID,
+    kmsKeyId: KMS_KEY_ID,
+    recoveryPubkey: RECOVERY_PUBKEY,
+  }),
+);
 await loadInferenceKey();
 assertInferenceConfigured();
 await loadAgentToken();
-const hnsw = await HnswStore.load(s3, keyring, PROCESSED_OUTPUTS_BUCKET, TENANT_ID);
-const pipeline = new Pipeline(hnsw, s3, keyring, PROCESSED_OUTPUTS_BUCKET, TENANT_ID);
+
+// Stage 1 keeps single-context read-path wiring, but sourced from the registry rather than a bare
+// global; Stage 2 resolves the context per request from the verified JWT orgId (design §4.2).
+const boxContext = registry.get(TENANT_ID);
 
 // ADL #13: the break-glass halt and billing suspension gate every dequeue. Without a
 // halt gate the loop would drain/decrypt fail-open, so refuse to boot rather than run ungated.
@@ -342,21 +296,21 @@ try {
     retrieverFactory: (retrieverDeps) =>
       new EnclaveFactRetriever({
         ...retrieverDeps,
-        hnsw,
+        hnsw: boxContext.hnsw,
         s3,
-        keyring,
+        keyring: boxContext.keyring,
         processedBucket: PROCESSED_OUTPUTS_BUCKET,
       }),
     // ADL #12: synthesized wiki text is ciphertext at rest; the read path decrypts
     // audience-visible blocks here, in-enclave, over the sealed key.
-    wikiContentDecryptor: new EnclaveWikiContentDecryptor(keyring),
+    wikiContentDecryptor: new EnclaveWikiContentDecryptor(boxContext.keyring),
     // ADL #12/#45: mined draft→edit prose is sealed to the same key, in-enclave only.
-    wikiEditSealer: new EnclaveWikiEditSealer(keyring),
+    wikiEditSealer: new EnclaveWikiEditSealer(boxContext.keyring),
     // ADL #12: live-collab Yjs snapshots, comments, and feedback corrections are sealed to the
     // same key, in-enclave only.
-    wikiSnapshotSealer: new EnclaveWikiSnapshotSealer(keyring),
-    wikiCommentSealer: new EnclaveWikiCommentSealer(keyring),
-    wikiFeedbackSealer: new EnclaveWikiFeedbackSealer(keyring),
+    wikiSnapshotSealer: new EnclaveWikiSnapshotSealer(boxContext.keyring),
+    wikiCommentSealer: new EnclaveWikiCommentSealer(boxContext.keyring),
+    wikiFeedbackSealer: new EnclaveWikiFeedbackSealer(boxContext.keyring),
   });
   await apiContainer.start();
 } catch (err) {
@@ -372,7 +326,7 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
   new SynthesisConsumer({
     sqs,
     s3,
-    keyring,
+    keyring: boxContext.keyring,
     processedBucket: PROCESSED_OUTPUTS_BUCKET,
     synthesisQueueUrl: SYNTHESIS_REQUEST_QUEUE_URL,
     processedQueueUrl: PROCESSED_QUEUE_URL,
@@ -382,7 +336,7 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
 
 async function shutdown(): Promise<void> {
   console.log('enclave shutting down — saving hnsw index');
-  await hnsw.save(s3, keyring, PROCESSED_OUTPUTS_BUCKET, TENANT_ID);
+  await boxContext.hnsw.save(s3, boxContext.keyring, PROCESSED_OUTPUTS_BUCKET, TENANT_ID);
   if (apiContainer) await apiContainer.close().catch(() => {});
   await haltCache.close().catch(() => {});
   process.exit(0);
@@ -391,4 +345,4 @@ async function shutdown(): Promise<void> {
 process.on('SIGTERM', () => void shutdown());
 process.on('SIGINT', () => void shutdown());
 
-void processLoop(masterKey, pipeline, haltGate);
+void processLoop(registry, TENANT_ID, haltGate);
