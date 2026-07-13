@@ -1,18 +1,18 @@
-// One assigned tenant's content-free routing identifiers (design §4.3). All fields are ids/URLs,
-// never customer data. Stage 2 reads the set from env; when the control plane's assignment manifest
-// lands (Stage 5) this shape moves to @folklore/contracts as the delivered wire DTO.
-export interface TenantAssignment {
-  tenantId: string;
-  kmsKeyId: string;
-  queueUrl: string;
-  recoveryPubkey: string;
-}
+import {
+  type AssignmentManifest,
+  type TenantAssignment,
+  parseAssignmentManifest as parseContractManifest,
+  tenantAssignmentSchema,
+} from '@folklore/contracts';
+
+// The assignment shape is defined ONCE in @folklore/contracts (design §4.3) so the control-plane
+// producer and this consumer cannot drift. Env parsing is the bootstrap/dedicated fallback (§6.1);
+// `parseAssignmentManifest` is the runtime path for a manifest delivered on the check-in channel.
+export type { TenantAssignment, AssignmentManifest };
 
 const REQUIRED_FIELDS = ['tenantId', 'kmsKeyId', 'queueUrl'] as const;
 
-// Resolves the enclave's assigned tenants. A dedicated box (the default tier, design §6.1) is the
-// single-tenant fallback — TENANT_ID/KMS_KEY_ID/QUEUE_URL — so N=1 stays a first-class path. A
-// shared-pool host instead gets TENANT_ASSIGNMENTS (a JSON array), yielding N contexts.
+/** Resolves the enclave's assigned tenants from env: TENANT_ASSIGNMENTS (a JSON array, shared pool) or the TENANT_ID single-tenant fallback (a dedicated box, the default tier §6.1). */
 export function parseTenantAssignments(env: NodeJS.ProcessEnv): TenantAssignment[] {
   const manifest = env['TENANT_ASSIGNMENTS']?.trim();
   const assignments = manifest ? parseManifest(manifest) : parseSingleTenant(env);
@@ -22,6 +22,16 @@ export function parseTenantAssignments(env: NodeJS.ProcessEnv): TenantAssignment
   }
   assertNoDuplicates(assignments);
   return assignments;
+}
+
+/** Validates a check-in-delivered assignment manifest (design §4.3) via the shared routing guard, then enforces the registry's no-duplicate-tenant invariant. */
+export function parseAssignmentManifest(
+  manifest: unknown,
+  expectedPoolId: string,
+): TenantAssignment[] {
+  const parsed = parseContractManifest(manifest, expectedPoolId);
+  assertNoDuplicates(parsed.assignments);
+  return parsed.assignments;
 }
 
 function parseManifest(manifest: string): TenantAssignment[] {
@@ -51,6 +61,9 @@ function parseSingleTenant(env: NodeJS.ProcessEnv): TenantAssignment[] {
   ];
 }
 
+// Friendly per-field messages first (a misconfigured env should name the missing field), then the
+// shared zod schema is the authoritative shape guard — the returned value is a contract-valid
+// TenantAssignment, never a locally-shaped near-miss.
 function toAssignment(entry: unknown, index: number): TenantAssignment {
   if (typeof entry !== 'object' || entry === null) {
     throw new Error(`tenant assignment [${index}] is not an object`);
@@ -62,12 +75,12 @@ function toAssignment(entry: unknown, index: number): TenantAssignment {
       throw new Error(`tenant assignment [${index}] is missing ${field}`);
     }
   }
-  return {
+  return tenantAssignmentSchema.parse({
     tenantId: (record['tenantId'] as string).trim(),
     kmsKeyId: (record['kmsKeyId'] as string).trim(),
     queueUrl: (record['queueUrl'] as string).trim(),
     recoveryPubkey: typeof record['recoveryPubkey'] === 'string' ? record['recoveryPubkey'] : '',
-  };
+  });
 }
 
 function assertNoDuplicates(assignments: TenantAssignment[]): void {
