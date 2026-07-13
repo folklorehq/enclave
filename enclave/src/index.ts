@@ -7,6 +7,7 @@ import {
 } from '@aws-sdk/client-sqs';
 import { SSMClient, PutParameterCommand, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { decryptPayload, type EncryptedPayload } from './ingest/receiver.js';
+import { DurableAckBatch } from './ingest/durable-ack-batch.js';
 import { TenantContextFactory } from './tenant/tenant-context-factory.js';
 import { TenantRegistry } from './tenant/tenant-registry.js';
 import { BoxServer } from './http/server.js';
@@ -159,6 +160,8 @@ async function processLoop(
       idlePolls = 0;
     }
 
+    const ackBatch = new DurableAckBatch();
+
     for (const msg of messages) {
       if (RAW_PAYLOADS_BUCKET && msg.MessageId && msg.Body) {
         const now = new Date();
@@ -223,15 +226,27 @@ async function processLoop(
             }),
           );
         }
-        await sqs.send(
-          new DeleteMessageCommand({ QueueUrl: QUEUE_URL, ReceiptHandle: msg.ReceiptHandle! }),
-        );
+        // Defer the ack: the message is deleted only after its tenant's index is persisted (below),
+        // so a hard crash before that save redelivers the message instead of dropping the insert.
+        ackBatch.add({
+          tenantId: context.tenantId,
+          hasUnsavedInserts: () => context.hnsw.hasUnsavedInserts(),
+          persist: () =>
+            context.hnsw.save(s3, context.keyring, PROCESSED_OUTPUTS_BUCKET, context.tenantId),
+          ack: async () => {
+            await sqs.send(
+              new DeleteMessageCommand({ QueueUrl: QUEUE_URL, ReceiptHandle: msg.ReceiptHandle! }),
+            );
+          },
+        });
       } catch {
         // Content-free SQS id only — err could carry a decrypted-content snippet (ADL #18).
         console.error('failed to process message', { id: msg.MessageId });
         // Leave in queue — visibility timeout retries, DLQ after 3 attempts
       }
     }
+
+    await ackBatch.commit();
   };
 
   for (;;) {
