@@ -1,4 +1,5 @@
 import { buildClient, CommitmentPolicy, type KmsKeyringNode } from '@aws-crypto/client-node';
+import type { WikiCommentField } from '@folklore/contracts';
 
 const { encrypt, decrypt } = buildClient(CommitmentPolicy.REQUIRE_ENCRYPT_REQUIRE_DECRYPT);
 
@@ -27,7 +28,7 @@ export interface CollabSnapshotRef {
 export interface WikiCommentRef {
   orgId: string;
   pageId: string;
-  field: 'anchor' | 'reply';
+  field: WikiCommentField;
 }
 
 // A human-written AI-feedback correction is raw wiki prose, sealed bound to (org, block) so a
@@ -53,6 +54,16 @@ export interface WikiBlockRef extends WikiArticleRef {
 
 function audienceKey(audienceId: string | null): string {
   return audienceId ?? 'all';
+}
+
+// Decrypt succeeded but the bound row identity didn't match — a ciphertext relocated to another
+// row (ADL #12/#34). Distinct from an infra/KMS decrypt failure so callers can tell an integrity
+// event from a transient hiccup.
+export class EncryptionContextMismatchError extends Error {
+  constructor(purpose: string) {
+    super(`${purpose} encryption context mismatch`);
+    this.name = 'EncryptionContextMismatchError';
+  }
 }
 
 // The enclave's single ESDK surface. Every ciphertext binds its row identity into
@@ -181,7 +192,7 @@ export class EnclaveCrypto {
     const mismatch =
       ctx['purpose'] !== purpose ||
       Object.entries(identity).some(([key, value]) => ctx[key] !== value);
-    if (mismatch) throw new Error(`${purpose} encryption context mismatch`);
+    if (mismatch) throw new EncryptionContextMismatchError(purpose);
     return Buffer.from(plaintext);
   }
 }

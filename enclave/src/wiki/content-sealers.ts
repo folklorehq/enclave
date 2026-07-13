@@ -7,7 +7,9 @@ import type {
   WikiSnapshotSealRef,
   WikiSnapshotSealer,
 } from '@folklore/api';
-import { EnclaveCrypto } from '../crypto/esdk.js';
+import { EnclaveCrypto, EncryptionContextMismatchError } from '../crypto/esdk.js';
+
+const UNSEAL_FAILED_EVENT = 'WIKI_UNSEAL_FAILED';
 
 // ADL #12: human-authored wiki prose at rest (live-collab snapshots, comments, feedback
 // corrections) is sealed to the same key as wiki blocks and unsealed only in-enclave. A relocated
@@ -22,9 +24,27 @@ abstract class EnclaveSealerBase {
   protected async tryUnseal(decrypt: () => Promise<Buffer>): Promise<Buffer | null> {
     try {
       return await decrypt();
-    } catch {
+    } catch (err) {
+      this.logUnsealFailure(err);
       return null;
     }
+  }
+
+  // Content-free (ADL #12/#18): the error class/code only — never the message or plaintext — lets
+  // operators tell a genuine AAD-mismatch integrity event from a transient/infra (e.g. KMS) blip.
+  private logUnsealFailure(err: unknown): void {
+    const integrity = err instanceof EncryptionContextMismatchError;
+    console.warn(UNSEAL_FAILED_EVENT, {
+      kind: integrity ? 'aad-mismatch' : 'decrypt-error',
+      errorName: err instanceof Error ? err.name : typeof err,
+      errorCode: this.errorCode(err),
+    });
+  }
+
+  private errorCode(err: unknown): string | undefined {
+    if (typeof err !== 'object' || err === null || !('code' in err)) return undefined;
+    const code = (err as { code: unknown }).code;
+    return typeof code === 'string' ? code : undefined;
   }
 }
 
