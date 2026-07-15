@@ -7,6 +7,10 @@ export interface EncryptedPayload {
   ciphertext: string; // hex, includes 16-byte GCM auth tag appended
 }
 
+const X25519_RAW_KEY_BYTES = 32;
+const AES_KEY_BYTES = 32;
+const GCM_TAG_BYTES = 16;
+
 function deriveAesKey(
   sharedSecret: Buffer,
   ephemeralPubBytes: Buffer,
@@ -17,7 +21,7 @@ function deriveAesKey(
     ephemeralPubBytes,
     recipientPubBytes,
   ]);
-  return Buffer.from(hkdfSync('sha256', sharedSecret, Buffer.alloc(0), info, 32));
+  return Buffer.from(hkdfSync('sha256', sharedSecret, Buffer.alloc(0), info, AES_KEY_BYTES));
 }
 
 export function decryptPayload(msg: EncryptedPayload, privateKey: KeyObject): Buffer {
@@ -33,14 +37,16 @@ export function decryptPayload(msg: EncryptedPayload, privateKey: KeyObject): Bu
   const sharedSecret = diffieHellman({ privateKey, publicKey: ephemeralPub });
 
   const recipientPubBytes = Buffer.from(
-    createPublicKey(privateKey).export({ type: 'spki', format: 'der' }).slice(-32),
+    createPublicKey(privateKey)
+      .export({ type: 'spki', format: 'der' })
+      .slice(-X25519_RAW_KEY_BYTES),
   );
 
   const aesKey = deriveAesKey(sharedSecret, ephemeralPubBytes, recipientPubBytes);
 
   // Python's AESGCM appends the 16-byte auth tag to the ciphertext
-  const authTag = ciphertextWithTag.slice(-16);
-  const ciphertext = ciphertextWithTag.slice(0, -16);
+  const authTag = ciphertextWithTag.slice(-GCM_TAG_BYTES);
+  const ciphertext = ciphertextWithTag.slice(0, -GCM_TAG_BYTES);
 
   const decipher = createDecipheriv('aes-256-gcm', aesKey, nonce);
   decipher.setAuthTag(authTag);

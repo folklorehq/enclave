@@ -66,7 +66,7 @@ function v6Range(addr: string, prefix: number): V6Range {
   return { bytes, prefix };
 }
 
-export function parseIPv4(ip: string): number | null {
+function parseIPv4(ip: string): number | null {
   const parts = ip.split('.');
   if (parts.length !== 4) return null;
   let value = 0;

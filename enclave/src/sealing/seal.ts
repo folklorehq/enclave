@@ -9,8 +9,8 @@ const MASTER_KEY_PURPOSE = 'master-key';
 const MASTER_KEY_VERSION = '1';
 
 // Shared tier binds tenantId into the KMS AAD so a master blob is cryptographically pinned to its
-// tenant independent of which CMK opens it (design §2.2 point 2). Omitted for legacy dedicated
-// blobs sealed before binding — unseal below falls back to the tenant-agnostic context for those.
+// tenant independent of which CMK opens it (ADL #30). Omitted for legacy dedicated blobs sealed
+// before binding — unseal below falls back to the tenant-agnostic context for those.
 function masterKeyContext(tenantId?: string): Record<string, string> {
   const context: Record<string, string> = {
     purpose: MASTER_KEY_PURPOSE,

@@ -32,6 +32,8 @@ const SIGNABLE_SOURCES = new Set([
 ]);
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
+const MS_PER_S = 1000;
+const SLACK_REPLAY_TOLERANCE_S = 300;
 const publicKeyCache = new Map<string, { key: Buffer; expiresAt: number }>();
 const hmacSecretCache = new Map<string, { secret: string | null; expiresAt: number }>();
 
@@ -108,7 +110,7 @@ function verifySignature(
       const ts = headers['x-slack-request-timestamp'];
       if (!sig?.startsWith('v0=') || !ts) return false;
       // Reject replays older than 5 minutes
-      if (Math.abs(Date.now() / 1000 - Number(ts)) > 300) return false;
+      if (Math.abs(Date.now() / MS_PER_S - Number(ts)) > SLACK_REPLAY_TOLERANCE_S) return false;
       const basestring = `v0:${ts}:${body}`;
       const expected = Buffer.from(sig.slice(3), 'hex');
       const computed = createHmac('sha256', secret).update(basestring, 'utf8').digest();

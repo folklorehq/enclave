@@ -112,7 +112,6 @@ export function openRecoveryBox(box: RecoverySealedBox, recipientPrivateKey: Key
   return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 }
 
-// Derives the mnemonic, seals it to the customer key, and zeroes the plaintext buffer.
 // The master key itself must persist for the process lifetime, so it is not zeroed here.
 export function sealRecoveryMnemonic(
   masterKey: Buffer,
