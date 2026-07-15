@@ -9,6 +9,7 @@ const WIKI_BLOCK_PURPOSE = 'wiki-block';
 const COLLAB_SNAPSHOT_PURPOSE = 'collab-snapshot';
 const WIKI_COMMENT_PURPOSE = 'wiki-comment';
 const WIKI_FEEDBACK_PURPOSE = 'wiki-feedback';
+const LLM_CACHE_PURPOSE = 'llm-cache';
 
 export interface FactBodyRef {
   factId: string;
@@ -36,6 +37,14 @@ export interface WikiCommentRef {
 export interface WikiFeedbackRef {
   orgId: string;
   blockId: string;
+}
+
+// Content-addressed LLM-output cache (determinism #1): outputs are decrypted-content-derived, so
+// the blob is sealed to the fact key bound to (org, cacheKey) — the cacheKey is the content-hash S3
+// suffix, so a blob relocated/overwritten onto another key fails to decrypt (ADL #12).
+export interface LlmCacheRef {
+  orgId: string;
+  cacheKey: string;
 }
 
 // Derived-knowledge (ADL #12) is encrypted to the same key as fact bodies, but
@@ -169,6 +178,21 @@ export class EnclaveCrypto {
     return this.open(ciphertext, WIKI_FEEDBACK_PURPOSE, {
       orgId: expected.orgId,
       blockId: expected.blockId,
+    });
+  }
+
+  encryptLlmCache(plaintext: Buffer, ref: LlmCacheRef): Promise<Buffer> {
+    return this.seal(plaintext, {
+      orgId: ref.orgId,
+      cacheKey: ref.cacheKey,
+      purpose: LLM_CACHE_PURPOSE,
+    });
+  }
+
+  decryptLlmCache(ciphertext: Buffer, expected: LlmCacheRef): Promise<Buffer> {
+    return this.open(ciphertext, LLM_CACHE_PURPOSE, {
+      orgId: expected.orgId,
+      cacheKey: expected.cacheKey,
     });
   }
 

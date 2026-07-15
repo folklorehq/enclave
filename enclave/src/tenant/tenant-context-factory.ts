@@ -7,6 +7,14 @@ import { sealMasterKey, unsealMasterKey } from '../sealing/seal.js';
 import { assertRecoveryConfigured, sealRecoveryMnemonic } from '../sealing/recovery.js';
 import { HnswStore } from '../hnsw/index.js';
 import { Pipeline } from '../pipeline/index.js';
+import { EnclaveCrypto } from '../crypto/esdk.js';
+import { EMBED_MODEL, GENERATE_MODEL, phalaInference } from '../inference/phala.js';
+import {
+  CachedInference,
+  LLM_CACHE_PROMPT_VERSION,
+  type InferenceModel,
+} from '../inference/cached-inference.js';
+import { S3LlmCache } from '../inference/s3-llm-cache.js';
 import { TenantContext } from './tenant-context.js';
 
 export interface TenantIdentity {
@@ -45,6 +53,7 @@ export class TenantContextFactory {
       keyring,
       this.deps.processedOutputsBucket,
       identity.tenantId,
+      this.buildInference(keyring, identity.tenantId),
     );
     return new TenantContext(
       identity.tenantId,
@@ -54,6 +63,20 @@ export class TenantContextFactory {
       hnsw,
       pipeline,
     );
+  }
+
+  private buildInference(keyring: KmsKeyringNode, tenantId: string): InferenceModel {
+    const cache = new S3LlmCache({
+      s3: this.deps.s3,
+      crypto: new EnclaveCrypto(keyring),
+      bucket: this.deps.processedOutputsBucket,
+      orgId: tenantId,
+    });
+    return new CachedInference(phalaInference, cache, {
+      embedModel: EMBED_MODEL,
+      generateModel: GENERATE_MODEL,
+      promptVersion: LLM_CACHE_PROMPT_VERSION,
+    });
   }
 
   private buildKeyring(kmsKeyId: string): KmsKeyringNode {

@@ -7,10 +7,11 @@ import {
   type ToolSpec,
 } from '@folklore/inference';
 import { createTelemetryClient, type TelemetryClient } from '@folklore/telemetry';
+import type { InferenceModel } from './cached-inference.js';
 
 const PROXY_PORT = process.env['VSOCK_INFERENCE_PROXY_PORT'] ?? '';
-const EMBED_MODEL = process.env['EMBED_MODEL'] ?? 'qwen/qwen3-embedding-8b';
-const GENERATE_MODEL = process.env['GENERATE_MODEL'] ?? 'z-ai/glm-5.2';
+export const EMBED_MODEL = process.env['EMBED_MODEL'] ?? 'qwen/qwen3-embedding-8b';
+export const GENERATE_MODEL = process.env['GENERATE_MODEL'] ?? 'z-ai/glm-5.2';
 // The relevance/citation judge — a smaller allowlisted TEE-verified model; decrypted content
 // still goes only to a verified upstream (ADL #30/#40). Low temperature: this is classification.
 const JUDGE_MODEL = process.env['JUDGE_MODEL'] ?? 'qwen/qwen3-32b';
@@ -120,10 +121,13 @@ export async function embedText(text: string): Promise<number[]> {
   return vector;
 }
 
+// Default temperature 0 (greedy) so classification/judge/labeling/synthesis is deterministic unless
+// a caller overrides (determinism #2). Honest ceiling: temp 0 removes sampling variance but a
+// TEE-batched LLM still isn't bit-identical run-to-run — the LLM cache is what makes replay exact.
 export async function generate(
   prompt: string,
   systemPrompt?: string,
-  temperature?: number,
+  temperature = 0,
 ): Promise<string> {
   assertInferenceConfigured();
   return getBackend().generate(prompt, {
@@ -151,3 +155,10 @@ export async function generateStructured(
     temperature: 0,
   });
 }
+
+// The uncached phala-backed model; the CachedInference layer wraps this per-org where a keyring + S3
+// exist (Pipeline, synthesis workers). Arrow wrappers so a partial test mock of this module is safe.
+export const phalaInference: InferenceModel = {
+  embed: (text) => embedText(text),
+  generate: (prompt, systemPrompt, temperature) => generate(prompt, systemPrompt, temperature),
+};
