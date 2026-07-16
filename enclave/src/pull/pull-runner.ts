@@ -21,6 +21,7 @@ import {
   getDecryptedConnectionForKind,
   type DecryptedSourceConnection,
 } from './source-connections-client.js';
+import { fetchGitHubInstallationToken } from './github-token-client.js';
 
 export type { PullDueMessage };
 
@@ -50,11 +51,6 @@ export function buildPullCompleteSignal(
 // ADL #29: the enclave (not the worker signal) owns the uniform 12-month backfill horizon,
 // so no wire message can widen how far back a pull reaches.
 const BACKFILL_WINDOW_MONTHS = 12;
-
-// The GitHub App id + private key are Folklore-held credentials read at runtime (ADL #35);
-// only the SSM paths appear in this public-mirrored source, never the key material.
-const GITHUB_APP_ID_SSM_PATH = '/folklore/github-app/app-id';
-const GITHUB_APP_PRIVATE_KEY_SSM_PATH = '/folklore/github-app/private-key';
 
 export interface PullWindow {
   cursor: SyncCursor;
@@ -127,37 +123,22 @@ async function saveCursor(
   );
 }
 
-async function getRequiredParameter(
-  ssm: SSMClient,
-  name: string,
-  withDecryption: boolean,
-): Promise<string> {
-  const resp = await ssm.send(
-    new GetParameterCommand({ Name: name, WithDecryption: withDecryption }),
-  );
-  const value = resp.Parameter?.Value;
-  if (!value) throw new Error(`missing SSM parameter ${name}`);
-  return value;
+export interface SourceTokenContext {
+  controlPlaneUrl: string;
+  deploymentId: string;
+  agentToken: string;
 }
 
-async function loadGitHubAppCredentials(ssm: SSMClient): Promise<github.GitHubAppCredentials> {
-  const [appId, privateKey] = await Promise.all([
-    getRequiredParameter(ssm, GITHUB_APP_ID_SSM_PATH, false),
-    getRequiredParameter(ssm, GITHUB_APP_PRIVATE_KEY_SSM_PATH, true),
-  ]);
-  return { appId, privateKey };
-}
-
-// GitHub is a GitHub App: the stored connection is the installation id, so mint a
-// short-lived installation token here rather than treating it as a bearer token.
+// GitHub is a GitHub App: the enclave never holds the App private key (S1, ADL #42). It requests a
+// short-lived installation token from the control plane, which scopes it to this deployment's own
+// installation. Other kinds carry a bearer token in the decrypted connection.
 export async function resolveSourceToken(
   kind: string,
   connection: DecryptedSourceConnection,
-  ssm: SSMClient,
+  ctx: SourceTokenContext,
 ): Promise<string> {
   if (kind === 'github') {
-    const credentials = await loadGitHubAppCredentials(ssm);
-    return github.mintInstallationToken(credentials, connection.accessToken);
+    return fetchGitHubInstallationToken(ctx.controlPlaneUrl, ctx.deploymentId, ctx.agentToken);
   }
   return connection.accessToken;
 }
@@ -219,7 +200,11 @@ export async function runPull(
     return [];
   }
 
-  const token = await resolveSourceToken(message.kind, connection, deps.ssm);
+  const token = await resolveSourceToken(message.kind, connection, {
+    controlPlaneUrl: deps.controlPlaneUrl,
+    deploymentId: deps.deploymentId,
+    agentToken: deps.agentToken,
+  });
   const connector = buildConnector(message.kind, token);
   if (!connector) {
     console.warn('pull-due: no connector implementation for kind', message.kind);
