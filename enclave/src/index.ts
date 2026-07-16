@@ -21,7 +21,15 @@ import {
   EnclaveWikiFeedbackSealer,
   EnclaveWikiSnapshotSealer,
 } from './wiki/content-sealers.js';
-import { assertInferenceConfigured, generate, setInferenceTelemetry } from './inference/phala.js';
+import {
+  assertInferenceConfigured,
+  EMBED_MODEL,
+  GENERATE_MODEL,
+  phalaInference,
+  setInferenceTelemetry,
+} from './inference/phala.js';
+import { CachedInference, LLM_CACHE_PROMPT_VERSION } from './inference/cached-inference.js';
+import { S3LlmCache } from './inference/s3-llm-cache.js';
 import { installGlobalEgressDispatcher } from './egress/proxy.js';
 import { createContainer, type ApiContainer, type RetrieverDeps } from '@folklore/api';
 import { RedisCache } from '@folklore/cache';
@@ -160,13 +168,30 @@ try {
       keyring: boxContext.keyring,
       processedBucket: PROCESSED_OUTPUTS_BUCKET,
     });
+  // Content-addressed, ESDK-sealed per-org LLM cache in front of phala (determinism #1, ADL #12):
+  // a repeated question over an unchanged fact set replays without a fresh TEE call. AAD binds the
+  // blob to this org so it can't cross tenants; same layer the synthesis workers use.
+  const answerInference = new CachedInference(
+    phalaInference,
+    new S3LlmCache({
+      s3,
+      crypto: boxContext.crypto,
+      bucket: PROCESSED_OUTPUTS_BUCKET,
+      orgId: boxContext.tenantId,
+    }),
+    {
+      embedModel: EMBED_MODEL,
+      generateModel: GENERATE_MODEL,
+      promptVersion: LLM_CACHE_PROMPT_VERSION,
+    },
+  );
   apiContainer = createContainer({
     retrieverFactory: buildRetriever,
     // ADL #34/#27: grounded answers reuse the same gated retrieval spine, then feed only
     // audience-visible decrypted bodies to the in-enclave TEE model — nothing leaves the enclave.
     answerServiceFactory: (retrieverDeps) =>
       new EnclaveFactAnswerer(buildRetriever(retrieverDeps), (prompt, systemPrompt) =>
-        generate(prompt, systemPrompt),
+        answerInference.generate(prompt, systemPrompt),
       ),
     // ADL #12: synthesized wiki text is ciphertext at rest; the read path decrypts
     // audience-visible blocks here, in-enclave, over the sealed key.
