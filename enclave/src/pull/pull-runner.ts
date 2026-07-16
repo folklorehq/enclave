@@ -128,6 +128,7 @@ export interface SourceTokenContext {
   controlPlaneUrl: string;
   deploymentId: string;
   agentToken: string;
+  privateKey: KeyObject;
 }
 
 // GitHub is a GitHub App: the enclave never holds the App private key (S1, ADL #42). It requests a
@@ -137,9 +138,14 @@ export async function resolveSourceToken(
   kind: string,
   connection: DecryptedSourceConnection,
   ctx: SourceTokenContext,
-): Promise<string> {
+): Promise<string | null> {
   if (kind === 'github') {
-    return fetchGitHubInstallationToken(ctx.controlPlaneUrl, ctx.deploymentId, ctx.agentToken);
+    return fetchGitHubInstallationToken(
+      ctx.controlPlaneUrl,
+      ctx.deploymentId,
+      ctx.agentToken,
+      ctx.privateKey,
+    );
   }
   return connection.accessToken;
 }
@@ -207,7 +213,12 @@ export async function runPull(
     controlPlaneUrl: deps.controlPlaneUrl,
     deploymentId: deps.deploymentId,
     agentToken: deps.agentToken,
+    privateKey: deps.privateKey,
   });
+  if (!token) {
+    console.warn('pull-due: no usable source token for kind', message.kind);
+    return [];
+  }
   const connector = buildConnector(message.kind, token);
   if (!connector) {
     console.warn('pull-due: no connector implementation for kind', message.kind);
