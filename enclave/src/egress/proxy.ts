@@ -1,4 +1,4 @@
-import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
+import { EnvHttpProxyAgent, ProxyAgent, setGlobalDispatcher } from 'undici';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 
 // Lock-step with the socat forwarder in enclave/entrypoint.sh and the vsock bridge in
@@ -32,4 +32,15 @@ let externalProxyAgent: HttpsProxyAgent<string> | undefined;
 // Slack's WebClient uses axios with `proxy: false`, so it must be handed an explicit agent.
 export function externalHttpsProxyAgent(): HttpsProxyAgent<string> {
   return (externalProxyAgent ??= new HttpsProxyAgent(PROXY_URL));
+}
+
+let exportProxyDispatcher: ProxyAgent | undefined;
+
+// A fetch bound explicitly to the CONNECT egress proxy for the outbound wiki-export clients
+// (ADL #65) — belt-and-suspenders over the global dispatcher, so the export write can never dial
+// a destination host directly and fails closed against the host allowlist.
+export function proxiedExportFetch(): typeof globalThis.fetch {
+  const dispatcher = (exportProxyDispatcher ??= new ProxyAgent(PROXY_URL));
+  return ((input, init) =>
+    globalThis.fetch(input, { ...init, dispatcher } as RequestInit)) as typeof globalThis.fetch;
 }
