@@ -32,6 +32,7 @@ const SIGNABLE_SOURCES = new Set([
   'meeting',
   'google_drive',
   'zoom',
+  'zoom_bot',
 ]);
 
 const GOOGLE_DRIVE_SOURCE = 'google_drive';
@@ -47,6 +48,8 @@ const JWT_CLOCK_SKEW_S = 60;
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const MS_PER_S = 1000;
 const SLACK_REPLAY_TOLERANCE_S = 300;
+const SVIX_REPLAY_TOLERANCE_S = 300;
+const SVIX_SECRET_PREFIX = 'whsec_';
 const ZOOM_REPLAY_TOLERANCE_S = 300;
 const publicKeyCache = new Map<string, { key: Buffer; expiresAt: number }>();
 const hmacSecretCache = new Map<string, { secret: string | null; expiresAt: number }>();
@@ -201,6 +204,10 @@ function verifySignature(
       return expected.length === computed.length && timingSafeEqual(expected, computed);
     }
 
+    case 'zoom_bot':
+      // Recall.ai signs via Svix: base64 HMAC-SHA256 over `${id}.${timestamp}.${body}`.
+      return verifySvixSignature(headers, body, secret);
+
     case GOOGLE_DRIVE_SOURCE: {
       // Drive push has no HMAC — validity is a constant-time match on the watch()-time channel token.
       const token = headers['x-goog-channel-token'];
@@ -226,6 +233,36 @@ function verifySignature(
       // Fail closed: a source with no known signature scheme is never admitted.
       return false;
   }
+}
+
+function svixKey(secret: string): Buffer {
+  const raw = secret.startsWith(SVIX_SECRET_PREFIX)
+    ? secret.slice(SVIX_SECRET_PREFIX.length)
+    : secret;
+  return Buffer.from(raw, 'base64');
+}
+
+function verifySvixSignature(
+  headers: Record<string, string | undefined>,
+  body: string,
+  secret: string,
+): boolean {
+  const id = headers['webhook-id'] ?? headers['svix-id'];
+  const ts = headers['webhook-timestamp'] ?? headers['svix-timestamp'];
+  const sigHeader = headers['webhook-signature'] ?? headers['svix-signature'];
+  if (!id || !ts || !sigHeader) return false;
+  if (!withinReplayWindow(ts, SVIX_REPLAY_TOLERANCE_S)) return false;
+
+  const expected = createHmac('sha256', svixKey(secret))
+    .update(`${id}.${ts}.${body}`, 'utf8')
+    .digest();
+
+  for (const token of sigHeader.split(' ')) {
+    const comma = token.indexOf(',');
+    const provided = Buffer.from(comma === -1 ? token : token.slice(comma + 1), 'base64');
+    if (provided.length === expected.length && timingSafeEqual(provided, expected)) return true;
+  }
+  return false;
 }
 
 const ZOOM_URL_VALIDATION_EVENT = 'endpoint.url_validation';
@@ -365,6 +402,7 @@ function extractEventType(
       return headers['x-meeting-event'] ?? '';
     case GOOGLE_DRIVE_SOURCE:
       return headers['x-goog-resource-state'] ?? '';
+    case 'zoom_bot':
     case 'zoom': {
       try {
         return (JSON.parse(body) as { event?: string }).event ?? '';
@@ -413,6 +451,9 @@ function providerDeliveryId(
         return null;
       }
     }
+    case 'zoom_bot':
+      // Svix message id uniquely identifies a delivery, so FIFO drops Recall's retries.
+      return headers['webhook-id'] ?? headers['svix-id'] ?? null;
     case GOOGLE_DRIVE_SOURCE: {
       // Each Drive push is a unique (channel, message-number) pair — the dedup key across retries.
       const channelId = headers['x-goog-channel-id'];

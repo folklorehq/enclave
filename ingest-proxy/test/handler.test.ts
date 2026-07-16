@@ -72,6 +72,13 @@ function meetingSig(body: string, secret: string) {
   return 'sha256=' + createHmac('sha256', secret).update(body).digest('hex');
 }
 
+const RECALL_SECRET = 'whsec_' + Buffer.from('recall-signing-secret-bytes').toString('base64');
+
+function svixSig(id: string, ts: string, body: string, secret: string) {
+  const key = Buffer.from(secret.replace(/^whsec_/, ''), 'base64');
+  return 'v1,' + createHmac('sha256', key).update(`${id}.${ts}.${body}`, 'utf8').digest('base64');
+}
+
 function zoomSig(body: string, secret: string, ts: string) {
   return 'v0=' + createHmac('sha256', secret).update(`v0:${ts}:${body}`).digest('hex');
 }
@@ -659,6 +666,112 @@ describe('HMAC signature verification — Meeting', () => {
     const event = makeEvent('tenant-me-open', 'meeting', body, {
       'x-meeting-event': 'fireflies_complete',
       'x-meeting-signature': meetingSig(body, TEST_SECRET),
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+});
+
+describe('Svix signature verification — Zoom bot (Recall.ai)', () => {
+  const tid = 'tenant-zb';
+  const body = JSON.stringify({ event: 'transcript.done', data: { bot: { id: 'bot-1' } } });
+  const freshTs = String(Math.floor(Date.now() / 1000));
+  const staleTs = String(Math.floor(Date.now() / 1000) - 400);
+
+  function withSecret() {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name?.includes('/webhook-secrets/zoom_bot'))
+        return { Parameter: { Value: RECALL_SECRET } };
+      throw new Error('ParameterNotFound');
+    });
+  }
+
+  it('returns 200 for a valid base64 v1 signature with a fresh timestamp', async () => {
+    withSecret();
+    const event = makeEvent(tid, 'zoom_bot', body, {
+      'webhook-id': 'msg_abc',
+      'webhook-timestamp': freshTs,
+      'webhook-signature': svixSig('msg_abc', freshTs, body, RECALL_SECRET),
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 200 });
+  });
+
+  it('accepts the svix-* header aliases', async () => {
+    withSecret();
+    const event = makeEvent(tid, 'zoom_bot', body, {
+      'svix-id': 'msg_abc',
+      'svix-timestamp': freshTs,
+      'svix-signature': svixSig('msg_abc', freshTs, body, RECALL_SECRET),
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 200 });
+  });
+
+  it('returns 401 when the signature is wrong', async () => {
+    withSecret();
+    const event = makeEvent(tid, 'zoom_bot', body, {
+      'webhook-id': 'msg_abc',
+      'webhook-timestamp': freshTs,
+      'webhook-signature': svixSig(
+        'msg_abc',
+        freshTs,
+        body,
+        'whsec_' + Buffer.from('other').toString('base64'),
+      ),
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+  });
+
+  it('returns 401 on a stale timestamp (replay guard)', async () => {
+    withSecret();
+    const event = makeEvent(tid, 'zoom_bot', body, {
+      'webhook-id': 'msg_abc',
+      'webhook-timestamp': staleTs,
+      'webhook-signature': svixSig('msg_abc', staleTs, body, RECALL_SECRET),
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+  });
+
+  it('returns 401 on a non-numeric timestamp (NaN never slips past the replay window)', async () => {
+    withSecret();
+    const event = makeEvent(tid, 'zoom_bot', body, {
+      'webhook-id': 'msg_abc',
+      'webhook-timestamp': 'not-a-number',
+      'webhook-signature': svixSig('msg_abc', 'not-a-number', body, RECALL_SECRET),
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+  });
+
+  it('extracts the event type from the JSON body and dedups on the webhook id', async () => {
+    withSecret();
+    mockSqsSend.mockClear();
+    const event = makeEvent(tid, 'zoom_bot', body, {
+      'webhook-id': 'msg_dedup',
+      'webhook-timestamp': freshTs,
+      'webhook-signature': svixSig('msg_dedup', freshTs, body, RECALL_SECRET),
+    });
+    await handler(event as never, {} as never, vi.fn());
+    const msg = mockSqsSend.mock.calls[0]![0] as Record<string, unknown>;
+    const payload = JSON.parse(msg['MessageBody'] as string) as Record<string, string>;
+    expect(payload['eventType']).toBe('transcript.done');
+    expect(payload['source']).toBe('zoom_bot');
+  });
+
+  it('returns 401 (fail closed) when no secret is configured', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      throw Object.assign(new Error('ParameterNotFound'), { name: 'ParameterNotFound' });
+    });
+    const event = makeEvent('tenant-zb-open', 'zoom_bot', body, {
+      'webhook-id': 'msg_abc',
+      'webhook-timestamp': freshTs,
+      'webhook-signature': svixSig('msg_abc', freshTs, body, RECALL_SECRET),
     });
     const result = await handler(event as never, {} as never, vi.fn());
     expect(result).toMatchObject({ statusCode: 401 });
