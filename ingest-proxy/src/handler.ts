@@ -26,10 +26,16 @@ const SIGNABLE_SOURCES = new Set([
   'slack',
   'linear',
   'jira',
+  'confluence',
   'intercom',
   'notion',
   'meeting',
 ]);
+
+// Atlassian Connect authenticates webhooks with a JWT (Authorization: JWT <token>), HS256-signed
+// with the app-install shared secret — not an HMAC body signature. `alg: none` is rejected.
+const CONNECT_JWT_PREFIX = 'jwt ';
+const JWT_CLOCK_SKEW_S = 60;
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const MS_PER_S = 1000;
@@ -144,6 +150,11 @@ function verifySignature(
       return expected.length === computed.length && timingSafeEqual(expected, computed);
     }
 
+    case 'confluence': {
+      // The provisioned secret is the Atlassian Connect app-install shared secret.
+      return verifyConnectJwt(headers['authorization'], secret);
+    }
+
     case 'notion': {
       // Notion signs with the subscription verification_token, not an app secret.
       const sig = headers['x-notion-signature'];
@@ -165,6 +176,43 @@ function verifySignature(
     default:
       // Fail closed: a source with no known signature scheme is never admitted.
       return false;
+  }
+}
+
+// Verify signature + expiry only; qsh (query-string-hash) is not enforced — the shared-secret
+// HS256 signature is the forgery gate, and reconstructing the canonical request behind API
+// Gateway is brittle. iss/clientKey binding is enforced upstream by the per-tenant secret path.
+function verifyConnectJwt(authHeader: string | undefined, secret: string): boolean {
+  if (!authHeader || !authHeader.toLowerCase().startsWith(CONNECT_JWT_PREFIX)) return false;
+  const [headerB64, payloadB64, signatureB64] = authHeader
+    .slice(CONNECT_JWT_PREFIX.length)
+    .trim()
+    .split('.');
+  if (!headerB64 || !payloadB64 || !signatureB64) return false;
+
+  const header = decodeJwtSegment(headerB64);
+  if (header?.['alg'] !== 'HS256') return false;
+
+  const expected = createHmac('sha256', secret).update(`${headerB64}.${payloadB64}`).digest();
+  const provided = Buffer.from(signatureB64, 'base64url');
+  if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) return false;
+
+  const payload = decodeJwtSegment(payloadB64);
+  if (!payload) return false;
+  const exp = payload['exp'];
+  const now = Math.floor(Date.now() / MS_PER_S);
+  if (typeof exp !== 'number' || now > exp + JWT_CLOCK_SKEW_S) return false;
+  return true;
+}
+
+function decodeJwtSegment(segment: string): Record<string, unknown> | null {
+  try {
+    return JSON.parse(Buffer.from(segment, 'base64url').toString('utf8')) as Record<
+      string,
+      unknown
+    >;
+  } catch {
+    return null;
   }
 }
 
@@ -220,7 +268,8 @@ function extractEventType(
         return '';
       }
     }
-    case 'jira': {
+    case 'jira':
+    case 'confluence': {
       try {
         return (JSON.parse(body) as { webhookEvent?: string }).webhookEvent ?? '';
       } catch {

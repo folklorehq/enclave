@@ -68,6 +68,25 @@ function meetingSig(body: string, secret: string) {
   return 'sha256=' + createHmac('sha256', secret).update(body).digest('hex');
 }
 
+function b64url(input: string): string {
+  return Buffer.from(input, 'utf8').toString('base64url');
+}
+
+function confluenceJwt(
+  secret: string,
+  opts: { alg?: string; expOffsetS?: number; sign?: string; omitExp?: boolean; exp?: unknown } = {},
+): string {
+  const nowS = Math.floor(Date.now() / 1000);
+  const header = b64url(JSON.stringify({ alg: opts.alg ?? 'HS256', typ: 'JWT' }));
+  const claims: Record<string, unknown> = { iss: 'client-key', iat: nowS };
+  if (!opts.omitExp) claims['exp'] = 'exp' in opts ? opts.exp : nowS + (opts.expOffsetS ?? 300);
+  const payload = b64url(JSON.stringify(claims));
+  const sig = createHmac('sha256', opts.sign ?? secret)
+    .update(`${header}.${payload}`)
+    .digest('base64url');
+  return `${header}.${payload}.${sig}`;
+}
+
 beforeAll(() => {
   // Default: public key lookup succeeds, HMAC secret lookup throws (no secret provisioned)
   mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
@@ -354,6 +373,84 @@ describe('HMAC signature verification — Meeting', () => {
       'x-meeting-event': 'fireflies_complete',
       'x-meeting-signature': meetingSig(body, TEST_SECRET),
     });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+});
+
+describe('JWT verification — Confluence (Atlassian Connect)', () => {
+  const tid = 'tenant-cf';
+  const body = JSON.stringify({ webhookEvent: 'page_created', page: { id: 'p1' } });
+
+  function mockSecret() {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name?.includes('/webhook-secrets/confluence'))
+        return { Parameter: { Value: TEST_SECRET } };
+      throw new Error('ParameterNotFound');
+    });
+  }
+
+  it('returns 200 for a valid HS256 JWT in the Authorization header', async () => {
+    mockSecret();
+    const event = makeEvent(tid, 'confluence', body, {
+      authorization: `JWT ${confluenceJwt(TEST_SECRET)}`,
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 200 });
+  });
+
+  it('returns 401 when signed with the wrong secret', async () => {
+    mockSecret();
+    const event = makeEvent(tid, 'confluence', body, {
+      authorization: `JWT ${confluenceJwt(TEST_SECRET, { sign: 'wrong-secret' })}`,
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+  });
+
+  it('returns 401 (rejects alg:none) even with a matching signature slot', async () => {
+    mockSecret();
+    const event = makeEvent(tid, 'confluence', body, {
+      authorization: `JWT ${confluenceJwt(TEST_SECRET, { alg: 'none' })}`,
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+  });
+
+  it('returns 401 for an expired JWT', async () => {
+    mockSecret();
+    const event = makeEvent(tid, 'confluence', body, {
+      authorization: `JWT ${confluenceJwt(TEST_SECRET, { expOffsetS: -3600 })}`,
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+  });
+
+  it('returns 401 when exp is omitted (fails closed, not open-ended)', async () => {
+    mockSecret();
+    const event = makeEvent(tid, 'confluence', body, {
+      authorization: `JWT ${confluenceJwt(TEST_SECRET, { omitExp: true })}`,
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 when exp is non-numeric', async () => {
+    mockSecret();
+    const event = makeEvent(tid, 'confluence', body, {
+      authorization: `JWT ${confluenceJwt(TEST_SECRET, { exp: 'never' })}`,
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 when the Authorization header is missing', async () => {
+    mockSecret();
+    const event = makeEvent(tid, 'confluence', body, {});
     const result = await handler(event as never, {} as never, vi.fn());
     expect(result).toMatchObject({ statusCode: 401 });
     expect(mockSqsSend).not.toHaveBeenCalled();

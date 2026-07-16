@@ -6,6 +6,7 @@ import {
   type Connector,
   type PullOptions,
   type SyncCursor,
+  confluence,
   github,
   intercom,
   jira,
@@ -186,6 +187,11 @@ export function buildConnector(kind: string, token: string): Connector | null {
       );
     case 'jira':
       return new jira.JiraConnector({ logger: consoleLogger }, new jira.JiraHttpClient(token));
+    case 'confluence':
+      return new confluence.ConfluenceConnector(
+        { logger: consoleLogger },
+        new confluence.ConfluenceHttpClient(token),
+      );
     case 'intercom':
       return new intercom.IntercomConnector(
         { logger: consoleLogger },
