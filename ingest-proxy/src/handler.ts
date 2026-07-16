@@ -30,8 +30,14 @@ const SIGNABLE_SOURCES = new Set([
   'intercom',
   'notion',
   'meeting',
+  'google_drive',
   'zoom',
 ]);
+
+const GOOGLE_DRIVE_SOURCE = 'google_drive';
+// Drive push channels have no body signature; validity is the channel token we set at watch() time,
+// and the initial `sync` state is a handshake carrying no change (Google Drive push notifications).
+const DRIVE_SYNC_STATE = 'sync';
 
 // Atlassian Connect authenticates webhooks with a JWT (Authorization: JWT <token>), HS256-signed
 // with the app-install shared secret — not an HMAC body signature. `alg: none` is rejected.
@@ -195,6 +201,15 @@ function verifySignature(
       return expected.length === computed.length && timingSafeEqual(expected, computed);
     }
 
+    case GOOGLE_DRIVE_SOURCE: {
+      // Drive push has no HMAC — validity is a constant-time match on the watch()-time channel token.
+      const token = headers['x-goog-channel-token'];
+      if (!token) return false;
+      const expected = Buffer.from(secret, 'utf8');
+      const provided = Buffer.from(token, 'utf8');
+      return expected.length === provided.length && timingSafeEqual(expected, provided);
+    }
+
     case 'zoom': {
       // Zoom Secret Token: v0= + HMAC-SHA256 over `v0:{timestamp}:{body}` (like Slack's basestring).
       const sig = headers['x-zm-signature'];
@@ -348,6 +363,8 @@ function extractEventType(
       return headers['x-intercom-topic'] ?? '';
     case 'meeting':
       return headers['x-meeting-event'] ?? '';
+    case GOOGLE_DRIVE_SOURCE:
+      return headers['x-goog-resource-state'] ?? '';
     case 'zoom': {
       try {
         return (JSON.parse(body) as { event?: string }).event ?? '';
@@ -358,6 +375,18 @@ function extractEventType(
     default:
       return '';
   }
+}
+
+// A Drive ping ships its change signal in headers with an empty body; rebuild a content-free
+// payload (opaque resource/channel ids only) so the enclave normalizer can record the signal.
+function driveChangePingBody(headers: Record<string, string | undefined>): string {
+  return JSON.stringify({
+    resourceState: headers['x-goog-resource-state'] ?? '',
+    resourceId: headers['x-goog-resource-id'],
+    channelId: headers['x-goog-channel-id'],
+    messageNumber: headers['x-goog-message-number'],
+    resourceUri: headers['x-goog-resource-uri'],
+  });
 }
 
 function providerDeliveryId(
@@ -383,6 +412,12 @@ function providerDeliveryId(
       } catch {
         return null;
       }
+    }
+    case GOOGLE_DRIVE_SOURCE: {
+      // Each Drive push is a unique (channel, message-number) pair — the dedup key across retries.
+      const channelId = headers['x-goog-channel-id'];
+      const messageNumber = headers['x-goog-message-number'];
+      return channelId && messageNumber ? `${channelId}:${messageNumber}` : null;
     }
     case 'zoom': {
       try {
@@ -438,12 +473,20 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     return { statusCode: 401 };
   }
 
+  // The channel-creation handshake carries no change — ack it without enqueuing anything.
+  if (source === GOOGLE_DRIVE_SOURCE && headers['x-goog-resource-state'] === DRIVE_SYNC_STATE) {
+    return { statusCode: 200 };
+  }
+
   const challenge = zoomUrlValidation(source, body, lookup.secret);
   if (challenge) return challenge;
 
   if (!(await checkRateLimit(tenantId, source))) {
     return { statusCode: 429 };
   }
+
+  // Drive pings have an empty body; the signal lives in headers, so enqueue a content-free rebuild.
+  const payloadBody = source === GOOGLE_DRIVE_SOURCE ? driveChangePingBody(headers) : body;
 
   const eventType = extractEventType(source, headers, body);
   const recipientPubBytes = await fetchPublicKey(tenantId);
@@ -463,7 +506,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 
   const nonce = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', aesKey, nonce);
-  const encrypted = Buffer.concat([cipher.update(body, 'utf8'), cipher.final()]);
+  const encrypted = Buffer.concat([cipher.update(payloadBody, 'utf8'), cipher.final()]);
   const authTag = cipher.getAuthTag();
   const ciphertextWithTag = Buffer.concat([encrypted, authTag]);
 
@@ -479,7 +522,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
         ciphertext: ciphertextWithTag.toString('hex'),
       }),
       MessageGroupId: tenantId,
-      MessageDeduplicationId: deduplicationId(tenantId, source, headers, body),
+      MessageDeduplicationId: deduplicationId(tenantId, source, headers, payloadBody),
     }),
   );
 

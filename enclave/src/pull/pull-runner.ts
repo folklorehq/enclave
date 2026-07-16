@@ -8,6 +8,7 @@ import {
   type SyncCursor,
   confluence,
   github,
+  googleDrive,
   intercom,
   jira,
   linear,
@@ -184,6 +185,12 @@ export function buildConnector(kind: string, token: string): Connector | null {
       return new intercom.IntercomConnector(
         { logger: consoleLogger },
         new intercom.IntercomSdkClient(token),
+      );
+    case 'google_drive':
+      // gaxios ignores the global undici dispatcher, so hand it the egress proxy agent (ADL #42).
+      return new googleDrive.GoogleDriveConnector(
+        { logger: consoleLogger },
+        new googleDrive.GoogleDriveClient(token, externalHttpsProxyAgent()),
       );
     case 'zoom':
       return new zoom.ZoomConnector({ logger: consoleLogger }, new zoom.HttpZoomClient(token));

@@ -1117,3 +1117,84 @@ describe('event type extraction', () => {
     expect(payload['eventType']).toBe('conversation.user.replied');
   });
 });
+
+describe('channel-token verification — Google Drive', () => {
+  const tid = 'tenant-gd';
+  const CHANNEL_TOKEN = 'watch-channel-token-xyz';
+
+  function driveSecretMock() {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name?.includes('/webhook-secrets/google_drive'))
+        return { Parameter: { Value: CHANNEL_TOKEN } };
+      throw new Error('ParameterNotFound');
+    });
+  }
+
+  it('returns 200 and enqueues a content-free ping when the channel token matches', async () => {
+    driveSecretMock();
+    const event = makeEvent(tid, 'google_drive', '', {
+      'x-goog-channel-token': CHANNEL_TOKEN,
+      'x-goog-channel-id': 'chan-1',
+      'x-goog-resource-state': 'update',
+      'x-goog-resource-id': 'res-abc',
+      'x-goog-message-number': '42',
+      'x-goog-resource-uri': 'https://www.googleapis.com/drive/v3/changes',
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 200 });
+    expect(mockSqsSend).toHaveBeenCalledOnce();
+
+    const msg = mockSqsSend.mock.calls[0]![0] as Record<string, unknown>;
+    const payload = JSON.parse(msg['MessageBody'] as string) as Record<string, string>;
+    expect(payload['source']).toBe('google_drive');
+    expect(payload['eventType']).toBe('update');
+    expect(msg['MessageDeduplicationId']).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('returns 401 when the channel token does not match', async () => {
+    driveSecretMock();
+    const event = makeEvent(tid, 'google_drive', '', {
+      'x-goog-channel-token': 'wrong-token',
+      'x-goog-resource-state': 'update',
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 when the channel token header is absent', async () => {
+    driveSecretMock();
+    const event = makeEvent(tid, 'google_drive', '', { 'x-goog-resource-state': 'update' });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('acks the sync handshake with 200 and does not enqueue', async () => {
+    driveSecretMock();
+    const event = makeEvent(tid, 'google_drive', '', {
+      'x-goog-channel-token': CHANNEL_TOKEN,
+      'x-goog-resource-state': 'sync',
+      'x-goog-channel-id': 'chan-1',
+      'x-goog-message-number': '1',
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 200 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('fails closed with 401 when no channel token is provisioned', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      throw Object.assign(new Error('ParameterNotFound'), { name: 'ParameterNotFound' });
+    });
+    const event = makeEvent('tenant-gd-open', 'google_drive', '', {
+      'x-goog-channel-token': CHANNEL_TOKEN,
+      'x-goog-resource-state': 'update',
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+});
