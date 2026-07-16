@@ -219,6 +219,67 @@ describe('HMAC signature verification — Linear', () => {
     const result = await handler(event as never, {} as never, vi.fn());
     expect(result).toMatchObject({ statusCode: 200 });
   });
+
+  it('verifies the original `Linear-Signature` casing (case-insensitive lookup)', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name?.includes('/webhook-secrets/linear'))
+        return { Parameter: { Value: TEST_SECRET } };
+      throw new Error('ParameterNotFound');
+    });
+
+    const event = makeEvent(tid, 'linear', body, {
+      'Linear-Signature': linearSig(body, TEST_SECRET),
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 200 });
+  });
+
+  it('returns 401 when the signature is tampered', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name?.includes('/webhook-secrets/linear'))
+        return { Parameter: { Value: TEST_SECRET } };
+      throw new Error('ParameterNotFound');
+    });
+
+    const event = makeEvent(tid, 'linear', body, {
+      'linear-signature': linearSig(body, 'wrong-secret'),
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 when the body is tampered after signing', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name?.includes('/webhook-secrets/linear'))
+        return { Parameter: { Value: TEST_SECRET } };
+      throw new Error('ParameterNotFound');
+    });
+
+    const signed = linearSig(body, TEST_SECRET);
+    const tamperedBody = JSON.stringify({ type: 'Issue', action: 'create', injected: true });
+    const event = makeEvent(tid, 'linear', tamperedBody, { 'linear-signature': signed });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 (fail closed) when no secret is configured', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      throw Object.assign(new Error('ParameterNotFound'), { name: 'ParameterNotFound' });
+    });
+
+    const event = makeEvent('tenant-li-open', 'linear', body, {
+      'linear-signature': linearSig(body, TEST_SECRET),
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
 });
 
 describe('HMAC signature verification — Intercom', () => {

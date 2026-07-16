@@ -92,6 +92,19 @@ function resolveSecret(secret: string | null): SecretLookup {
   return secret === null ? { status: 'absent' } : { status: 'found', secret };
 }
 
+// Signature verification must not depend on API Gateway lowercasing header keys: a
+// relay, ALB, function URL, or direct invoke can preserve the provider's original
+// casing (Linear sends `Linear-Signature`). Lowercase once, look up lowercase.
+function normalizeHeaders(
+  headers: Record<string, string | undefined> | undefined,
+): Record<string, string | undefined> {
+  const normalized: Record<string, string | undefined> = {};
+  for (const [key, value] of Object.entries(headers ?? {})) {
+    normalized[key.toLowerCase()] = value;
+  }
+  return normalized;
+}
+
 function isParameterNotFound(err: unknown): boolean {
   return err instanceof Error && err.name === 'ParameterNotFound';
 }
@@ -132,7 +145,7 @@ function verifySignature(
     }
 
     case 'linear': {
-      // Linear sends `Linear-Signature`, which arrives lowercased through API Gateway.
+      // Linear sends `Linear-Signature`; normalizeHeaders lowercases the key.
       const sig = headers['linear-signature'];
       if (!sig) return false;
       const expected = Buffer.from(sig, 'hex');
@@ -403,6 +416,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   if (!SIGNABLE_SOURCES.has(source)) return { statusCode: 400 };
 
   const body = event.body ?? '';
+  const headers = normalizeHeaders(event.headers);
 
   // ACK Notion's unsigned subscription handshake (it carries only the verification_token, which the
   // admin registers as the webhook secret) without treating it as an event or forwarding it to SQS.
@@ -415,12 +429,11 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   const lookup = await fetchHmacSecret(tenantId, source);
   if (lookup.status === 'error') return { statusCode: 503 };
   if (lookup.status === 'absent') return { statusCode: 401 };
-
   // Signature FIRST, even for Zoom's url_validation (which Zoom also signs): answering the CRC
   // echo HMAC(secret, plainToken) before verifying turns it into a forgery oracle for the
   // message signature HMAC(secret, `v0:{ts}:{body}`) over the same secret. Gating on a valid
   // signature means only a secret-holder (genuine Zoom) can reach the echo.
-  if (!verifySignature(source, event.headers, body, lookup.secret)) {
+  if (!verifySignature(source, headers, body, lookup.secret)) {
     return { statusCode: 401 };
   }
 
@@ -431,7 +444,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     return { statusCode: 429 };
   }
 
-  const eventType = extractEventType(source, event.headers, body);
+  const eventType = extractEventType(source, headers, body);
   const recipientPubBytes = await fetchPublicKey(tenantId);
 
   const recipientPub = createPublicKey({
@@ -465,7 +478,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
         ciphertext: ciphertextWithTag.toString('hex'),
       }),
       MessageGroupId: tenantId,
-      MessageDeduplicationId: deduplicationId(tenantId, source, event.headers, body),
+      MessageDeduplicationId: deduplicationId(tenantId, source, headers, body),
     }),
   );
 
