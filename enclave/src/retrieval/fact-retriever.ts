@@ -22,6 +22,13 @@ export interface FactRetrieverDeps extends RetrieverDeps {
   processedBucket: string;
 }
 
+/** An audience-visible hit with its decrypted body, for callers (e.g. answer synthesis) that need more than a snippet. */
+export interface GatedFact {
+  meta: FactMetadata;
+  distance: number;
+  body: string;
+}
+
 // ADL #34/#6: semantic retrieval that never leaves the enclave. The query is
 // embedded and matched against the in-enclave index; matches are audience-gated
 // on content-free metadata before any body is decrypted, and a body is decrypted
@@ -34,6 +41,20 @@ export class EnclaveFactRetriever implements FactRetriever {
   }
 
   async search(params: FactSearchParams): Promise<RetrievedFact[]> {
+    const gated = await this.retrieveGated(params, SNIPPET_LIMIT);
+    return gated.map((g) => ({
+      id: g.meta.id,
+      kind: g.meta.kind,
+      occurredAt: g.meta.occurredAt,
+      sourceId: g.meta.sourceId,
+      distance: g.distance,
+      snippet: g.body,
+    }));
+  }
+
+  // Embed → ANN → audience-gate → decrypt, shared by snippet search and answer grounding.
+  // bodyLimit caps decrypted body length; nothing above the caller's audience is ever decrypted.
+  async retrieveGated(params: FactSearchParams, bodyLimit: number): Promise<GatedFact[]> {
     const { orgId, userId, query, limit } = params;
     if (!query.trim() || limit <= 0) return [];
 
@@ -50,21 +71,14 @@ export class EnclaveFactRetriever implements FactRetriever {
     ]);
     const metaById = new Map(metaRows.map((m) => [m.id, m]));
 
-    const results: RetrievedFact[] = [];
+    const results: GatedFact[] = [];
     for (const hit of hits) {
       const meta = metaById.get(hit.factId);
       if (!meta) continue;
       if (!this.isVisible(meta, access)) continue;
-      const snippet = await this.decryptSnippet(orgId, meta);
-      if (snippet === null) continue;
-      results.push({
-        id: meta.id,
-        kind: meta.kind,
-        occurredAt: meta.occurredAt,
-        sourceId: meta.sourceId,
-        distance: hit.distance,
-        snippet,
-      });
+      const body = await this.decryptBody(orgId, meta, bodyLimit);
+      if (body === null) continue;
+      results.push({ meta, distance: hit.distance, body });
     }
     return results;
   }
@@ -76,7 +90,11 @@ export class EnclaveFactRetriever implements FactRetriever {
     return access.allowedSourceKinds.has(meta.sourceKind);
   }
 
-  private async decryptSnippet(orgId: string, meta: FactMetadata): Promise<string | null> {
+  private async decryptBody(
+    orgId: string,
+    meta: FactMetadata,
+    bodyLimit: number,
+  ): Promise<string | null> {
     if (!meta.bodyS3Key) return '';
     try {
       const obj = await this.deps.s3.send(
@@ -88,7 +106,7 @@ export class EnclaveFactRetriever implements FactRetriever {
       const fact = JSON.parse(plaintext.toString('utf8')) as Record<string, unknown>;
       const content = fact['content'] as Record<string, unknown> | undefined;
       const body = (content?.['body'] as string | undefined) ?? '';
-      return body.slice(0, SNIPPET_LIMIT);
+      return body.slice(0, bodyLimit);
     } catch {
       return null;
     }

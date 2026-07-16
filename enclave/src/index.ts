@@ -13,6 +13,7 @@ import { SynthesisConsumer } from './workers/synthesis-consumer.js';
 import { fetchLinkPreview } from './preview/preview-client.js';
 import { HaltGate } from './control/halt-gate.js';
 import { EnclaveFactRetriever } from './retrieval/fact-retriever.js';
+import { EnclaveFactAnswerer } from './workers/fact-answerer.js';
 import { EnclaveWikiContentDecryptor } from './wiki/content-decryptor.js';
 import { EnclaveWikiEditSealer } from './wiki/edit-sealer.js';
 import {
@@ -20,9 +21,9 @@ import {
   EnclaveWikiFeedbackSealer,
   EnclaveWikiSnapshotSealer,
 } from './wiki/content-sealers.js';
-import { assertInferenceConfigured, setInferenceTelemetry } from './inference/phala.js';
+import { assertInferenceConfigured, generate, setInferenceTelemetry } from './inference/phala.js';
 import { installGlobalEgressDispatcher } from './egress/proxy.js';
-import { createContainer, type ApiContainer } from '@folklore/api';
+import { createContainer, type ApiContainer, type RetrieverDeps } from '@folklore/api';
 import { RedisCache } from '@folklore/cache';
 import { BufferedOpsTelemetryClient, RedisOpsEventChannel } from '@folklore/control-plane';
 
@@ -151,15 +152,22 @@ try {
   assertReadPathSupported(registry.size);
   // ADL #34/#6: search + wiki/recommend are served by the in-enclave retriever —
   // embed, ANN over the loaded index, decrypt, and audience-gate, all in-process.
+  const buildRetriever = (retrieverDeps: RetrieverDeps) =>
+    new EnclaveFactRetriever({
+      ...retrieverDeps,
+      hnsw: boxContext.hnsw,
+      s3,
+      keyring: boxContext.keyring,
+      processedBucket: PROCESSED_OUTPUTS_BUCKET,
+    });
   apiContainer = createContainer({
-    retrieverFactory: (retrieverDeps) =>
-      new EnclaveFactRetriever({
-        ...retrieverDeps,
-        hnsw: boxContext.hnsw,
-        s3,
-        keyring: boxContext.keyring,
-        processedBucket: PROCESSED_OUTPUTS_BUCKET,
-      }),
+    retrieverFactory: buildRetriever,
+    // ADL #34/#27: grounded answers reuse the same gated retrieval spine, then feed only
+    // audience-visible decrypted bodies to the in-enclave TEE model — nothing leaves the enclave.
+    answerServiceFactory: (retrieverDeps) =>
+      new EnclaveFactAnswerer(buildRetriever(retrieverDeps), (prompt, systemPrompt) =>
+        generate(prompt, systemPrompt),
+      ),
     // ADL #12: synthesized wiki text is ciphertext at rest; the read path decrypts
     // audience-visible blocks here, in-enclave, over the sealed key.
     wikiContentDecryptor: new EnclaveWikiContentDecryptor(boxContext.keyring),
