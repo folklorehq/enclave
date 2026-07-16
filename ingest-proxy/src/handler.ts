@@ -181,6 +181,23 @@ export function deriveAesKey(
   return Buffer.from(hkdfSync('sha256', sharedSecret, Buffer.alloc(0), info, 32));
 }
 
+// Notion's subscription handshake POSTs a bare `{ verification_token }` with no signature — the
+// token IS the future signing secret, so nothing can sign this first contact. Distinguish it from a
+// signed event so we can 2xx it instead of failing the signature check and rejecting the endpoint.
+function isNotionVerificationHandshake(
+  source: string,
+  headers: Record<string, string | undefined>,
+  body: string,
+): boolean {
+  if (source !== 'notion' || headers['x-notion-signature']) return false;
+  try {
+    const parsed = JSON.parse(body) as { verification_token?: unknown; type?: unknown };
+    return typeof parsed.verification_token === 'string' && parsed.type === undefined;
+  } catch {
+    return false;
+  }
+}
+
 function extractEventType(
   source: string,
   headers: Record<string, string | undefined>,
@@ -274,6 +291,10 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   if (!SIGNABLE_SOURCES.has(source)) return { statusCode: 400 };
 
   const body = event.body ?? '';
+
+  // ACK Notion's unsigned subscription handshake (it carries only the verification_token, which the
+  // admin registers as the webhook secret) without treating it as an event or forwarding it to SQS.
+  if (isNotionVerificationHandshake(source, event.headers, body)) return { statusCode: 200 };
 
   // Fail closed: a supported source is admitted only when a provisioned secret
   // verifies the signature. An absent secret or a bad signature is a 401

@@ -268,6 +268,46 @@ describe('HMAC signature verification — Notion', () => {
   });
 });
 
+describe('Notion subscription verification handshake', () => {
+  it('ACKs the unsigned verification_token POST with 200 and does not forward to SQS', async () => {
+    const body = JSON.stringify({ verification_token: 'secret_tok_abc' });
+    const event = makeEvent('tenant-nvh-1', 'notion', body, {});
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 200 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('does not short-circuit a signed event that also carries a verification_token field', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      throw Object.assign(new Error('ParameterNotFound'), { name: 'ParameterNotFound' });
+    });
+    const body = JSON.stringify({ type: 'page.created', verification_token: 'x' });
+    const event = makeEvent('tenant-nvh-2', 'notion', body, {
+      'x-notion-signature': notionSig(body, TEST_SECRET),
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('forwards a real event once the captured verification_token is the stored secret', async () => {
+    const token = 'secret_tok_live';
+    const body = JSON.stringify({ type: 'page.created', page: { id: 'p1' } });
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name?.includes('/webhook-secrets/notion')) return { Parameter: { Value: token } };
+      throw new Error('ParameterNotFound');
+    });
+    const event = makeEvent('tenant-nvh-3', 'notion', body, {
+      'x-notion-signature': notionSig(body, token),
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 200 });
+    expect(mockSqsSend).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('HMAC signature verification — Meeting', () => {
   const tid = 'tenant-me';
   const body = JSON.stringify({ meetingId: 'm1', title: 'Standup' });
