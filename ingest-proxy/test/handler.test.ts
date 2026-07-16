@@ -60,6 +60,10 @@ function intercomSig(body: string, secret: string) {
   return 'sha1=' + createHmac('sha1', secret).update(body).digest('hex');
 }
 
+function jiraSig(body: string, secret: string) {
+  return 'sha256=' + createHmac('sha256', secret).update(body).digest('hex');
+}
+
 function notionSig(body: string, secret: string) {
   return 'sha256=' + createHmac('sha256', secret).update(body).digest('hex');
 }
@@ -300,6 +304,102 @@ describe('HMAC signature verification — Intercom', () => {
     });
     const result = await handler(event as never, {} as never, vi.fn());
     expect(result).toMatchObject({ statusCode: 200 });
+  });
+});
+
+describe('HMAC signature verification — Jira', () => {
+  const tid = 'tenant-ji';
+  const body = JSON.stringify({ webhookEvent: 'jira:issue_created', issue: { key: 'PROJ-1' } });
+
+  it('returns 200 when the native X-Hub-Signature sha256 is valid', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name?.includes('/webhook-secrets/jira')) return { Parameter: { Value: TEST_SECRET } };
+      throw new Error('ParameterNotFound');
+    });
+
+    const event = makeEvent(tid, 'jira', body, {
+      'x-hub-signature': jiraSig(body, TEST_SECRET),
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 200 });
+  });
+
+  it('returns 401 when the body is tampered after signing', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name?.includes('/webhook-secrets/jira')) return { Parameter: { Value: TEST_SECRET } };
+      throw new Error('ParameterNotFound');
+    });
+
+    const tampered = JSON.stringify({
+      webhookEvent: 'jira:issue_created',
+      issue: { key: 'EVIL-9' },
+    });
+    const event = makeEvent(tid, 'jira', tampered, {
+      'x-hub-signature': jiraSig(body, TEST_SECRET),
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 when signed with the wrong secret', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name?.includes('/webhook-secrets/jira')) return { Parameter: { Value: TEST_SECRET } };
+      throw new Error('ParameterNotFound');
+    });
+
+    const event = makeEvent(tid, 'jira', body, {
+      'x-hub-signature': jiraSig(body, 'wrong-secret'),
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+  });
+
+  it('returns 401 when the sha256= prefix is absent', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name?.includes('/webhook-secrets/jira')) return { Parameter: { Value: TEST_SECRET } };
+      throw new Error('ParameterNotFound');
+    });
+
+    const event = makeEvent(tid, 'jira', body, {
+      'x-hub-signature': createHmac('sha256', TEST_SECRET).update(body).digest('hex'),
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+  });
+
+  it('returns 401 (fail closed) when no secret is configured', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      throw Object.assign(new Error('ParameterNotFound'), { name: 'ParameterNotFound' });
+    });
+
+    const event = makeEvent('tenant-ji-open', 'jira', body, {
+      'x-hub-signature': jiraSig(body, TEST_SECRET),
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('extracts the event type from the body webhookEvent field', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name?.includes('/webhook-secrets/jira')) return { Parameter: { Value: TEST_SECRET } };
+      throw new Error('ParameterNotFound');
+    });
+
+    const event = makeEvent('tenant-ji-et', 'jira', body, {
+      'x-hub-signature': jiraSig(body, TEST_SECRET),
+    });
+    await handler(event as never, {} as never, vi.fn());
+    const msg = mockSqsSend.mock.calls[0]![0] as Record<string, unknown>;
+    const payload = JSON.parse(msg['MessageBody'] as string) as Record<string, string>;
+    expect(payload['eventType']).toBe('jira:issue_created');
   });
 });
 

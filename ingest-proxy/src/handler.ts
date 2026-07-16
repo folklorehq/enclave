@@ -163,8 +163,9 @@ function verifySignature(
     }
 
     case 'jira': {
-      // Jira has no native webhook signing; a customer Automation rule HMAC-SHA256s the body.
-      const sig = headers['x-atlassian-webhook-signature'];
+      // Native Jira Cloud WebSub signing (secret set at webhook registration): X-Hub-Signature,
+      // sha256 over the raw body — same header as Intercom (sha1), disambiguated by source path.
+      const sig = headers['x-hub-signature'];
       if (!sig?.startsWith('sha256=')) return false;
       const expected = Buffer.from(sig.slice(7), 'hex');
       const computed = createHmac('sha256', secret).update(bodyBuf).digest();
