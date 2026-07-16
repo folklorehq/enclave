@@ -1,5 +1,4 @@
 import { GetObjectCommand, type S3Client } from '@aws-sdk/client-s3';
-import type { KmsKeyringNode } from '@aws-crypto/client-node';
 import type {
   AudienceAccess,
   FactMetadata,
@@ -9,16 +8,15 @@ import type {
   RetrieverDeps,
 } from '@folklore/api';
 import { isSensitivityWithin } from '@folklore/wiki';
-import { EnclaveCrypto } from '../crypto/esdk.js';
+import type { EnclaveCrypto } from '../crypto/esdk.js';
 import { embedText } from '../inference/phala.js';
-import type { HnswStore } from '../hnsw/index.js';
+import type { ResolveTenant } from '../tenant/tenant-resolver.js';
 
 const SNIPPET_LIMIT = 280;
 
 export interface FactRetrieverDeps extends RetrieverDeps {
-  hnsw: HnswStore;
+  resolveTenant: ResolveTenant;
   s3: S3Client;
-  keyring: KmsKeyringNode;
   processedBucket: string;
 }
 
@@ -34,11 +32,7 @@ export interface GatedFact {
 // on content-free metadata before any body is decrypted, and a body is decrypted
 // (AAD-bound to its row) only to preview a fact the caller is allowed to see.
 export class EnclaveFactRetriever implements FactRetriever {
-  private readonly crypto: EnclaveCrypto;
-
-  constructor(private readonly deps: FactRetrieverDeps) {
-    this.crypto = new EnclaveCrypto(deps.keyring);
-  }
+  constructor(private readonly deps: FactRetrieverDeps) {}
 
   async search(params: FactSearchParams): Promise<RetrievedFact[]> {
     const gated = await this.retrieveGated(params, SNIPPET_LIMIT);
@@ -58,8 +52,12 @@ export class EnclaveFactRetriever implements FactRetriever {
     const { orgId, userId, query, limit } = params;
     if (!query.trim() || limit <= 0) return [];
 
+    // Fail closed BEFORE any index/keyring is touched: an orgId not in the assigned set throws here
+    // (§4.2). The tenant's own HNSW self-guards on orgId too, so retrieval only ever answers for it.
+    const tenant = this.deps.resolveTenant(orgId);
+
     const queryVec = await embedText(query);
-    const hits = this.deps.hnsw.query(orgId, queryVec, limit);
+    const hits = tenant.hnsw.query(orgId, queryVec, limit);
     if (hits.length === 0) return [];
 
     const [metaRows, access] = await Promise.all([
@@ -76,7 +74,7 @@ export class EnclaveFactRetriever implements FactRetriever {
       const meta = metaById.get(hit.factId);
       if (!meta) continue;
       if (!this.isVisible(meta, access)) continue;
-      const body = await this.decryptBody(orgId, meta, bodyLimit);
+      const body = await this.decryptBody(tenant.crypto, orgId, meta, bodyLimit);
       if (body === null) continue;
       results.push({ meta, distance: hit.distance, body });
     }
@@ -91,6 +89,7 @@ export class EnclaveFactRetriever implements FactRetriever {
   }
 
   private async decryptBody(
+    crypto: EnclaveCrypto,
     orgId: string,
     meta: FactMetadata,
     bodyLimit: number,
@@ -102,7 +101,7 @@ export class EnclaveFactRetriever implements FactRetriever {
       );
       const raw = await obj.Body!.transformToByteArray();
       const enc = Buffer.from(Buffer.from(raw).toString('utf8'), 'base64');
-      const plaintext = await this.crypto.decryptFactBody(enc, { factId: meta.id, orgId });
+      const plaintext = await crypto.decryptFactBody(enc, { factId: meta.id, orgId });
       const fact = JSON.parse(plaintext.toString('utf8')) as Record<string, unknown>;
       const content = fact['content'] as Record<string, unknown> | undefined;
       const body = (content?.['body'] as string | undefined) ?? '';

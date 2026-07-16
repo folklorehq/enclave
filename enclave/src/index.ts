@@ -7,7 +7,7 @@ import { parseTenantAssignments } from './tenant/tenant-assignments.js';
 import { TenantMessageRouter } from './tenant/tenant-message-router.js';
 import { QueueSetDrainer } from './tenant/queue-set-drainer.js';
 import { saveAllTenantIndices } from './tenant/index-persistence.js';
-import { assertReadPathSupported } from './tenant/read-path-guard.js';
+import { createTenantResolver } from './tenant/tenant-resolver.js';
 import { BoxServer } from './http/server.js';
 import { SynthesisConsumer } from './workers/synthesis-consumer.js';
 import { fetchLinkPreview } from './preview/preview-client.js';
@@ -28,7 +28,11 @@ import {
   phalaInference,
   setInferenceTelemetry,
 } from './inference/phala.js';
-import { CachedInference, LLM_CACHE_PROMPT_VERSION } from './inference/cached-inference.js';
+import {
+  CachedInference,
+  LLM_CACHE_PROMPT_VERSION,
+  type InferenceModel,
+} from './inference/cached-inference.js';
 import { S3LlmCache } from './inference/s3-llm-cache.js';
 import { installGlobalEgressDispatcher } from './egress/proxy.js';
 import { createContainer, type ApiContainer, type RetrieverDeps } from '@folklore/api';
@@ -125,10 +129,10 @@ await loadInferenceKey();
 assertInferenceConfigured();
 await loadAgentToken();
 
-// The in-enclave read path stays wired to the primary context. Per-request keyring selection from
-// the verified JWT orgId (design §4.2) is the read-path follow-up — it needs the apps/api resolver
-// seam and is out of this enclave-scoped PR.
-const boxContext = registry.get(primaryTenantId);
+// Per-request keyring selection from the verified JWT orgId (design §4.2): every read/synthesis
+// path resolves its TenantContext through this one choke point, which fails closed (403) on an
+// orgId not in the assigned set BEFORE any keyring is reachable. No single boot-time "box context".
+const resolveTenant = createTenantResolver(registry);
 
 // ADL #13: the break-glass halt and billing suspension gate every dequeue. Without a
 // halt gate the loop would drain/decrypt fail-open, so refuse to boot rather than run ungated.
@@ -156,71 +160,79 @@ setInferenceTelemetry(
 // reads decrypted content over the in-enclave Postgres proxy and never leaves.
 let apiContainer: ApiContainer | undefined;
 try {
-  // Refuse the single-context read path for a shared pool (N>1) before wiring it (§4.2).
-  assertReadPathSupported(registry.size);
-  // ADL #34/#6: search + wiki/recommend are served by the in-enclave retriever —
-  // embed, ANN over the loaded index, decrypt, and audience-gate, all in-process.
+  // ADL #34/#6: search + wiki/recommend are served by the in-enclave retriever — embed, ANN over
+  // the loaded index, decrypt, and audience-gate, all in-process. The retriever resolves its
+  // tenant's index + keyring per request from `params.orgId` (§4.2), so it serves every assigned
+  // tenant from one instance without a union keyring.
   const buildRetriever = (retrieverDeps: RetrieverDeps) =>
     new EnclaveFactRetriever({
       ...retrieverDeps,
-      hnsw: boxContext.hnsw,
+      resolveTenant,
       s3,
-      keyring: boxContext.keyring,
       processedBucket: PROCESSED_OUTPUTS_BUCKET,
     });
   // Content-addressed, ESDK-sealed per-org LLM cache in front of phala (determinism #1, ADL #12):
-  // a repeated question over an unchanged fact set replays without a fresh TEE call. AAD binds the
-  // blob to this org so it can't cross tenants; same layer the synthesis workers use.
-  const answerInference = new CachedInference(
-    phalaInference,
-    new S3LlmCache({
-      s3,
-      crypto: boxContext.crypto,
-      bucket: PROCESSED_OUTPUTS_BUCKET,
-      orgId: boxContext.tenantId,
-    }),
-    {
-      embedModel: EMBED_MODEL,
-      generateModel: GENERATE_MODEL,
-      promptVersion: LLM_CACHE_PROMPT_VERSION,
-    },
-  );
+  // a repeated question over an unchanged fact set replays without a fresh TEE call. Resolved PER
+  // REQUEST from the answer's orgId (§4.2) — never a boot-time context — so the cache blob is sealed
+  // and read under the requesting tenant's own key/orgId AAD and can't cross tenants. Memoized per
+  // org (each entry uses only that tenant's crypto), mirroring the synthesis workers' cache.
+  const answerInferenceByOrg = new Map<string, InferenceModel>();
+  const answerInferenceFor = (orgId: string): InferenceModel => {
+    let inference = answerInferenceByOrg.get(orgId);
+    if (!inference) {
+      const tenant = resolveTenant(orgId); // fail-closed (403) on an unassigned org before any keyring
+      inference = new CachedInference(
+        phalaInference,
+        new S3LlmCache({ s3, crypto: tenant.crypto, bucket: PROCESSED_OUTPUTS_BUCKET, orgId }),
+        {
+          embedModel: EMBED_MODEL,
+          generateModel: GENERATE_MODEL,
+          promptVersion: LLM_CACHE_PROMPT_VERSION,
+        },
+      );
+      answerInferenceByOrg.set(orgId, inference);
+    }
+    return inference;
+  };
   apiContainer = createContainer({
+    // The box API serves reads for every assigned tenant; the verified JWT orgId must be in the
+    // assigned set (else 403) — this gate runs before any handler touches a keyring (§4.2 step 2).
+    isAssignedOrg: (orgId: string) => registry.has(orgId),
     retrieverFactory: buildRetriever,
-    // ADL #34/#27: grounded answers reuse the same gated retrieval spine, then feed only
+    // ADL #34/#27: grounded answers reuse the same per-request gated retrieval spine, then feed only
     // audience-visible decrypted bodies to the in-enclave TEE model — nothing leaves the enclave.
+    // `generate` is stateless (no per-org seal), so the answer path is per-request via the retriever.
     answerServiceFactory: (retrieverDeps) =>
-      new EnclaveFactAnswerer(buildRetriever(retrieverDeps), (prompt, systemPrompt) =>
-        answerInference.generate(prompt, systemPrompt),
+      new EnclaveFactAnswerer(buildRetriever(retrieverDeps), (orgId, prompt, systemPrompt) =>
+        answerInferenceFor(orgId).generate(prompt, systemPrompt),
       ),
-    // ADL #12: synthesized wiki text is ciphertext at rest; the read path decrypts
-    // audience-visible blocks here, in-enclave, over the sealed key.
-    wikiContentDecryptor: new EnclaveWikiContentDecryptor(boxContext.keyring),
-    // ADL #12/#45: mined draft→edit prose is sealed to the same key, in-enclave only.
-    wikiEditSealer: new EnclaveWikiEditSealer(boxContext.keyring),
+    // ADL #12: synthesized wiki text is ciphertext at rest; the read path decrypts audience-visible
+    // blocks here, in-enclave, over the requesting tenant's sealed key (resolved from `ref.orgId`).
+    wikiContentDecryptor: new EnclaveWikiContentDecryptor(resolveTenant),
+    // ADL #12/#45: mined draft→edit prose is sealed to the requesting tenant's key, in-enclave only.
+    wikiEditSealer: new EnclaveWikiEditSealer(resolveTenant),
     // ADL #12: live-collab Yjs snapshots, comments, and feedback corrections are sealed to the
-    // same key, in-enclave only.
-    wikiSnapshotSealer: new EnclaveWikiSnapshotSealer(boxContext.keyring),
-    wikiCommentSealer: new EnclaveWikiCommentSealer(boxContext.keyring),
-    wikiFeedbackSealer: new EnclaveWikiFeedbackSealer(boxContext.keyring),
+    // requesting tenant's key, in-enclave only.
+    wikiSnapshotSealer: new EnclaveWikiSnapshotSealer(resolveTenant),
+    wikiCommentSealer: new EnclaveWikiCommentSealer(resolveTenant),
+    wikiFeedbackSealer: new EnclaveWikiFeedbackSealer(resolveTenant),
   });
   await apiContainer.start();
 } catch (err) {
   // Degraded, not silent: the SPA still serves but /api/* returns 503 and /health reports
-  // api:unavailable so the outage is observable. For a shared pool this is deliberate — the
-  // read path is §4.2, not yet wired — not a failure.
-  console.error('BOX_API_DEGRADED', { reason: 'read path unavailable', err });
+  // api:unavailable so the outage is observable, rather than a crash-looping boot.
+  console.error('BOX_API_DEGRADED', { err });
 }
 
 new BoxServer(apiContainer?.app.fetch).start();
 
-// The synthesis consumer decrypts over a single context too; keep it off for a shared pool (§4.2).
-if (SYNTHESIS_REQUEST_QUEUE_URL && registry.size === 1) {
-  // One consumer handles both wiki and theme synthesis requests (dispatched by `type`).
+// One consumer serves every assigned tenant: it resolves each request's keyring/crypto from the
+// message's own orgId (§4.2/§2.2), so wiki + theme synthesis run for the whole pool, not just N=1.
+if (SYNTHESIS_REQUEST_QUEUE_URL) {
   new SynthesisConsumer({
     sqs,
     s3,
-    keyring: boxContext.keyring,
+    resolveTenant,
     processedBucket: PROCESSED_OUTPUTS_BUCKET,
     synthesisQueueUrl: SYNTHESIS_REQUEST_QUEUE_URL,
     processedQueueUrl: PROCESSED_QUEUE_URL,

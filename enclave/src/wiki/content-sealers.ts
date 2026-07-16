@@ -1,4 +1,3 @@
-import type { KmsKeyringNode } from '@aws-crypto/client-node';
 import type {
   WikiCommentSealRef,
   WikiCommentSealer,
@@ -8,17 +7,20 @@ import type {
   WikiSnapshotSealer,
 } from '@folklore/api';
 import { EnclaveCrypto, EncryptionContextMismatchError } from '../crypto/esdk.js';
+import type { ResolveTenant } from '../tenant/tenant-resolver.js';
 
 const UNSEAL_FAILED_EVENT = 'WIKI_UNSEAL_FAILED';
 
 // ADL #12: human-authored wiki prose at rest (live-collab snapshots, comments, feedback
-// corrections) is sealed to the same key as wiki blocks and unsealed only in-enclave. A relocated
-// or legacy blob fails the AAD check and surfaces as null so the caller can reject it loudly.
+// corrections) is sealed to the same key as wiki blocks and unsealed only in-enclave. The keyring
+// is selected per request from the ref's orgId (shared-tier design §4.2), so one tenant's blob is
+// only ever opened under its own key. A relocated/legacy/cross-tenant blob fails the AAD check and
+// surfaces as null so the caller can reject it loudly.
 abstract class EnclaveSealerBase {
-  protected readonly crypto: EnclaveCrypto;
+  constructor(private readonly resolveTenant: ResolveTenant) {}
 
-  constructor(keyring: KmsKeyringNode) {
-    this.crypto = new EnclaveCrypto(keyring);
+  protected cryptoFor(orgId: string): EnclaveCrypto {
+    return this.resolveTenant(orgId).crypto;
   }
 
   protected async tryUnseal(decrypt: () => Promise<Buffer>): Promise<Buffer | null> {
@@ -50,30 +52,30 @@ abstract class EnclaveSealerBase {
 
 export class EnclaveWikiSnapshotSealer extends EnclaveSealerBase implements WikiSnapshotSealer {
   seal(ref: WikiSnapshotSealRef, plaintext: Buffer): Promise<Buffer> {
-    return this.crypto.encryptCollabSnapshot(plaintext, ref);
+    return this.cryptoFor(ref.orgId).encryptCollabSnapshot(plaintext, ref);
   }
 
   unseal(ref: WikiSnapshotSealRef, ciphertext: Buffer): Promise<Buffer | null> {
-    return this.tryUnseal(() => this.crypto.decryptCollabSnapshot(ciphertext, ref));
+    return this.tryUnseal(() => this.cryptoFor(ref.orgId).decryptCollabSnapshot(ciphertext, ref));
   }
 }
 
 export class EnclaveWikiCommentSealer extends EnclaveSealerBase implements WikiCommentSealer {
   seal(ref: WikiCommentSealRef, plaintext: Buffer): Promise<Buffer> {
-    return this.crypto.encryptWikiComment(plaintext, ref);
+    return this.cryptoFor(ref.orgId).encryptWikiComment(plaintext, ref);
   }
 
   unseal(ref: WikiCommentSealRef, ciphertext: Buffer): Promise<Buffer | null> {
-    return this.tryUnseal(() => this.crypto.decryptWikiComment(ciphertext, ref));
+    return this.tryUnseal(() => this.cryptoFor(ref.orgId).decryptWikiComment(ciphertext, ref));
   }
 }
 
 export class EnclaveWikiFeedbackSealer extends EnclaveSealerBase implements WikiFeedbackSealer {
   seal(ref: WikiFeedbackSealRef, plaintext: Buffer): Promise<Buffer> {
-    return this.crypto.encryptWikiFeedback(plaintext, ref);
+    return this.cryptoFor(ref.orgId).encryptWikiFeedback(plaintext, ref);
   }
 
   unseal(ref: WikiFeedbackSealRef, ciphertext: Buffer): Promise<Buffer | null> {
-    return this.tryUnseal(() => this.crypto.decryptWikiFeedback(ciphertext, ref));
+    return this.tryUnseal(() => this.cryptoFor(ref.orgId).decryptWikiFeedback(ciphertext, ref));
   }
 }
