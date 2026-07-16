@@ -169,38 +169,92 @@ describe('HMAC signature verification — GitHub', () => {
 describe('HMAC signature verification — Slack', () => {
   const tid = 'tenant-sl';
   const body = JSON.stringify({ type: 'message' });
-  const freshTs = String(Math.floor(Date.now() / 1000));
-  const staleTs = String(Math.floor(Date.now() / 1000) - 400);
+  const nowS = () => Math.floor(Date.now() / 1000);
+  const freshTs = String(nowS());
+  const staleTs = String(nowS() - 400);
 
-  it('returns 200 when v0 signature is valid with fresh timestamp', async () => {
+  function mockSlackSecret() {
     mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
       if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
       if (cmd.Name?.includes('/webhook-secrets/slack'))
         return { Parameter: { Value: TEST_SECRET } };
       throw new Error('ParameterNotFound');
     });
+  }
 
-    const event = makeEvent(tid, 'slack', body, {
+  async function run(headers: Record<string, string>) {
+    return handler(makeEvent(tid, 'slack', body, headers) as never, {} as never, vi.fn());
+  }
+
+  it('returns 200 when v0 signature is valid with fresh timestamp', async () => {
+    mockSlackSecret();
+    const result = await run({
       'x-slack-signature': slackSig(body, TEST_SECRET, freshTs),
       'x-slack-request-timestamp': freshTs,
     });
-    const result = await handler(event as never, {} as never, vi.fn());
     expect(result).toMatchObject({ statusCode: 200 });
   });
 
   it('returns 401 on replay attack (timestamp > 5 min old)', async () => {
-    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
-      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
-      if (cmd.Name?.includes('/webhook-secrets/slack'))
-        return { Parameter: { Value: TEST_SECRET } };
-      throw new Error('ParameterNotFound');
-    });
-
-    const event = makeEvent(tid, 'slack', body, {
+    mockSlackSecret();
+    const result = await run({
       'x-slack-signature': slackSig(body, TEST_SECRET, staleTs),
       'x-slack-request-timestamp': staleTs,
     });
-    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+  });
+
+  it('returns 401 when the timestamp is far in the future (abs replay window)', async () => {
+    mockSlackSecret();
+    const futureTs = String(nowS() + 400);
+    const result = await run({
+      'x-slack-signature': slackSig(body, TEST_SECRET, futureTs),
+      'x-slack-request-timestamp': futureTs,
+    });
+    expect(result).toMatchObject({ statusCode: 401 });
+  });
+
+  it('accepts a signature just inside the 5-minute window', async () => {
+    mockSlackSecret();
+    const edgeTs = String(nowS() - 299);
+    const result = await run({
+      'x-slack-signature': slackSig(body, TEST_SECRET, edgeTs),
+      'x-slack-request-timestamp': edgeTs,
+    });
+    expect(result).toMatchObject({ statusCode: 200 });
+  });
+
+  it('returns 401 when the body is tampered after signing', async () => {
+    mockSlackSecret();
+    const result = await run({
+      'x-slack-signature': slackSig('{"type":"other"}', TEST_SECRET, freshTs),
+      'x-slack-request-timestamp': freshTs,
+    });
+    expect(result).toMatchObject({ statusCode: 401 });
+  });
+
+  it('returns 401 when signed with the wrong secret', async () => {
+    mockSlackSecret();
+    const result = await run({
+      'x-slack-signature': slackSig(body, 'not-the-secret', freshTs),
+      'x-slack-request-timestamp': freshTs,
+    });
+    expect(result).toMatchObject({ statusCode: 401 });
+  });
+
+  it('returns 401 when the timestamp header is missing', async () => {
+    mockSlackSecret();
+    const result = await run({ 'x-slack-signature': slackSig(body, TEST_SECRET, freshTs) });
+    expect(result).toMatchObject({ statusCode: 401 });
+  });
+
+  it('returns 401 when the signature lacks the v0= scheme prefix', async () => {
+    mockSlackSecret();
+    const bare = slackSig(body, TEST_SECRET, freshTs).slice(3);
+    const result = await run({
+      'x-slack-signature': bare,
+      'x-slack-request-timestamp': freshTs,
+    });
     expect(result).toMatchObject({ statusCode: 401 });
   });
 });
