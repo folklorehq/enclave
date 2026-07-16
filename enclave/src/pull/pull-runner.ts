@@ -13,6 +13,7 @@ import {
   linear,
   notion,
   slack,
+  zoom,
 } from '@folklore/connectors';
 import type { PullDueMessage } from '@folklore/contracts/enclave';
 import { externalHttpsProxyAgent } from '../egress/proxy.js';
@@ -178,6 +179,8 @@ export function buildConnector(kind: string, token: string): Connector | null {
         { logger: consoleLogger },
         new intercom.IntercomSdkClient(token),
       );
+    case 'zoom':
+      return new zoom.ZoomConnector({ logger: consoleLogger }, new zoom.HttpZoomClient(token));
     default:
       return null;
   }

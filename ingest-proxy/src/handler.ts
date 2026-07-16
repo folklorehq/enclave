@@ -30,6 +30,7 @@ const SIGNABLE_SOURCES = new Set([
   'intercom',
   'notion',
   'meeting',
+  'zoom',
 ]);
 
 // Atlassian Connect authenticates webhooks with a JWT (Authorization: JWT <token>), HS256-signed
@@ -40,6 +41,7 @@ const JWT_CLOCK_SKEW_S = 60;
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const MS_PER_S = 1000;
 const SLACK_REPLAY_TOLERANCE_S = 300;
+const ZOOM_REPLAY_TOLERANCE_S = 300;
 const publicKeyCache = new Map<string, { key: Buffer; expiresAt: number }>();
 const hmacSecretCache = new Map<string, { secret: string | null; expiresAt: number }>();
 
@@ -94,6 +96,13 @@ function isParameterNotFound(err: unknown): boolean {
   return err instanceof Error && err.name === 'ParameterNotFound';
 }
 
+// Reject a signed request whose timestamp is missing, non-numeric (NaN → fail closed), or
+// outside the replay window — the basestring includes the timestamp, so this bounds replay.
+function withinReplayWindow(ts: string | undefined, toleranceS: number): boolean {
+  const tsNum = Number(ts);
+  return Number.isFinite(tsNum) && Math.abs(Date.now() / MS_PER_S - tsNum) <= toleranceS;
+}
+
 function verifySignature(
   source: string,
   headers: Record<string, string | undefined>,
@@ -114,9 +123,8 @@ function verifySignature(
     case 'slack': {
       const sig = headers['x-slack-signature'];
       const ts = headers['x-slack-request-timestamp'];
-      if (!sig?.startsWith('v0=') || !ts) return false;
-      // Reject replays older than 5 minutes
-      if (Math.abs(Date.now() / MS_PER_S - Number(ts)) > SLACK_REPLAY_TOLERANCE_S) return false;
+      if (!sig?.startsWith('v0=')) return false;
+      if (!withinReplayWindow(ts, SLACK_REPLAY_TOLERANCE_S)) return false;
       const basestring = `v0:${ts}:${body}`;
       const expected = Buffer.from(sig.slice(3), 'hex');
       const computed = createHmac('sha256', secret).update(basestring, 'utf8').digest();
@@ -173,10 +181,49 @@ function verifySignature(
       return expected.length === computed.length && timingSafeEqual(expected, computed);
     }
 
+    case 'zoom': {
+      // Zoom Secret Token: v0= + HMAC-SHA256 over `v0:{timestamp}:{body}` (like Slack's basestring).
+      const sig = headers['x-zm-signature'];
+      const ts = headers['x-zm-request-timestamp'];
+      if (!sig?.startsWith('v0=')) return false;
+      if (!withinReplayWindow(ts, ZOOM_REPLAY_TOLERANCE_S)) return false;
+      const basestring = `v0:${ts}:${body}`;
+      const expected = Buffer.from(sig.slice(3), 'hex');
+      const computed = createHmac('sha256', secret).update(basestring, 'utf8').digest();
+      return expected.length === computed.length && timingSafeEqual(expected, computed);
+    }
+
     default:
       // Fail closed: a source with no known signature scheme is never admitted.
       return false;
   }
+}
+
+const ZOOM_URL_VALIDATION_EVENT = 'endpoint.url_validation';
+
+interface ChallengeResponse {
+  statusCode: number;
+  headers: Record<string, string>;
+  body: string;
+}
+
+function zoomUrlValidation(source: string, body: string, secret: string): ChallengeResponse | null {
+  if (source !== 'zoom') return null;
+  let parsed: { event?: string; payload?: { plainToken?: unknown } };
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (parsed.event !== ZOOM_URL_VALIDATION_EVENT) return null;
+  const plainToken = parsed.payload?.plainToken;
+  if (typeof plainToken !== 'string') return null;
+  const encryptedToken = createHmac('sha256', secret).update(plainToken).digest('hex');
+  return {
+    statusCode: 200,
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ plainToken, encryptedToken }),
+  };
 }
 
 // Verify signature + expiry only; qsh (query-string-hash) is not enforced — the shared-secret
@@ -287,6 +334,13 @@ function extractEventType(
       return headers['x-intercom-topic'] ?? '';
     case 'meeting':
       return headers['x-meeting-event'] ?? '';
+    case 'zoom': {
+      try {
+        return (JSON.parse(body) as { event?: string }).event ?? '';
+      } catch {
+        return '';
+      }
+    }
     default:
       return '';
   }
@@ -312,6 +366,15 @@ function providerDeliveryId(
       try {
         const id = (JSON.parse(body) as { id?: unknown }).id;
         return typeof id === 'string' ? id : null;
+      } catch {
+        return null;
+      }
+    }
+    case 'zoom': {
+      try {
+        const uuid = (JSON.parse(body) as { payload?: { object?: { uuid?: unknown } } }).payload
+          ?.object?.uuid;
+        return typeof uuid === 'string' ? uuid : null;
       } catch {
         return null;
       }
@@ -352,9 +415,17 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   const lookup = await fetchHmacSecret(tenantId, source);
   if (lookup.status === 'error') return { statusCode: 503 };
   if (lookup.status === 'absent') return { statusCode: 401 };
+
+  // Signature FIRST, even for Zoom's url_validation (which Zoom also signs): answering the CRC
+  // echo HMAC(secret, plainToken) before verifying turns it into a forgery oracle for the
+  // message signature HMAC(secret, `v0:{ts}:{body}`) over the same secret. Gating on a valid
+  // signature means only a secret-holder (genuine Zoom) can reach the echo.
   if (!verifySignature(source, event.headers, body, lookup.secret)) {
     return { statusCode: 401 };
   }
+
+  const challenge = zoomUrlValidation(source, body, lookup.secret);
+  if (challenge) return challenge;
 
   if (!(await checkRateLimit(tenantId, source))) {
     return { statusCode: 429 };

@@ -68,6 +68,10 @@ function meetingSig(body: string, secret: string) {
   return 'sha256=' + createHmac('sha256', secret).update(body).digest('hex');
 }
 
+function zoomSig(body: string, secret: string, ts: string) {
+  return 'v0=' + createHmac('sha256', secret).update(`v0:${ts}:${body}`).digest('hex');
+}
+
 function b64url(input: string): string {
   return Buffer.from(input, 'utf8').toString('base64url');
 }
@@ -375,6 +379,122 @@ describe('HMAC signature verification — Meeting', () => {
     });
     const result = await handler(event as never, {} as never, vi.fn());
     expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+});
+
+describe('Zoom — signature verification + url_validation', () => {
+  const tid = 'tenant-zm';
+  const ts = String(Math.floor(Date.now() / 1000));
+  const body = JSON.stringify({
+    event: 'recording.transcript_completed',
+    payload: { object: { uuid: 'abc==' } },
+  });
+
+  function withSecret() {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name?.includes('/webhook-secrets/zoom')) return { Parameter: { Value: TEST_SECRET } };
+      throw new Error('ParameterNotFound');
+    });
+  }
+
+  it('returns 200 for a valid v0 signature', async () => {
+    withSecret();
+    const event = makeEvent(tid, 'zoom', body, {
+      'x-zm-signature': zoomSig(body, TEST_SECRET, ts),
+      'x-zm-request-timestamp': ts,
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 200 });
+    expect(mockSqsSend).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns 401 for a tampered signature', async () => {
+    withSecret();
+    const event = makeEvent(tid, 'zoom', body, {
+      'x-zm-signature': zoomSig(body, 'wrong-secret', ts),
+      'x-zm-request-timestamp': ts,
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 on replay attack (timestamp > 5 min old)', async () => {
+    withSecret();
+    const staleTs = String(Math.floor(Date.now() / 1000) - 400);
+    const event = makeEvent(tid, 'zoom', body, {
+      'x-zm-signature': zoomSig(body, TEST_SECRET, staleTs),
+      'x-zm-request-timestamp': staleTs,
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 when the timestamp is non-numeric (fail closed, no NaN bypass)', async () => {
+    withSecret();
+    const event = makeEvent(tid, 'zoom', body, {
+      'x-zm-signature': zoomSig(body, TEST_SECRET, 'not-a-number'),
+      'x-zm-request-timestamp': 'not-a-number',
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('answers endpoint.url_validation only when the request carries a valid signature', async () => {
+    withSecret();
+    const plainToken = 'plain-token-xyz';
+    const challengeBody = JSON.stringify({
+      event: 'endpoint.url_validation',
+      payload: { plainToken },
+    });
+    const event = makeEvent(tid, 'zoom', challengeBody, {
+      'x-zm-signature': zoomSig(challengeBody, TEST_SECRET, ts),
+      'x-zm-request-timestamp': ts,
+    });
+    const result = (await handler(event as never, {} as never, vi.fn())) as {
+      statusCode: number;
+      body: string;
+    };
+    expect(result.statusCode).toBe(200);
+    const parsed = JSON.parse(result.body) as { plainToken: string; encryptedToken: string };
+    expect(parsed.plainToken).toBe(plainToken);
+    expect(parsed.encryptedToken).toBe(
+      createHmac('sha256', TEST_SECRET).update(plainToken).digest('hex'),
+    );
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  // The oracle: HMAC(secret, plainToken) with attacker-chosen plainToken equals a message
+  // signature HMAC(secret, `v0:{ts}:{forgedBody}`) over the same secret. An attacker who does NOT
+  // hold the secret can only obtain that HMAC if the CRC echo answers an unsigned request — so
+  // prove the unsigned url_validation is rejected and never leaks the HMAC. Without the echo, the
+  // attacker cannot produce a valid x-zm-signature for their forged body.
+  it('does not act as a signature-forgery oracle for an unauthenticated caller', async () => {
+    withSecret();
+    const forgedBody = JSON.stringify({
+      event: 'recording.transcript_completed',
+      payload: { object: { uuid: 'attacker-forged' } },
+    });
+    const oracleInput = `v0:${ts}:${forgedBody}`;
+    const forgedSig = createHmac('sha256', TEST_SECRET).update(oracleInput).digest('hex');
+
+    const challengeBody = JSON.stringify({
+      event: 'endpoint.url_validation',
+      payload: { plainToken: oracleInput },
+    });
+    const oracleQuery = makeEvent(tid, 'zoom', challengeBody, {});
+    const oracleResult = (await handler(oracleQuery as never, {} as never, vi.fn())) as {
+      statusCode: number;
+      body?: string;
+    };
+
+    // The echo is gated behind a valid signature the attacker can't produce: 401, no HMAC leaked.
+    expect(oracleResult.statusCode).toBe(401);
+    expect(oracleResult.body ?? '').not.toContain(forgedSig);
     expect(mockSqsSend).not.toHaveBeenCalled();
   });
 });
