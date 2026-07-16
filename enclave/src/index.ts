@@ -3,7 +3,8 @@ import { SQSClient } from '@aws-sdk/client-sqs';
 import { SSMClient, PutParameterCommand, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { TenantContextFactory } from './tenant/tenant-context-factory.js';
 import { TenantRegistry } from './tenant/tenant-registry.js';
-import { parseTenantAssignments } from './tenant/tenant-assignments.js';
+import { resolveBootAssignments, parseAssignmentManifest } from './tenant/tenant-assignments.js';
+import { TenantAssignmentApplier } from './tenant/tenant-assignment-applier.js';
 import { TenantMessageRouter } from './tenant/tenant-message-router.js';
 import { QueueSetDrainer } from './tenant/queue-set-drainer.js';
 import { saveAllTenantIndices } from './tenant/index-persistence.js';
@@ -38,6 +39,7 @@ import { installGlobalEgressDispatcher } from './egress/proxy.js';
 import { createContainer, type ApiContainer, type RetrieverDeps } from '@folklore/api';
 import { RedisCache } from '@folklore/cache';
 import { BufferedOpsTelemetryClient, RedisOpsEventChannel } from '@folklore/control-plane';
+import { poolAssignmentsKey } from '@folklore/contracts';
 
 // ADL #42: route external egress through the parent CONNECT proxy — before any client is
 // built, so undici SDKs pick up the dispatcher (loopback bypasses it, keeping AWS/inference).
@@ -96,14 +98,20 @@ async function loadAgentToken(): Promise<void> {
   }
 }
 
-// Stage 2 (design §5): boot unseals ONE master key per assigned tenant into its own single-CMK
-// context; the registry keys them by tenantId so no keyed op can reach another tenant's material.
-// N=1 (a dedicated box, the default tier §6.1) is the single-tenant fallback in parseTenantAssignments.
-const assignments = parseTenantAssignments(process.env);
-const primaryTenantId = assignments[0]!.tenantId;
-// Pool-scoped idle is Stage 4 (infra); until the wake Lambda tracks the pool, the idle flag stays
-// on the primary tenant's SSM path so dedicated (N=1) behavior is unchanged.
-const idleSsmPath = `/folklore/${primaryTenantId}/idle`;
+// A shared pool (POOL_ID set) learns its assigned tenants from the content-free manifest on the
+// check-in channel (§4.3); a dedicated box (default tier §6.1) is env-configured. So POOL_ID + empty
+// env is valid — it boots with zero tenants and the applier fills the registry from the manifest.
+const POOL_ID = process.env['POOL_ID']?.trim() ?? '';
+
+// Stage 2 (design §5): each assigned tenant gets its own single-CMK context, keyed in the registry
+// by tenantId so no keyed op can reach another tenant's material. The applier is the one path that
+// builds/tears down contexts — used for the boot set here and for live (re)assignment below (§4.3).
+const bootAssignments = resolveBootAssignments(process.env);
+// Pool-scoped idle (§5): the wake Lambda tracks the pool, so a shared host reports idle under the
+// pool path; a dedicated box keeps its per-tenant path so N=1 behavior is unchanged.
+const idleSsmPath = POOL_ID
+  ? `/folklore/pool/${POOL_ID}/idle`
+  : `/folklore/${bootAssignments[0]!.tenantId}/idle`;
 
 const tenantFactory = new TenantContextFactory({
   s3,
@@ -114,15 +122,10 @@ const tenantFactory = new TenantContextFactory({
   processedOutputsBucket: PROCESSED_OUTPUTS_BUCKET,
 });
 const registry = new TenantRegistry();
-for (const assignment of assignments) {
-  registry.register(
-    await tenantFactory.build({
-      tenantId: assignment.tenantId,
-      kmsKeyId: assignment.kmsKeyId,
-      recoveryPubkey: assignment.recoveryPubkey,
-    }),
-  );
-}
+const assignmentApplier = new TenantAssignmentApplier(registry, (identity) =>
+  tenantFactory.build(identity),
+);
+await assignmentApplier.apply(bootAssignments);
 console.log('tenant contexts assigned', { count: registry.size });
 
 await loadInferenceKey();
@@ -142,11 +145,34 @@ if (!DEPLOYMENT_ID || !REDIS_URL) {
   );
 }
 const haltCache = new RedisCache(REDIS_URL);
-// Pool-wide emergency halt (unchanged single-tenant semantics) plus a per-tenant gate each (§6.3),
-// so halting tenant A never stops tenant B's queue.
+// Pool-wide emergency halt (unchanged single-tenant semantics); per-tenant gates are built on demand
+// (§6.3) since the assigned set changes live, so halting tenant A never stops tenant B's queue.
 const poolHalt = new HaltGate(haltCache, DEPLOYMENT_ID);
-const tenantHaltGates = new Map(
-  assignments.map((a) => [a.tenantId, new HaltGate(haltCache, a.tenantId)] as const),
+
+// §4.3: the agent publishes this pool's content-free manifest to Redis on check-in; the enclave
+// re-reads it and rebuilds the registry (add/remove tenants, §2.2 pt 5). Idempotent, so a periodic
+// re-read reconverges to the latest assignment. Dedicated boxes have no POOL_ID and no manifest.
+async function refreshAssignments(): Promise<void> {
+  if (!POOL_ID) return;
+  try {
+    const manifest = await haltCache.get(poolAssignmentsKey(POOL_ID));
+    if (!manifest) return;
+    await assignmentApplier.apply(parseAssignmentManifest(manifest, POOL_ID));
+  } catch (err) {
+    // Log the error NAME only, never the raw error (ADL #18 — a message could echo a manifest field).
+    // A bad/foreign manifest leaves the current assignment set untouched — fail closed, don't tear
+    // down live tenants on a parse slip.
+    console.error('assignment manifest refresh failed', {
+      pool_id: POOL_ID,
+      error: err instanceof Error ? err.name : 'unknown',
+    });
+  }
+}
+await refreshAssignments();
+const ASSIGNMENT_REFRESH_INTERVAL_MS = 30_000;
+const assignmentRefreshTimer = setInterval(
+  () => void refreshAssignments(),
+  ASSIGNMENT_REFRESH_INTERVAL_MS,
 );
 
 // ADL #18: the enclave has no PostHog egress, so inference ops telemetry (attestation
@@ -265,18 +291,19 @@ const drainer = new QueueSetDrainer({
   sqs,
   s3,
   router,
-  assignments: assignments.map((a) => ({ tenantId: a.tenantId, queueUrl: a.queueUrl })),
+  assignments: () => assignmentApplier.queueAssignments(),
   processedQueueUrl: PROCESSED_QUEUE_URL,
   processedOutputsBucket: PROCESSED_OUTPUTS_BUCKET,
   rawPayloadsBucket: RAW_PAYLOADS_BUCKET,
   poolHalt,
-  haltGateFor: (tenantId) => tenantHaltGates.get(tenantId) ?? poolHalt,
+  haltGateFor: (tenantId) => new HaltGate(haltCache, tenantId),
   writeIdle: writeIdleFlag,
   idlePollThreshold: IDLE_POLL_THRESHOLD,
 });
 
 async function shutdown(): Promise<void> {
   console.log('enclave shutting down — saving hnsw indices', { count: registry.size });
+  clearInterval(assignmentRefreshTimer);
   await saveAllTenantIndices(registry.all(), s3, PROCESSED_OUTPUTS_BUCKET);
   if (apiContainer) await apiContainer.close().catch(() => {});
   await haltCache.close().catch(() => {});

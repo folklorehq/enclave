@@ -16,6 +16,8 @@ import type { RoutableMessage, TenantMessageRouter } from './tenant-message-rout
 // one poll cycle (≈20s), preserving single-tenant timing at N=1.
 const MAX_LONG_POLL_SECONDS = 20;
 const RECEIVE_BATCH = 10;
+// An empty pool has no queue long-poll to pace the loop, so wait before re-checking for an assignment.
+const EMPTY_POOL_POLL_INTERVAL_MS = 5_000;
 
 export interface QueueAssignment {
   tenantId: string;
@@ -26,7 +28,9 @@ export interface QueueSetDrainerDeps {
   sqs: SQSClient;
   s3: S3Client;
   router: TenantMessageRouter;
-  assignments: QueueAssignment[];
+  // A supplier, not a fixed array: the assigned set changes live as the applier rebuilds the
+  // registry on (re)assignment (§4.3), so each sweep drains the currently-assigned queues.
+  assignments: () => QueueAssignment[];
   processedQueueUrl: string;
   processedOutputsBucket: string;
   rawPayloadsBucket: string;
@@ -49,7 +53,7 @@ export class QueueSetDrainer {
   constructor(private readonly deps: QueueSetDrainerDeps) {}
 
   async runForever(): Promise<void> {
-    console.log('processing loop started', { queues: this.deps.assignments.length });
+    console.log('processing loop started', { queues: this.deps.assignments().length });
     for (;;) {
       // Pool-wide break-glass halt gates the whole sweep; a halted pool idles without touching any
       // queue (ADL #13). Per-tenant halts are applied per queue inside the sweep (§6.3).
@@ -62,17 +66,28 @@ export class QueueSetDrainer {
   }
 
   async drainOnce(): Promise<void> {
+    const assignments = this.deps.assignments();
+    if (assignments.length === 0) {
+      // An empty pool (assigned nothing yet, or drained to zero) waits for a manifest rather than
+      // busy-spinning, and reports idle so the parent host can self-stop.
+      await this.sleep(EMPTY_POOL_POLL_INTERVAL_MS);
+      await this.updateIdle(false);
+      return;
+    }
     const ackBatch = new DurableAckBatch();
-    const received = await this.drainAllQueues(ackBatch);
+    const received = await this.drainAllQueues(assignments, ackBatch);
     await ackBatch.commit();
     await this.updateIdle(received);
   }
 
-  private async drainAllQueues(ackBatch: DurableAckBatch): Promise<boolean> {
+  private async drainAllQueues(
+    assignments: QueueAssignment[],
+    ackBatch: DurableAckBatch,
+  ): Promise<boolean> {
     let received = false;
-    for (const assignment of this.deps.assignments) {
+    for (const assignment of assignments) {
       if (await this.deps.haltGateFor(assignment.tenantId).isHalted()) continue;
-      const count = await this.drainQueue(assignment, ackBatch);
+      const count = await this.drainQueue(assignment, assignments.length, ackBatch);
       if (count > 0) received = true;
     }
     return received;
@@ -80,13 +95,14 @@ export class QueueSetDrainer {
 
   private async drainQueue(
     assignment: QueueAssignment,
+    queueCount: number,
     ackBatch: DurableAckBatch,
   ): Promise<number> {
     const resp = await this.deps.sqs.send(
       new ReceiveMessageCommand({
         QueueUrl: assignment.queueUrl,
         MaxNumberOfMessages: RECEIVE_BATCH,
-        WaitTimeSeconds: this.waitSeconds(),
+        WaitTimeSeconds: this.waitSeconds(queueCount),
       }),
     );
     const messages = resp.Messages ?? [];
@@ -125,6 +141,8 @@ export class QueueSetDrainer {
     } catch {
       // Content-free SQS id only — err could carry a decrypted-content snippet (ADL #18). An
       // unassigned or cross-tenant message is never acked here, so it stays in queue (then DLQ).
+      // A tenant torn down mid-sweep (reassignment §4.3 zeroizes its context) lands here too — its
+      // ingest key throws — so the message is left unacked and redelivered once reassigned; fail-closed.
       console.error('failed to process message', { id: msg.MessageId });
     }
   }
@@ -196,8 +214,8 @@ export class QueueSetDrainer {
     }
   }
 
-  private waitSeconds(): number {
-    const share = Math.floor(MAX_LONG_POLL_SECONDS / this.deps.assignments.length);
+  private waitSeconds(queueCount: number): number {
+    const share = Math.floor(MAX_LONG_POLL_SECONDS / queueCount);
     return Math.max(1, Math.min(MAX_LONG_POLL_SECONDS, share));
   }
 

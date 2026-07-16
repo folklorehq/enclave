@@ -19,6 +19,14 @@ export class TenantRegistry {
     this.contexts.set(context.tenantId, context);
   }
 
+  // Returns the dropped context (or undefined) so the caller can zeroize its key material on a
+  // reassignment teardown (§2.2 point 5) — the registry only unmaps; it never decides zeroing.
+  remove(tenantId: string): TenantContext | undefined {
+    const context = this.contexts.get(tenantId);
+    this.contexts.delete(tenantId);
+    return context;
+  }
+
   has(tenantId: string): boolean {
     return this.contexts.has(tenantId);
   }
