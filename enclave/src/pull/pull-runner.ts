@@ -12,6 +12,7 @@ import {
   intercom,
   jira,
   linear,
+  microsoft365,
   notion,
   slack,
   zoom,
@@ -191,6 +192,13 @@ export function buildConnector(kind: string, token: string): Connector | null {
       return new googleDrive.GoogleDriveConnector(
         { logger: consoleLogger },
         new googleDrive.GoogleDriveClient(token, externalHttpsProxyAgent()),
+      );
+    case 'microsoft365':
+      // Hand-rolled fetch against graph.microsoft.com — auto-covered by the enclave's global undici
+      // egress dispatcher, so no explicit proxy agent is needed (ADL #42).
+      return new microsoft365.Microsoft365Connector(
+        { logger: consoleLogger },
+        new microsoft365.Microsoft365Client(token),
       );
     case 'zoom':
       return new zoom.ZoomConnector({ logger: consoleLogger }, new zoom.HttpZoomClient(token));

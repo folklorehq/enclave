@@ -31,11 +31,13 @@ const SIGNABLE_SOURCES = new Set([
   'notion',
   'meeting',
   'google_drive',
+  'microsoft365',
   'zoom',
   'zoom_bot',
 ]);
 
 const GOOGLE_DRIVE_SOURCE = 'google_drive';
+const MICROSOFT365_SOURCE = 'microsoft365';
 // Drive push channels have no body signature; validity is the channel token we set at watch() time,
 // and the initial `sync` state is a handshake carrying no change (Google Drive push notifications).
 const DRIVE_SYNC_STATE = 'sync';
@@ -217,6 +219,25 @@ function verifySignature(
       return expected.length === provided.length && timingSafeEqual(expected, provided);
     }
 
+    case MICROSOFT365_SOURCE: {
+      // Graph change notifications carry no body HMAC — validity is the clientState we set at
+      // subscription time, matched constant-time against EVERY notification. Fail closed on any miss.
+      let parsed: { value?: Array<{ clientState?: unknown }> };
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        return false;
+      }
+      const notifications = parsed.value;
+      if (!Array.isArray(notifications) || notifications.length === 0) return false;
+      const expected = Buffer.from(secret, 'utf8');
+      return notifications.every((n) => {
+        if (typeof n.clientState !== 'string') return false;
+        const provided = Buffer.from(n.clientState, 'utf8');
+        return expected.length === provided.length && timingSafeEqual(expected, provided);
+      });
+    }
+
     case 'zoom': {
       // Zoom Secret Token: v0= + HMAC-SHA256 over `v0:{timestamp}:{body}` (like Slack's basestring).
       const sig = headers['x-zm-signature'];
@@ -290,6 +311,18 @@ function zoomUrlValidation(source: string, body: string, secret: string): Challe
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ plainToken, encryptedToken }),
   };
+}
+
+// Graph confirms a subscription by GET/POSTing ?validationToken=<opaque> and requires the raw token
+// echoed back as text/plain within 10s. It carries no clientState, so it precedes signature checks.
+function microsoft365ValidationEcho(
+  source: string,
+  query: Record<string, string | undefined> | undefined,
+): ChallengeResponse | null {
+  if (source !== MICROSOFT365_SOURCE) return null;
+  const token = query?.['validationToken'];
+  if (typeof token !== 'string' || token.length === 0) return null;
+  return { statusCode: 200, headers: { 'content-type': 'text/plain' }, body: token };
 }
 
 // Verify signature + expiry only; qsh (query-string-hash) is not enforced — the shared-secret
@@ -402,6 +435,16 @@ function extractEventType(
       return headers['x-meeting-event'] ?? '';
     case GOOGLE_DRIVE_SOURCE:
       return headers['x-goog-resource-state'] ?? '';
+    case MICROSOFT365_SOURCE: {
+      try {
+        return (
+          (JSON.parse(body) as { value?: Array<{ changeType?: string }> }).value?.[0]?.changeType ??
+          ''
+        );
+      } catch {
+        return '';
+      }
+    }
     case 'zoom_bot':
     case 'zoom': {
       try {
@@ -425,6 +468,25 @@ function driveChangePingBody(headers: Record<string, string | undefined>): strin
     messageNumber: headers['x-goog-message-number'],
     resourceUri: headers['x-goog-resource-uri'],
   });
+}
+
+// A Graph notification body carries the clientState (our webhook secret) — strip it and re-emit only
+// content-free routing metadata (subscription/resource ids + changeType) so no secret reaches SQS/enclave.
+function m365ChangePingBody(body: string): string {
+  let parsed: {
+    value?: Array<{ subscriptionId?: unknown; resource?: unknown; changeType?: unknown }>;
+  };
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return JSON.stringify({ notifications: [] });
+  }
+  const notifications = (parsed.value ?? []).map((n) => ({
+    subscriptionId: typeof n.subscriptionId === 'string' ? n.subscriptionId : undefined,
+    resource: typeof n.resource === 'string' ? n.resource : undefined,
+    changeType: typeof n.changeType === 'string' ? n.changeType : undefined,
+  }));
+  return JSON.stringify({ notifications });
 }
 
 function providerDeliveryId(
@@ -459,6 +521,21 @@ function providerDeliveryId(
       const channelId = headers['x-goog-channel-id'];
       const messageNumber = headers['x-goog-message-number'];
       return channelId && messageNumber ? `${channelId}:${messageNumber}` : null;
+    }
+    case MICROSOFT365_SOURCE: {
+      // (subscription, resource) identifies the changed drive item — the dedup key across Graph retries.
+      try {
+        const first = (
+          JSON.parse(body) as {
+            value?: Array<{ subscriptionId?: unknown; resource?: unknown }>;
+          }
+        ).value?.[0];
+        const sub = typeof first?.subscriptionId === 'string' ? first.subscriptionId : null;
+        const resource = typeof first?.resource === 'string' ? first.resource : null;
+        return sub && resource ? `${sub}:${resource}` : null;
+      } catch {
+        return null;
+      }
     }
     case 'zoom': {
       try {
@@ -499,6 +576,11 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   // admin registers as the webhook secret) without treating it as an event or forwarding it to SQS.
   if (isNotionVerificationHandshake(source, event.headers, body)) return { statusCode: 200 };
 
+  // Graph subscription validation: echo the opaque validationToken as text/plain (no clientState
+  // yet, so it precedes the signature gate — the token echo carries no secret and admits nothing).
+  const graphValidation = microsoft365ValidationEcho(source, event.queryStringParameters);
+  if (graphValidation) return graphValidation;
+
   // Fail closed: a supported source is admitted only when a provisioned secret
   // verifies the signature. An absent secret or a bad signature is a 401
   // (forged-event injection guard); a transient SSM error is a 503 so the
@@ -526,8 +608,14 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     return { statusCode: 429 };
   }
 
-  // Drive pings have an empty body; the signal lives in headers, so enqueue a content-free rebuild.
-  const payloadBody = source === GOOGLE_DRIVE_SOURCE ? driveChangePingBody(headers) : body;
+  // Drive pings have an empty body (signal in headers); Graph notifications carry the clientState
+  // secret — both are re-emitted content-free so no secret or unneeded payload reaches SQS/enclave.
+  const payloadBody =
+    source === GOOGLE_DRIVE_SOURCE
+      ? driveChangePingBody(headers)
+      : source === MICROSOFT365_SOURCE
+        ? m365ChangePingBody(body)
+        : body;
 
   const eventType = extractEventType(source, headers, body);
   const recipientPubBytes = await fetchPublicKey(tenantId);

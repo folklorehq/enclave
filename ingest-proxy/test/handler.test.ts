@@ -1311,3 +1311,83 @@ describe('channel-token verification — Google Drive', () => {
     expect(mockSqsSend).not.toHaveBeenCalled();
   });
 });
+
+describe('clientState verification — Microsoft 365 (Graph)', () => {
+  const tid = 'tenant-m365';
+  const CLIENT_STATE = 'graph-client-state-secret';
+
+  function m365SecretMock() {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name?.includes('/webhook-secrets/microsoft365'))
+        return { Parameter: { Value: CLIENT_STATE } };
+      throw new Error('ParameterNotFound');
+    });
+  }
+
+  function notification(clientState: string) {
+    return JSON.stringify({
+      value: [
+        {
+          subscriptionId: 'sub-1',
+          clientState,
+          changeType: 'updated',
+          resource: 'drives/drive-1/root',
+        },
+      ],
+    });
+  }
+
+  it('echoes the validationToken as text/plain (subscription handshake) without enqueuing', async () => {
+    m365SecretMock();
+    const event = {
+      pathParameters: { tenant_id: tid, source: 'microsoft365' },
+      headers: {},
+      queryStringParameters: { validationToken: 'opaque-validation-token' },
+      body: '',
+    };
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({
+      statusCode: 200,
+      headers: { 'content-type': 'text/plain' },
+      body: 'opaque-validation-token',
+    });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('returns 200 and enqueues a content-free ping (no clientState) when it matches', async () => {
+    m365SecretMock();
+    const event = makeEvent(tid, 'microsoft365', notification(CLIENT_STATE));
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 200 });
+    expect(mockSqsSend).toHaveBeenCalledOnce();
+
+    const msg = mockSqsSend.mock.calls[0]![0] as Record<string, unknown>;
+    const outer = JSON.parse(msg['MessageBody'] as string) as Record<string, string>;
+    expect(outer['source']).toBe('microsoft365');
+    expect(outer['eventType']).toBe('updated');
+    // The clientState secret must never reach SQS — it's decrypted from the ciphertext payload only.
+    expect(JSON.stringify(outer)).not.toContain(CLIENT_STATE);
+    expect(msg['MessageDeduplicationId']).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('returns 401 when a notification clientState does not match', async () => {
+    m365SecretMock();
+    const event = makeEvent(tid, 'microsoft365', notification('wrong-state'));
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('fails closed (401) when clientState is absent from the notification', async () => {
+    m365SecretMock();
+    const event = makeEvent(
+      tid,
+      'microsoft365',
+      JSON.stringify({ value: [{ subscriptionId: 'sub-1', changeType: 'updated' }] }),
+    );
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+});
