@@ -305,6 +305,74 @@ describe('HMAC signature verification — Intercom', () => {
     const result = await handler(event as never, {} as never, vi.fn());
     expect(result).toMatchObject({ statusCode: 200 });
   });
+
+  it('returns 401 when the sha1 signature is wrong', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name?.includes('/webhook-secrets/intercom'))
+        return { Parameter: { Value: TEST_SECRET } };
+      throw new Error('ParameterNotFound');
+    });
+
+    const event = makeEvent(tid, 'intercom', body, {
+      'x-hub-signature': intercomSig(body, 'wrong-secret'),
+      'x-intercom-topic': 'conversation.user.created',
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 when the digest is correct but the prefix is not sha1= (a sha256= header is rejected)', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name?.includes('/webhook-secrets/intercom'))
+        return { Parameter: { Value: TEST_SECRET } };
+      throw new Error('ParameterNotFound');
+    });
+
+    const sha1Hex = createHmac('sha1', TEST_SECRET).update(body).digest('hex');
+    const event = makeEvent(tid, 'intercom', body, {
+      'x-hub-signature': `sha256=${sha1Hex}`,
+      'x-intercom-topic': 'conversation.user.created',
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 when the sha1= prefix is missing (bare hex digest)', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name?.includes('/webhook-secrets/intercom'))
+        return { Parameter: { Value: TEST_SECRET } };
+      throw new Error('ParameterNotFound');
+    });
+
+    const bareHex = createHmac('sha1', TEST_SECRET).update(body).digest('hex');
+    const event = makeEvent(tid, 'intercom', body, {
+      'x-hub-signature': bareHex,
+      'x-intercom-topic': 'conversation.user.created',
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 (fail closed) when no intercom secret is configured', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      throw Object.assign(new Error('ParameterNotFound'), { name: 'ParameterNotFound' });
+    });
+
+    const event = makeEvent('tenant-ic-open', 'intercom', body, {
+      'x-hub-signature': intercomSig(body, TEST_SECRET),
+      'x-intercom-topic': 'conversation.user.created',
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
 });
 
 describe('HMAC signature verification — Jira', () => {
