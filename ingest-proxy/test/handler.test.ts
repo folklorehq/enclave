@@ -895,6 +895,91 @@ describe('Zoom — signature verification + url_validation', () => {
   });
 });
 
+// Recall bots and native Zoom both post to the `zoom` source path, but Recall signs with the SINGLE
+// global workspace secret (Svix), never the per-tenant Zoom Secret Token (design §4/§8).
+describe('Recall inbound on the `zoom` path — global workspace secret (Svix)', () => {
+  const tid = 'tenant-recall';
+  const body = JSON.stringify({ event: 'transcript.done', data: { bot: { id: 'bot-9' } } });
+  const freshTs = String(Math.floor(Date.now() / 1000));
+  const RECALL_GLOBAL = 'whsec_' + Buffer.from('recall-workspace-secret').toString('base64');
+  const PER_TENANT_ZOOM = 'per-tenant-zoom-secret';
+
+  function withSecrets() {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name === '/folklore/recall-api/webhook-verification-secret')
+        return { Parameter: { Value: RECALL_GLOBAL } };
+      if (cmd.Name?.includes('/webhook-secrets/zoom'))
+        return { Parameter: { Value: PER_TENANT_ZOOM } };
+      throw new Error('ParameterNotFound');
+    });
+  }
+
+  it('verifies a Recall webhook against the GLOBAL secret, not the per-tenant path', async () => {
+    withSecrets();
+    const event = makeEvent(tid, 'zoom', body, {
+      'webhook-id': 'msg_r1',
+      'webhook-timestamp': freshTs,
+      'webhook-signature': svixSig('msg_r1', freshTs, body, RECALL_GLOBAL),
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 200 });
+    expect(mockSqsSend).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed on a Recall webhook signed with the wrong (per-tenant) secret', async () => {
+    withSecrets();
+    const event = makeEvent(tid, 'zoom', body, {
+      'webhook-id': 'msg_r1',
+      'webhook-timestamp': freshTs,
+      'webhook-signature': svixSig('msg_r1', freshTs, body, RECALL_SECRET),
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('still verifies a native Zoom webhook against the per-tenant Zoom Secret Token', async () => {
+    withSecrets();
+    const zoomBody = JSON.stringify({
+      event: 'recording.transcript_completed',
+      payload: { object: { uuid: 'zoom-uuid-1' } },
+    });
+    const event = makeEvent(tid, 'zoom', zoomBody, {
+      'x-zm-signature': zoomSig(zoomBody, PER_TENANT_ZOOM, freshTs),
+      'x-zm-request-timestamp': freshTs,
+    });
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 200 });
+    expect(mockSqsSend).toHaveBeenCalledTimes(1);
+  });
+});
+
+// The global Recall secret has a tenant-independent cache key, so a sibling test that provisions it
+// poisons the shared in-process cache; a fresh module import gives this fail-closed check a clean cache.
+describe('Recall inbound — absent GLOBAL secret (fresh module cache)', () => {
+  it('returns 401 and never enqueues to SQS when the global secret is unprovisioned', async () => {
+    vi.resetModules();
+    mockSqsSend.mockClear();
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      throw Object.assign(new Error('ParameterNotFound'), { name: 'ParameterNotFound' });
+    });
+    const { handler: freshHandler } = await import('../src/handler.js');
+    const ts = String(Math.floor(Date.now() / 1000));
+    const body = JSON.stringify({ event: 'transcript.done', data: { bot: { id: 'bot-open' } } });
+    const secret = 'whsec_' + Buffer.from('recall-workspace-secret').toString('base64');
+    const event = makeEvent('tenant-recall-open', 'zoom', body, {
+      'webhook-id': 'msg_open',
+      'webhook-timestamp': ts,
+      'webhook-signature': svixSig('msg_open', ts, body, secret),
+    });
+    const result = await freshHandler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+});
+
 describe('JWT verification — Confluence (Atlassian Connect)', () => {
   const tid = 'tenant-cf';
   const body = JSON.stringify({ webhookEvent: 'page_created', page: { id: 'p1' } });

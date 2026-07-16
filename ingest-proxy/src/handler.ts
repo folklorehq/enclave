@@ -53,6 +53,10 @@ const SLACK_REPLAY_TOLERANCE_S = 300;
 const SVIX_REPLAY_TOLERANCE_S = 300;
 const SVIX_SECRET_PREFIX = 'whsec_';
 const ZOOM_REPLAY_TOLERANCE_S = 300;
+// Recall.ai signs every tenant's bot webhook with ONE workspace-level verification secret (Svix
+// scheme), not a per-tenant secret (design §4): inbound isolation rests on the unguessable per-tenant
+// ingest URL alone. Recall bots post to the `zoom` source path (design §8 — no `zoom_bot` SourceKind).
+const RECALL_WEBHOOK_SECRET_PATH = '/folklore/recall-api/webhook-verification-secret';
 const publicKeyCache = new Map<string, { key: Buffer; expiresAt: number }>();
 const hmacSecretCache = new Map<string, { secret: string | null; expiresAt: number }>();
 
@@ -76,19 +80,13 @@ type SecretLookup =
   | { status: 'absent' }
   | { status: 'error' };
 
-async function fetchHmacSecret(tenantId: string, source: string): Promise<SecretLookup> {
-  const cacheKey = `${tenantId}/${source}`;
+async function fetchSecretAt(name: string, cacheKey: string): Promise<SecretLookup> {
   const cached = hmacSecretCache.get(cacheKey);
   if (cached && Date.now() < cached.expiresAt) return resolveSecret(cached.secret);
 
   let secret: string | null;
   try {
-    const result = await ssm.send(
-      new GetParameterCommand({
-        Name: `/folklore/${tenantId}/webhook-secrets/${source}`,
-        WithDecryption: true,
-      }),
-    );
+    const result = await ssm.send(new GetParameterCommand({ Name: name, WithDecryption: true }));
     secret = result.Parameter?.Value ?? null;
   } catch (err) {
     if (!isParameterNotFound(err)) return { status: 'error' };
@@ -97,6 +95,18 @@ async function fetchHmacSecret(tenantId: string, source: string): Promise<Secret
 
   hmacSecretCache.set(cacheKey, { secret, expiresAt: Date.now() + CACHE_TTL_MS });
   return resolveSecret(secret);
+}
+
+function fetchHmacSecret(tenantId: string, source: string): Promise<SecretLookup> {
+  return fetchSecretAt(`/folklore/${tenantId}/webhook-secrets/${source}`, `${tenantId}/${source}`);
+}
+
+// A Recall bot transcript and a native-Zoom event both land on the `zoom` source path but sign
+// differently: Recall uses Svix headers (global secret), native Zoom uses `x-zm-signature` (per-tenant
+// Zoom Secret Token). Presence of a Svix signature header disambiguates the Recall producer.
+function isRecallInbound(source: string, headers: Record<string, string | undefined>): boolean {
+  if (source !== 'zoom') return false;
+  return Boolean(headers['webhook-signature'] ?? headers['svix-signature']);
 }
 
 function resolveSecret(secret: string | null): SecretLookup {
@@ -538,6 +548,9 @@ function providerDeliveryId(
       }
     }
     case 'zoom': {
+      // A Recall bot on the `zoom` path dedups on its Svix message id; native Zoom on the meeting uuid.
+      const svixId = headers['webhook-id'] ?? headers['svix-id'];
+      if (svixId) return svixId;
       try {
         const uuid = (JSON.parse(body) as { payload?: { object?: { uuid?: unknown } } }).payload
           ?.object?.uuid;
@@ -585,14 +598,22 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   // verifies the signature. An absent secret or a bad signature is a 401
   // (forged-event injection guard); a transient SSM error is a 503 so the
   // provider retries rather than the webhook being dropped (durability).
-  const lookup = await fetchHmacSecret(tenantId, source);
+  // Recall inbound verifies against the single global workspace secret (Svix); every other producer
+  // (incl. native Zoom on the same `zoom` path) verifies against its per-tenant secret. Fail closed.
+  const recallInbound = isRecallInbound(source, headers);
+  const lookup = recallInbound
+    ? await fetchSecretAt(RECALL_WEBHOOK_SECRET_PATH, RECALL_WEBHOOK_SECRET_PATH)
+    : await fetchHmacSecret(tenantId, source);
   if (lookup.status === 'error') return { statusCode: 503 };
   if (lookup.status === 'absent') return { statusCode: 401 };
   // Signature FIRST, even for Zoom's url_validation (which Zoom also signs): answering the CRC
   // echo HMAC(secret, plainToken) before verifying turns it into a forgery oracle for the
   // message signature HMAC(secret, `v0:{ts}:{body}`) over the same secret. Gating on a valid
   // signature means only a secret-holder (genuine Zoom) can reach the echo.
-  if (!verifySignature(source, headers, body, lookup.secret)) {
+  const signatureValid = recallInbound
+    ? verifySvixSignature(headers, body, lookup.secret)
+    : verifySignature(source, headers, body, lookup.secret);
+  if (!signatureValid) {
     return { statusCode: 401 };
   }
 
@@ -601,8 +622,11 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     return { statusCode: 200 };
   }
 
-  const challenge = zoomUrlValidation(source, body, lookup.secret);
-  if (challenge) return challenge;
+  // The CRC echo is native-Zoom-only (its own Secret Token); a Recall payload never carries it.
+  if (!recallInbound) {
+    const challenge = zoomUrlValidation(source, body, lookup.secret);
+    if (challenge) return challenge;
+  }
 
   if (!(await checkRateLimit(tenantId, source))) {
     return { statusCode: 429 };
