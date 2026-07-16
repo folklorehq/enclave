@@ -198,7 +198,7 @@ function verifySignature(
     }
 
     case 'meeting': {
-      // Fireflies-style HMAC over the raw body (no basestring, unlike Slack).
+      // Transcript-upload HMAC over the raw body (no basestring, unlike Slack).
       const sig = headers['x-meeting-signature'];
       if (!sig?.startsWith('sha256=')) return false;
       const expected = Buffer.from(sig.slice(7), 'hex');

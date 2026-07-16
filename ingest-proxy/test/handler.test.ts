@@ -634,7 +634,7 @@ describe('HMAC signature verification — Meeting', () => {
     });
 
     const event = makeEvent(tid, 'meeting', body, {
-      'x-meeting-event': 'fireflies_complete',
+      'x-meeting-event': 'vtt_upload',
       'x-meeting-signature': meetingSig(body, TEST_SECRET),
     });
     const result = await handler(event as never, {} as never, vi.fn());
@@ -650,7 +650,7 @@ describe('HMAC signature verification — Meeting', () => {
     });
 
     const event = makeEvent(tid, 'meeting', body, {
-      'x-meeting-event': 'fireflies_complete',
+      'x-meeting-event': 'vtt_upload',
       'x-meeting-signature': meetingSig(body, 'wrong-secret'),
     });
     const result = await handler(event as never, {} as never, vi.fn());
@@ -664,7 +664,7 @@ describe('HMAC signature verification — Meeting', () => {
     });
 
     const event = makeEvent('tenant-me-open', 'meeting', body, {
-      'x-meeting-event': 'fireflies_complete',
+      'x-meeting-event': 'vtt_upload',
       'x-meeting-signature': meetingSig(body, TEST_SECRET),
     });
     const result = await handler(event as never, {} as never, vi.fn());
@@ -1131,7 +1131,7 @@ describe('deduplication id determinism', () => {
       'x-notion-signature': notionSig(body, TEST_SECRET),
     });
     const idMeeting = await dedupIdFor('tenant-src', 'meeting', body, {
-      'x-meeting-event': 'fireflies_complete',
+      'x-meeting-event': 'vtt_upload',
       'x-meeting-signature': meetingSig(body, TEST_SECRET),
     });
     expect(idMeeting).not.toBe(idNotion);
