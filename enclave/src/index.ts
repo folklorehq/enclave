@@ -37,6 +37,7 @@ import {
 import { S3LlmCache } from './inference/s3-llm-cache.js';
 import { installGlobalEgressDispatcher } from './egress/proxy.js';
 import { createContainer, type ApiContainer, type RetrieverDeps } from '@folklore/api';
+import { NoopTelemetryClient } from '@folklore/telemetry';
 import { RedisCache } from '@folklore/cache';
 import { BufferedOpsTelemetryClient, RedisOpsEventChannel } from '@folklore/control-plane';
 import { poolAssignmentsKey } from '@folklore/contracts';
@@ -222,6 +223,8 @@ try {
     return inference;
   };
   apiContainer = createContainer({
+    // ADL #18/#35: content-touching enclave opens no data-carrying egress — box-API telemetry inert by composition, not by omitting POSTHOG_API_KEY.
+    telemetry: new NoopTelemetryClient(),
     // The box API serves reads for every assigned tenant; the verified JWT orgId must be in the
     // assigned set (else 403) — this gate runs before any handler touches a keyring (§4.2 step 2).
     isAssignedOrg: (orgId: string) => registry.has(orgId),
