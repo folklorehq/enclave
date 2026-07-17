@@ -175,12 +175,13 @@ const assignmentRefreshTimer = setInterval(
   ASSIGNMENT_REFRESH_INTERVAL_MS,
 );
 
-// ADL #18: the enclave has no PostHog egress, so inference ops telemetry (attestation
-// failures, receipt verifications, model-gate rejections) is buffered onto the shared
-// Redis list the box agent drains into its content-free check-in.
-setInferenceTelemetry(
-  new BufferedOpsTelemetryClient(new RedisOpsEventChannel(haltCache.redis, DEPLOYMENT_ID)),
+// ADL #18: the enclave has no PostHog egress, so ops telemetry (attestation failures, receipt
+// verifications, model-gate rejections, rich-block emit-vs-drop counts) is buffered onto the
+// shared Redis list the box agent drains into its content-free check-in.
+const opsTelemetry = new BufferedOpsTelemetryClient(
+  new RedisOpsEventChannel(haltCache.redis, DEPLOYMENT_ID),
 );
+setInferenceTelemetry(opsTelemetry);
 
 // ADL #31: the box API is composed and served in-process. Every /api/* request
 // reads decrypted content over the in-enclave Postgres proxy and never leaves.
@@ -263,6 +264,7 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
     synthesisQueueUrl: SYNTHESIS_REQUEST_QUEUE_URL,
     processedQueueUrl: PROCESSED_QUEUE_URL,
     previewFetcher: fetchLinkPreview,
+    telemetry: opsTelemetry,
   }).start();
 }
 
