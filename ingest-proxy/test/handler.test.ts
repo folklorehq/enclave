@@ -1,10 +1,11 @@
-import { createHmac, generateKeyPairSync } from 'crypto';
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createHmac, createSign, generateKeyPairSync } from 'crypto';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Hoist mock factories so they're available before vi.mock() calls
-const { mockSsmSend, mockSqsSend } = vi.hoisted(() => ({
+const { mockSsmSend, mockSqsSend, mockDdbSend } = vi.hoisted(() => ({
   mockSsmSend: vi.fn(),
   mockSqsSend: vi.fn(async () => ({ $metadata: {} })),
+  mockDdbSend: vi.fn(async () => ({ $metadata: {} })),
 }));
 
 vi.mock('@aws-sdk/client-ssm', () => ({
@@ -15,6 +16,12 @@ vi.mock('@aws-sdk/client-ssm', () => ({
 vi.mock('@aws-sdk/client-sqs', () => ({
   SQSClient: vi.fn(() => ({ send: mockSqsSend })),
   SendMessageCommand: vi.fn((input: unknown) => input),
+}));
+
+vi.mock('@aws-sdk/client-dynamodb', () => ({
+  DynamoDBClient: vi.fn(() => ({ send: mockDdbSend })),
+  GetItemCommand: vi.fn((input: unknown) => input),
+  UpdateItemCommand: vi.fn((input: unknown) => input),
 }));
 
 process.env['QUEUE_URL'] = 'https://sqs.test/queue';
@@ -1474,5 +1481,218 @@ describe('clientState verification — Microsoft 365 (Graph)', () => {
     const result = await handler(event as never, {} as never, vi.fn());
     expect(result).toMatchObject({ statusCode: 401 });
     expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+});
+
+const { publicKey: snsPub, privateKey: snsPriv } = generateKeyPairSync('rsa', {
+  modulusLength: 2048,
+});
+const SNS_CERT_PEM = snsPub.export({ type: 'spki', format: 'pem' }).toString();
+const EMAIL_TOPIC = 'arn:aws:sns:us-east-1:123456789012:folklore-email-inbound';
+const SNS_CERT_URL = 'https://sns.us-east-1.amazonaws.com/SimpleNotificationService-abc.pem';
+const SNS_SUBSCRIBE_URL = 'https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription';
+
+const SNS_KEYS: Record<string, string[]> = {
+  Notification: ['Message', 'MessageId', 'Subject', 'Timestamp', 'TopicArn', 'Type'],
+  SubscriptionConfirmation: [
+    'Message',
+    'MessageId',
+    'SubscribeURL',
+    'Timestamp',
+    'Token',
+    'TopicArn',
+    'Type',
+  ],
+};
+
+function signSns(msg: Record<string, string>): string {
+  let str = '';
+  for (const key of SNS_KEYS[msg['Type']!]!) {
+    const value = msg[key];
+    if (value === undefined || value === null) continue;
+    str += `${key}\n${value}\n`;
+  }
+  return createSign('RSA-SHA1').update(str, 'utf8').sign(snsPriv, 'base64');
+}
+
+const EMAIL_INBOUND_DOMAIN = 'in.folklorehq.com';
+const ALIAS_TOKEN = 'tok-tenant-email-abc';
+
+function snsNotification(sesMessage: string, topicArn = EMAIL_TOPIC): Record<string, string> {
+  const base: Record<string, string> = {
+    Type: 'Notification',
+    MessageId: 'sns-msg-1',
+    TopicArn: topicArn,
+    Subject: 'Amazon SES Email Receipt Notification',
+    Message: sesMessage,
+    Timestamp: new Date().toISOString(),
+    SignatureVersion: '1',
+    SigningCertURL: SNS_CERT_URL,
+  };
+  return { ...base, Signature: signSns(base) };
+}
+
+function sesInbound(
+  recipients: string[] = [`ingest+${ALIAS_TOKEN}@${EMAIL_INBOUND_DOMAIN}`],
+): string {
+  return JSON.stringify({
+    notificationType: 'Received',
+    mail: {
+      messageId: 'ses-outer-id',
+      commonHeaders: { from: ['a@acme.com'], subject: 'Hi', messageId: '<m1@acme.com>' },
+      headers: [{ name: 'Message-ID', value: '<m1@acme.com>' }],
+    },
+    receipt: {
+      recipients,
+      spamVerdict: { status: 'PASS' },
+      virusVerdict: { status: 'PASS' },
+      dkimVerdict: { status: 'PASS' },
+      dmarcVerdict: { status: 'PASS' },
+    },
+    content: 'From: a@acme.com\r\nSubject: Hi\r\n\r\nHello there.',
+  });
+}
+
+const SES_INBOUND = sesInbound();
+
+describe('SES inbound — SNS signature verification (email)', () => {
+  const tid = 'tenant-email';
+
+  beforeEach(() => {
+    process.env['EMAIL_INBOUND_ALIAS_TABLE'] = 'email-alias-map';
+    process.env['EMAIL_INBOUND_DOMAIN'] = EMAIL_INBOUND_DOMAIN;
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name === '/folklore/email-inbound/sns-topic-arn')
+        return { Parameter: { Value: EMAIL_TOPIC } };
+      throw Object.assign(new Error('ParameterNotFound'), { name: 'ParameterNotFound' });
+    });
+    // Default alias map: the signed recipient token resolves to the URL-path tenant.
+    mockDdbSend.mockImplementation(async (input: { Key?: { token?: { S?: string } } }) => {
+      return input.Key?.token?.S === ALIAS_TOKEN
+        ? { Item: { tenantId: { S: tid } } }
+        : { $metadata: {} };
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url === SNS_CERT_URL) return { ok: true, text: async () => SNS_CERT_PEM };
+        return { ok: true, text: async () => '' };
+      }),
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    mockDdbSend.mockReset();
+    delete process.env['EMAIL_INBOUND_ALIAS_TABLE'];
+    delete process.env['EMAIL_INBOUND_DOMAIN'];
+  });
+
+  it('seals + enqueues a validly-signed SES notification bound to the URL-path tenant', async () => {
+    const event = makeEvent(tid, 'email', JSON.stringify(snsNotification(SES_INBOUND)));
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 200 });
+    expect(mockSqsSend).toHaveBeenCalledTimes(1);
+    const sent = JSON.parse(mockSqsSend.mock.calls[0]![0].MessageBody);
+    expect(sent.source).toBe('email');
+    expect(sent.eventType).toBe('Received');
+    // The SNS envelope is transport — only the sealed SES notification is forwarded, never plaintext.
+    expect(sent.ciphertext).toBeDefined();
+    expect(JSON.stringify(sent)).not.toContain('Hello there');
+  });
+
+  it('returns 401 when the SNS signature is tampered', async () => {
+    const msg = snsNotification(SES_INBOUND);
+    msg['Signature'] = Buffer.from('not-the-signature').toString('base64');
+    const event = makeEvent(tid, 'email', JSON.stringify(msg));
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 when the topic ARN is not on the allowlist', async () => {
+    const msg = snsNotification(SES_INBOUND, 'arn:aws:sns:us-east-1:999:attacker-topic');
+    const event = makeEvent(tid, 'email', JSON.stringify(msg));
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 when the signed recipient token resolves to a DIFFERENT tenant', async () => {
+    // The alias resolves to tenant-A, but the notification is POSTed to tenant-B's path.
+    mockDdbSend.mockImplementation(async () => ({ Item: { tenantId: { S: 'tenant-A' } } }));
+    const event = makeEvent('tenant-B', 'email', JSON.stringify(snsNotification(SES_INBOUND)));
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 when the recipient token is unknown to the alias map', async () => {
+    mockDdbSend.mockImplementation(async () => ({ $metadata: {} }));
+    const event = makeEvent(tid, 'email', JSON.stringify(snsNotification(SES_INBOUND)));
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 when no recipient matches the inbound domain (foreign alias)', async () => {
+    const foreign = sesInbound(['ingest+someone@attacker.example.com']);
+    const event = makeEvent(tid, 'email', JSON.stringify(snsNotification(foreign)));
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('fails closed (401) when the alias-table env is unconfigured', async () => {
+    delete process.env['EMAIL_INBOUND_ALIAS_TABLE'];
+    const event = makeEvent(tid, 'email', JSON.stringify(snsNotification(SES_INBOUND)));
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('returns 503 (retryable) on a transient DynamoDB error, without enqueuing', async () => {
+    mockDdbSend.mockImplementation(async () => {
+      throw Object.assign(new Error('throttled'), {
+        name: 'ProvisionedThroughputExceededException',
+      });
+    });
+    const event = makeEvent(tid, 'email', JSON.stringify(snsNotification(SES_INBOUND)));
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 503 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 for a validly-signed notification whose Timestamp is stale (replay guard)', async () => {
+    const stale = snsNotification(SES_INBOUND);
+    const staleBase = { ...stale };
+    delete staleBase['Signature'];
+    staleBase['Timestamp'] = new Date(Date.now() - 3_600_000).toISOString();
+    const resigned = { ...staleBase, Signature: signSns(staleBase) };
+    const event = makeEvent(tid, 'email', JSON.stringify(resigned));
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('confirms a validly-signed subscription without enqueuing', async () => {
+    const base: Record<string, string> = {
+      Type: 'SubscriptionConfirmation',
+      MessageId: 'sns-sub-1',
+      TopicArn: EMAIL_TOPIC,
+      Message: 'confirm me',
+      SubscribeURL: SNS_SUBSCRIBE_URL,
+      Timestamp: new Date().toISOString(),
+      Token: 'tok-123',
+      SignatureVersion: '1',
+      SigningCertURL: SNS_CERT_URL,
+    };
+    const msg = { ...base, Signature: signSns(base) };
+    const event = makeEvent(tid, 'email', JSON.stringify(msg));
+    const result = await handler(event as never, {} as never, vi.fn());
+    expect(result).toMatchObject({ statusCode: 200 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+    expect(fetch).toHaveBeenCalledWith(SNS_SUBSCRIBE_URL);
   });
 });

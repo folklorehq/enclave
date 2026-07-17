@@ -1,5 +1,6 @@
 // ECIES: ephemeral X25519 + HKDF-SHA256 + AES-256-GCM. Both public keys bound
 // in HKDF info — must match decryptPayload() in enclave/src/ingest/receiver.ts.
+import { DynamoDBClient, GetItemCommand } from '@aws-sdk/client-dynamodb';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
 import {
@@ -10,6 +11,7 @@ import {
   createHash,
   createPublicKey,
   createHmac,
+  createVerify,
   randomBytes,
   timingSafeEqual,
 } from 'crypto';
@@ -18,6 +20,7 @@ import { checkRateLimit } from './rate-limiter.js';
 
 const ssm = new SSMClient({});
 const sqs = new SQSClient({});
+const ddb = new DynamoDBClient({});
 
 const QUEUE_URL = process.env['QUEUE_URL']!;
 
@@ -30,11 +33,57 @@ const SIGNABLE_SOURCES = new Set([
   'intercom',
   'notion',
   'meeting',
+  'email',
   'google_drive',
   'microsoft365',
   'zoom',
   'zoom_bot',
 ]);
+
+// SES inbound (ADL #66): mail arrives via SNS, not a provider HMAC. Authenticity rests on the AWS SNS
+// message signature; tenant routing rests on the unguessable per-tenant alias (SES receipt rule) plus
+// this global allowlist of Folklore-owned inbound topic ARNs (proves "our pipeline", not "tenant B").
+const EMAIL_SOURCE = 'email';
+const EMAIL_TOPIC_ARN_PARAM = '/folklore/email-inbound/sns-topic-arn';
+// A validly-signed SES notification proves "our pipeline" but not "this tenant": bind delivery to the
+// SNS-signed recipient alias `ingest+<token>@<domain>` and confirm token→tenant equals the URL path,
+// or fail closed — otherwise tenant A's mail POSTed to tenant B's path seals under B's key (ADL #12).
+const EMAIL_INBOUND_ALIAS_TABLE_ENV = 'EMAIL_INBOUND_ALIAS_TABLE';
+const EMAIL_INBOUND_DOMAIN_ENV = 'EMAIL_INBOUND_DOMAIN';
+const EMAIL_ALIAS_LOCAL_PREFIX = 'ingest+';
+// Bound the replay of a captured, still-validly-signed SES notification (the Timestamp is signed).
+const SNS_REPLAY_TOLERANCE_S = 900;
+const SNS_NOTIFICATION = 'Notification';
+const SNS_SUBSCRIPTION_CONFIRMATION = 'SubscriptionConfirmation';
+const SNS_UNSUBSCRIBE_CONFIRMATION = 'UnsubscribeConfirmation';
+// SNS signing certs and confirmation callbacks are only trusted from an AWS SNS host over https.
+const SNS_HOST = /^sns\.[a-z0-9-]+\.amazonaws\.com$/;
+const SNS_SIGNING_ALGORITHM: Record<string, string> = { '1': 'RSA-SHA1', '2': 'RSA-SHA256' };
+const SNS_SIGNING_KEYS: Record<string, readonly string[]> = {
+  [SNS_NOTIFICATION]: ['Message', 'MessageId', 'Subject', 'Timestamp', 'TopicArn', 'Type'],
+  [SNS_SUBSCRIPTION_CONFIRMATION]: [
+    'Message',
+    'MessageId',
+    'SubscribeURL',
+    'Timestamp',
+    'Token',
+    'TopicArn',
+    'Type',
+  ],
+  [SNS_UNSUBSCRIBE_CONFIRMATION]: [
+    'Message',
+    'MessageId',
+    'SubscribeURL',
+    'Timestamp',
+    'Token',
+    'TopicArn',
+    'Type',
+  ],
+};
+// Bounded + FIFO-evicted: the cache is keyed by URL and populated before the signature is verified,
+// so an unbounded map would let a burst of distinct (host-valid) cert URLs amplify memory/requests.
+const SNS_CERT_CACHE_MAX = 64;
+const snsCertCache = new Map<string, { pem: string; expiresAt: number }>();
 
 const GOOGLE_DRIVE_SOURCE = 'google_drive';
 const MICROSOFT365_SOURCE = 'microsoft365';
@@ -523,6 +572,21 @@ function providerDeliveryId(
         return null;
       }
     }
+    case EMAIL_SOURCE: {
+      // The RFC Message-ID is the dedup key (ADL #66); the SES message id is the fallback.
+      try {
+        const mail = (
+          JSON.parse(body) as {
+            mail?: { commonHeaders?: { messageId?: unknown }; messageId?: unknown };
+          }
+        ).mail;
+        const rfc = mail?.commonHeaders?.messageId;
+        if (typeof rfc === 'string') return rfc;
+        return typeof mail?.messageId === 'string' ? mail.messageId : null;
+      } catch {
+        return null;
+      }
+    }
     case 'zoom_bot':
       // Svix message id uniquely identifies a delivery, so FIFO drops Recall's retries.
       return headers['webhook-id'] ?? headers['svix-id'] ?? null;
@@ -576,6 +640,263 @@ function deduplicationId(
   return createHash('sha256').update(key).digest('hex');
 }
 
+interface SnsEnvelope {
+  Type?: string;
+  MessageId?: string;
+  TopicArn?: string;
+  Subject?: string;
+  Message?: string;
+  Timestamp?: string;
+  Token?: string;
+  SubscribeURL?: string;
+  SignatureVersion?: string;
+  Signature?: string;
+  SigningCertURL?: string;
+}
+
+type ChallengeOrStatus = { statusCode: number; headers?: Record<string, string>; body?: string };
+
+function parseSnsEnvelope(body: string): SnsEnvelope | null {
+  try {
+    const parsed = JSON.parse(body) as SnsEnvelope;
+    return typeof parsed?.Type === 'string' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function snsHost(raw: string | undefined): URL | null {
+  if (!raw) return null;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  return url.protocol === 'https:' && SNS_HOST.test(url.hostname) ? url : null;
+}
+
+function snsStringToSign(msg: SnsEnvelope): string | null {
+  const keys = SNS_SIGNING_KEYS[msg.Type ?? ''];
+  if (!keys) return null;
+  let out = '';
+  for (const key of keys) {
+    const value = (msg as Record<string, unknown>)[key];
+    // `Subject` is signed only when present; every other listed field is always included.
+    if (value === undefined || value === null) continue;
+    out += `${key}\n${String(value)}\n`;
+  }
+  return out;
+}
+
+async function fetchSigningCert(url: string): Promise<string | null> {
+  if (!snsHost(url)) return null;
+  const cached = snsCertCache.get(url);
+  if (cached && Date.now() < cached.expiresAt) return cached.pem;
+  const res = await fetch(url);
+  if (!res.ok) return null;
+  const pem = await res.text();
+  if (snsCertCache.size >= SNS_CERT_CACHE_MAX && !snsCertCache.has(url)) {
+    const oldest = snsCertCache.keys().next().value;
+    if (oldest !== undefined) snsCertCache.delete(oldest);
+  }
+  snsCertCache.set(url, { pem, expiresAt: Date.now() + CACHE_TTL_MS });
+  return pem;
+}
+
+async function verifySnsSignature(msg: SnsEnvelope): Promise<boolean> {
+  const algorithm = SNS_SIGNING_ALGORITHM[msg.SignatureVersion ?? ''];
+  const stringToSign = snsStringToSign(msg);
+  if (!algorithm || !stringToSign || !msg.Signature || !msg.SigningCertURL) return false;
+  const pem = await fetchSigningCert(msg.SigningCertURL);
+  if (!pem) return false;
+  try {
+    return createVerify(algorithm)
+      .update(stringToSign, 'utf8')
+      .verify(pem, msg.Signature, 'base64');
+  } catch {
+    return false;
+  }
+}
+
+function topicAllowed(arn: string | undefined, allowlist: string): boolean {
+  if (!arn) return false;
+  return allowlist
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .includes(arn);
+}
+
+async function confirmSnsSubscription(msg: SnsEnvelope): Promise<ChallengeOrStatus> {
+  if (!snsHost(msg.SubscribeURL)) return { statusCode: 400 };
+  const res = await fetch(msg.SubscribeURL!);
+  return { statusCode: res.ok ? 200 : 502 };
+}
+
+function emailEventType(message: string): string {
+  try {
+    return (JSON.parse(message) as { notificationType?: string }).notificationType ?? '';
+  } catch {
+    return '';
+  }
+}
+
+// Mirrors parseAliasToken() in infra/src/email-inbound.ts — both are the tenant-routing gate, so they
+// must agree. Rejects foreign domains and empty tokens; never logs the recipient or token.
+function parseAliasToken(recipient: string, inboundDomain: string): string | null {
+  const at = recipient.indexOf('@');
+  if (at === -1) return null;
+  const local = recipient.slice(0, at).toLowerCase();
+  const domain = recipient.slice(at + 1).toLowerCase();
+  if (domain !== inboundDomain.toLowerCase()) return null;
+  if (!local.startsWith(EMAIL_ALIAS_LOCAL_PREFIX)) return null;
+  const token = local.slice(EMAIL_ALIAS_LOCAL_PREFIX.length).trim();
+  return token.length > 0 ? token : null;
+}
+
+// The SNS-signed `Message` carries `receipt.recipients` (signature-covered — unlike the spoofable
+// `mail.destination`); the first alias matching our inbound domain yields the routing token.
+function aliasTokenFromNotification(notification: string, inboundDomain: string): string | null {
+  let parsed: { receipt?: { recipients?: unknown } };
+  try {
+    parsed = JSON.parse(notification);
+  } catch {
+    return null;
+  }
+  const recipients = parsed.receipt?.recipients;
+  if (!Array.isArray(recipients)) return null;
+  for (const recipient of recipients) {
+    if (typeof recipient !== 'string') continue;
+    const token = parseAliasToken(recipient, inboundDomain);
+    if (token) return token;
+  }
+  return null;
+}
+
+type AliasBinding = { status: 'match' } | { status: 'reject' } | { status: 'error' };
+
+async function resolveAliasTenant(table: string, token: string): Promise<string | null> {
+  const out = await ddb.send(
+    new GetItemCommand({
+      TableName: table,
+      Key: { token: { S: token } },
+      ProjectionExpression: 'tenantId',
+    }),
+  );
+  return out.Item?.['tenantId']?.S ?? null;
+}
+
+// Cryptographic tenant binding (ADL #12/#66): resolve the SNS-signed recipient alias to a tenant and
+// require it to equal the URL-path tenant. Missing config, foreign/empty token, or an unknown alias
+// fail closed (reject → 401); only a transient DynamoDB error is retryable (error → 503).
+async function bindRecipientAlias(tenantId: string, notification: string): Promise<AliasBinding> {
+  const table = process.env[EMAIL_INBOUND_ALIAS_TABLE_ENV];
+  const inboundDomain = process.env[EMAIL_INBOUND_DOMAIN_ENV];
+  if (!table || !inboundDomain) return { status: 'reject' };
+  const token = aliasTokenFromNotification(notification, inboundDomain);
+  if (!token) return { status: 'reject' };
+  let resolved: string | null;
+  try {
+    resolved = await resolveAliasTenant(table, token);
+  } catch {
+    return { status: 'error' };
+  }
+  if (!resolved) return { status: 'reject' };
+  return resolved === tenantId ? { status: 'match' } : { status: 'reject' };
+}
+
+// Reject a captured notification whose signed Timestamp is missing, unparseable, or outside the
+// replay window (mirrors the Slack/Zoom/Svix freshness gate; the Timestamp is SNS-signature-covered).
+function snsTimestampFresh(ts: string | undefined, toleranceS: number): boolean {
+  if (!ts) return false;
+  const parsed = Date.parse(ts);
+  return !Number.isNaN(parsed) && Math.abs(Date.now() - parsed) <= toleranceS * MS_PER_S;
+}
+
+// SES inbound: authenticate the SNS delivery (signature + Folklore-owned topic), then seal only the
+// SES notification (the SNS envelope is transport). No email body reaches a log, error, or SQS in
+// plaintext — it is ECIES-sealed exactly like every other connector (ADL #12/#42/#66).
+async function handleEmailInbound(tenantId: string, body: string): Promise<ChallengeOrStatus> {
+  const msg = parseSnsEnvelope(body);
+  if (!msg) return { statusCode: 400 };
+
+  const allowlist = await fetchSecretAt(EMAIL_TOPIC_ARN_PARAM, EMAIL_TOPIC_ARN_PARAM);
+  if (allowlist.status === 'error') return { statusCode: 503 };
+  if (allowlist.status === 'absent') return { statusCode: 401 };
+
+  if (!(await verifySnsSignature(msg))) return { statusCode: 401 };
+  if (!topicAllowed(msg.TopicArn, allowlist.secret)) return { statusCode: 401 };
+
+  if (msg.Type === SNS_SUBSCRIPTION_CONFIRMATION) return confirmSnsSubscription(msg);
+  if (msg.Type !== SNS_NOTIFICATION) return { statusCode: 200 };
+
+  if (!snsTimestampFresh(msg.Timestamp, SNS_REPLAY_TOLERANCE_S)) return { statusCode: 401 };
+
+  const notification = msg.Message ?? '';
+
+  // Bind the delivery to the SNS-signed recipient alias BEFORE sealing — a valid signature + allowed
+  // topic is not enough; the resolved tenant must equal the URL path or we fail closed (ADL #12/#66).
+  const binding = await bindRecipientAlias(tenantId, notification);
+  if (binding.status === 'error') return { statusCode: 503 };
+  if (binding.status !== 'match') return { statusCode: 401 };
+
+  if (!(await checkRateLimit(tenantId, EMAIL_SOURCE))) return { statusCode: 429 };
+
+  await sealAndEnqueue({
+    tenantId,
+    source: EMAIL_SOURCE,
+    eventType: emailEventType(notification),
+    payloadBody: notification,
+    dedupId: deduplicationId(tenantId, EMAIL_SOURCE, {}, notification),
+  });
+  return { statusCode: 200 };
+}
+
+async function sealAndEnqueue(params: {
+  tenantId: string;
+  source: string;
+  eventType: string;
+  payloadBody: string;
+  dedupId: string;
+}): Promise<void> {
+  const recipientPubBytes = await fetchPublicKey(params.tenantId);
+  const recipientPub = createPublicKey({
+    key: { kty: 'OKP', crv: 'X25519', x: recipientPubBytes.toString('base64url') },
+    format: 'jwk',
+  });
+
+  const { privateKey: ephemeralPriv, publicKey: ephemeralPub } = generateKeyPairSync('x25519');
+  const ephemeralPubBytes = Buffer.from(
+    ephemeralPub.export({ type: 'spki', format: 'der' }).slice(-32),
+  );
+
+  const sharedSecret = diffieHellman({ privateKey: ephemeralPriv, publicKey: recipientPub });
+  const aesKey = deriveAesKey(sharedSecret, ephemeralPubBytes, recipientPubBytes);
+
+  const nonce = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', aesKey, nonce);
+  const encrypted = Buffer.concat([cipher.update(params.payloadBody, 'utf8'), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  const ciphertextWithTag = Buffer.concat([encrypted, authTag]);
+
+  await sqs.send(
+    new SendMessageCommand({
+      QueueUrl: QUEUE_URL,
+      MessageBody: JSON.stringify({
+        tenant_id: params.tenantId,
+        source: params.source,
+        eventType: params.eventType,
+        ephemeralPublicKey: ephemeralPubBytes.toString('hex'),
+        nonce: nonce.toString('hex'),
+        ciphertext: ciphertextWithTag.toString('hex'),
+      }),
+      MessageGroupId: params.tenantId,
+      MessageDeduplicationId: params.dedupId,
+    }),
+  );
+}
+
 export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   const tenantId = event.pathParameters?.['tenant_id'];
   const source = event.pathParameters?.['source'];
@@ -584,6 +905,9 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 
   const body = event.body ?? '';
   const headers = normalizeHeaders(event.headers);
+
+  // SES inbound (ADL #66) is verified by AWS SNS signature, not a provider HMAC — its own path.
+  if (source === EMAIL_SOURCE) return handleEmailInbound(tenantId, body);
 
   // ACK Notion's unsigned subscription handshake (it carries only the verification_token, which the
   // admin registers as the webhook secret) without treating it as an event or forwarding it to SQS.
@@ -642,42 +966,13 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
         : body;
 
   const eventType = extractEventType(source, headers, body);
-  const recipientPubBytes = await fetchPublicKey(tenantId);
-
-  const recipientPub = createPublicKey({
-    key: { kty: 'OKP', crv: 'X25519', x: recipientPubBytes.toString('base64url') },
-    format: 'jwk',
+  await sealAndEnqueue({
+    tenantId,
+    source,
+    eventType,
+    payloadBody,
+    dedupId: deduplicationId(tenantId, source, headers, payloadBody),
   });
-
-  const { privateKey: ephemeralPriv, publicKey: ephemeralPub } = generateKeyPairSync('x25519');
-  const ephemeralPubBytes = Buffer.from(
-    ephemeralPub.export({ type: 'spki', format: 'der' }).slice(-32),
-  );
-
-  const sharedSecret = diffieHellman({ privateKey: ephemeralPriv, publicKey: recipientPub });
-  const aesKey = deriveAesKey(sharedSecret, ephemeralPubBytes, recipientPubBytes);
-
-  const nonce = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', aesKey, nonce);
-  const encrypted = Buffer.concat([cipher.update(payloadBody, 'utf8'), cipher.final()]);
-  const authTag = cipher.getAuthTag();
-  const ciphertextWithTag = Buffer.concat([encrypted, authTag]);
-
-  await sqs.send(
-    new SendMessageCommand({
-      QueueUrl: QUEUE_URL,
-      MessageBody: JSON.stringify({
-        tenant_id: tenantId,
-        source,
-        eventType,
-        ephemeralPublicKey: ephemeralPubBytes.toString('hex'),
-        nonce: nonce.toString('hex'),
-        ciphertext: ciphertextWithTag.toString('hex'),
-      }),
-      MessageGroupId: tenantId,
-      MessageDeduplicationId: deduplicationId(tenantId, source, headers, payloadBody),
-    }),
-  );
 
   return { statusCode: 200 };
 };
