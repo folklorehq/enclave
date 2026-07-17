@@ -177,8 +177,8 @@ const assignmentRefreshTimer = setInterval(
 );
 
 // ADL #18: the enclave has no PostHog egress, so ops telemetry (attestation failures, receipt
-// verifications, model-gate rejections, rich-block emit-vs-drop counts) is buffered onto the
-// shared Redis list the box agent drains into its content-free check-in.
+// verifications, model-gate rejections) is buffered onto the shared Redis list the box agent
+// drains into its content-free check-in.
 const opsTelemetry = new BufferedOpsTelemetryClient(
   new RedisOpsEventChannel(haltCache.redis, DEPLOYMENT_ID),
 );
@@ -267,7 +267,6 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
     synthesisQueueUrl: SYNTHESIS_REQUEST_QUEUE_URL,
     processedQueueUrl: PROCESSED_QUEUE_URL,
     previewFetcher: fetchLinkPreview,
-    telemetry: opsTelemetry,
   }).start();
 }
 
