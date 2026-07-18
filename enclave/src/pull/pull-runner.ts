@@ -7,6 +7,7 @@ import {
   type PullOptions,
   type SyncCursor,
   confluence,
+  email,
   github,
   googleDrive,
   intercom,
@@ -89,6 +90,14 @@ const consoleLogger: Logger = {
   fatal: (msg, ctx) => console.error(msg, ctx ?? ''),
   child: () => consoleLogger,
 };
+
+function parseAllowlist(value: string | undefined): string[] {
+  if (!value) return [];
+  return value
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
 
 function cursorSsmPath(tenantId: string, sourceId: string): string {
   return `/folklore/${tenantId}/pull-cursor/${sourceId}`;
@@ -199,6 +208,24 @@ export function buildConnector(kind: string, token: string): Connector | null {
       return new microsoft365.Microsoft365Connector(
         { logger: consoleLogger },
         new microsoft365.Microsoft365Client(token),
+      );
+    case 'gmail':
+      // Fetch-based Gmail mailbox pull, reusing the Phase 1 email normalizer (ADL #66); auto-proxied
+      // by the global undici dispatcher. The optional label allowlist scopes ingest (Q5).
+      return new email.EmailConnector(
+        { logger: consoleLogger },
+        new email.GmailMailClient(
+          token,
+          parseAllowlist(process.env['EMAIL_GMAIL_LABEL_ALLOWLIST']),
+        ),
+      );
+    case 'microsoft365_mail':
+      return new email.EmailConnector(
+        { logger: consoleLogger },
+        new email.GraphMailClient(
+          token,
+          parseAllowlist(process.env['EMAIL_M365_FOLDER_ALLOWLIST']),
+        ),
       );
     case 'zoom':
       return new zoom.ZoomConnector({ logger: consoleLogger }, new zoom.HttpZoomClient(token));
