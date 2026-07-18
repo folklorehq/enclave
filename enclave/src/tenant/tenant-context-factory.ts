@@ -1,9 +1,10 @@
-import { GetObjectCommand, NoSuchKey, PutObjectCommand, type S3Client } from '@aws-sdk/client-s3';
+import { PutObjectCommand, type S3Client } from '@aws-sdk/client-s3';
 import { PutParameterCommand, type SSMClient } from '@aws-sdk/client-ssm';
 import { KMSClient } from '@aws-sdk/client-kms';
 import { KmsKeyringNode } from '@aws-crypto/client-node';
 import { deriveIngestKeypair, generateMasterKey } from '../sealing/keygen.js';
 import { sealMasterKey, unsealMasterKey } from '../sealing/seal.js';
+import { readSealedBlob, writeSealedBlob } from '../sealing/sealed-blob-store.js';
 import { assertRecoveryConfigured, sealRecoveryMnemonic } from '../sealing/recovery.js';
 import { HnswStore } from '../hnsw/index.js';
 import { Pipeline } from '../pipeline/index.js';
@@ -91,7 +92,11 @@ export class TenantContextFactory {
   }
 
   private async bootMasterKey(identity: TenantIdentity): Promise<Buffer> {
-    const sealedBlob = await this.readSealedBlob(this.sealedBlobKey(identity.tenantId));
+    const sealedBlob = await readSealedBlob(
+      this.deps.s3,
+      this.deps.sealedBlobBucket,
+      identity.tenantId,
+    );
 
     if (sealedBlob) {
       console.log('unsealing master key via KMS');
@@ -101,18 +106,6 @@ export class TenantContextFactory {
     }
 
     return this.firstBoot(identity);
-  }
-
-  private async readSealedBlob(key: string): Promise<Buffer | null> {
-    try {
-      const obj = await this.deps.s3.send(
-        new GetObjectCommand({ Bucket: this.deps.sealedBlobBucket, Key: key }),
-      );
-      return Buffer.from(await obj.Body!.transformToByteArray());
-    } catch (err) {
-      if (!(err instanceof NoSuchKey)) throw err;
-      return null;
-    }
   }
 
   private async firstBoot(identity: TenantIdentity): Promise<Buffer> {
@@ -134,13 +127,7 @@ export class TenantContextFactory {
     );
 
     const blob = await sealMasterKey(masterKey, identity.kmsKeyId, identity.tenantId);
-    await this.deps.s3.send(
-      new PutObjectCommand({
-        Bucket: this.deps.sealedBlobBucket,
-        Key: this.sealedBlobKey(identity.tenantId),
-        Body: blob,
-      }),
-    );
+    await writeSealedBlob(this.deps.s3, this.deps.sealedBlobBucket, identity.tenantId, blob);
 
     const { publicKeyRaw } = deriveIngestKeypair(masterKey);
     await this.deps.ssm.send(
@@ -154,10 +141,6 @@ export class TenantContextFactory {
 
     console.log('FIRST_BOOT', { tenant: identity.tenantId });
     return masterKey;
-  }
-
-  private sealedBlobKey(tenantId: string): string {
-    return `sealed-keys/${tenantId}/master.blob`;
   }
 
   private recoveryBlobKey(tenantId: string): string {
