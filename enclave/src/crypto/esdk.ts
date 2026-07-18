@@ -6,6 +6,8 @@ const { encrypt, decrypt } = buildClient(CommitmentPolicy.REQUIRE_ENCRYPT_REQUIR
 const FACT_BODY_PURPOSE = 'fact-body';
 const WIKI_ARTICLE_PURPOSE = 'wiki-article';
 const WIKI_BLOCK_PURPOSE = 'wiki-block';
+const TEAM_ONBOARDING_ARTICLE_PURPOSE = 'team-onboarding-article';
+const TEAM_ONBOARDING_BLOCK_PURPOSE = 'team-onboarding-block';
 const COLLAB_SNAPSHOT_PURPOSE = 'collab-snapshot';
 const WIKI_COMMENT_PURPOSE = 'wiki-comment';
 const WIKI_FEEDBACK_PURPOSE = 'wiki-feedback';
@@ -58,6 +60,19 @@ export interface WikiArticleRef {
 }
 
 export interface WikiBlockRef extends WikiArticleRef {
+  blockType: string;
+}
+
+// A cross-theme team-onboarding page is derived knowledge with no owning theme, so it binds to
+// (org, team, audience) — a distinct purpose from wiki-article so a body cannot be relocated
+// between a theme page and a team page (ADL #12/#68).
+export interface TeamOnboardingArticleRef {
+  orgId: string;
+  teamId: string;
+  audienceId: string | null;
+}
+
+export interface TeamOnboardingBlockRef extends TeamOnboardingArticleRef {
   blockType: string;
 }
 
@@ -129,6 +144,48 @@ export class EnclaveCrypto {
     return this.open(ciphertext, WIKI_BLOCK_PURPOSE, {
       orgId: expected.orgId,
       themeId: expected.themeId,
+      audienceId: audienceKey(expected.audienceId),
+      blockType: expected.blockType,
+    });
+  }
+
+  encryptTeamOnboardingArticle(plaintext: Buffer, ref: TeamOnboardingArticleRef): Promise<Buffer> {
+    return this.seal(plaintext, {
+      orgId: ref.orgId,
+      teamId: ref.teamId,
+      audienceId: audienceKey(ref.audienceId),
+      purpose: TEAM_ONBOARDING_ARTICLE_PURPOSE,
+    });
+  }
+
+  decryptTeamOnboardingArticle(
+    ciphertext: Buffer,
+    expected: TeamOnboardingArticleRef,
+  ): Promise<Buffer> {
+    return this.open(ciphertext, TEAM_ONBOARDING_ARTICLE_PURPOSE, {
+      orgId: expected.orgId,
+      teamId: expected.teamId,
+      audienceId: audienceKey(expected.audienceId),
+    });
+  }
+
+  encryptTeamOnboardingBlock(plaintext: Buffer, ref: TeamOnboardingBlockRef): Promise<Buffer> {
+    return this.seal(plaintext, {
+      orgId: ref.orgId,
+      teamId: ref.teamId,
+      audienceId: audienceKey(ref.audienceId),
+      blockType: ref.blockType,
+      purpose: TEAM_ONBOARDING_BLOCK_PURPOSE,
+    });
+  }
+
+  decryptTeamOnboardingBlock(
+    ciphertext: Buffer,
+    expected: TeamOnboardingBlockRef,
+  ): Promise<Buffer> {
+    return this.open(ciphertext, TEAM_ONBOARDING_BLOCK_PURPOSE, {
+      orgId: expected.orgId,
+      teamId: expected.teamId,
       audienceId: audienceKey(expected.audienceId),
       blockType: expected.blockType,
     });
