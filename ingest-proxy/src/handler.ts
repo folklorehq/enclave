@@ -951,8 +951,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   if (!event.pathParameters) {
     const dispatchEvent = event as unknown as DispatcherEvent;
     if (dispatchEvent.source && dispatchEvent.tenantId && dispatchEvent.body) {
-      await handleDispatcherInvoke(dispatchEvent);
-      return { statusCode: 200 };
+      return handleDispatcherInvoke(dispatchEvent);
     }
     return { statusCode: 400 };
   }

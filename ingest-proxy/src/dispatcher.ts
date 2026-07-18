@@ -5,6 +5,7 @@ import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
 import type { APIGatewayProxyHandlerV2 } from 'aws-lambda';
 import { resolveTenant, EXTRACTORS } from './tenant-resolver.js';
 import { verifySignature, normalizeHeaders } from './signature-verifier.js';
+import { extractEventType } from './handler.js';
 import { checkRateLimit } from './rate-limiter.js';
 
 const ssm = new SSMClient({});
@@ -21,6 +22,36 @@ const ZOOM_URL_VALIDATION_EVENT = 'endpoint.url_validation';
 const MICROSOFT365_SOURCE = 'microsoft365';
 
 const VERIFICATION_CHALLENGE_SOURCES = new Set(['slack', 'notion']);
+
+const DISPATCHER_AUTH_SECRET = process.env['DISPATCHER_AUTH_SECRET'] ?? '';
+
+function dispatcherAuthHmac(tenantId: string, source: string): string {
+  return createHmac('sha256', DISPATCHER_AUTH_SECRET).update(`${tenantId}:${source}`).digest('hex');
+}
+
+function buildInvokePayload(
+  destTenantId: string,
+  destSource: string,
+  destBody: string,
+  destHeaders: Record<string, string | undefined>,
+  destFunctionName: string,
+): { FunctionName: string; InvocationType: 'Event'; Payload: Buffer } {
+  return {
+    FunctionName: destFunctionName,
+    InvocationType: 'Event' as const,
+    Payload: Buffer.from(
+      JSON.stringify({
+        source: destSource,
+        body: destBody,
+        tenantId: destTenantId,
+        deliveryId: destHeaders['x-github-delivery'] ?? destHeaders['webhook-id'] ?? '',
+        authHmac: dispatcherAuthHmac(destTenantId, destSource),
+        eventType: extractEventType(destSource, destHeaders, destBody),
+        headers: destHeaders,
+      }),
+    ),
+  };
+}
 
 async function fetchSharedSecret(source: string): Promise<string | null> {
   const cached = secretCache.get(source);
@@ -244,6 +275,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
           body,
           tenantId: tenant.orgId,
           deliveryId: headers['x-github-delivery'] ?? headers['webhook-id'] ?? '',
+          authHmac: dispatcherAuthHmac(tenant.orgId, source),
         }),
       ),
     }),
