@@ -451,7 +451,7 @@ function isNotionVerificationHandshake(
   }
 }
 
-function extractEventType(
+export function extractEventType(
   source: string,
   headers: Record<string, string | undefined>,
   body: string,
@@ -897,12 +897,77 @@ async function sealAndEnqueue(params: {
   );
 }
 
+export interface DispatcherEvent {
+  source: string;
+  body: string;
+  tenantId: string;
+  deliveryId: string;
+  headers: Record<string, string>;
+  eventType: string;
+  authHmac: string;
+}
+
+// HMAC-guarded dispatcher invoke (ADL #12/#41): only the dispatcher with the shared secret can invoke.
+export async function handleDispatcherInvoke(
+  event: DispatcherEvent,
+): Promise<{ statusCode: number }> {
+  const authSecret = process.env['DISPATCHER_AUTH_SECRET'] ?? '';
+  if (!authSecret) return { statusCode: 401 };
+
+  const expectedPayload = `${event.tenantId}:${event.source}`;
+  const expectedHmac = createHmac('sha256', authSecret).update(expectedPayload).digest();
+
+  const provided = Buffer.from(event.authHmac, 'hex');
+  if (provided.length !== expectedHmac.length || !timingSafeEqual(provided, expectedHmac)) {
+    return { statusCode: 401 };
+  }
+
+  const headers = normalizeHeaders(event.headers);
+  const payloadBody =
+    event.source === GOOGLE_DRIVE_SOURCE
+      ? driveChangePingBody(headers)
+      : event.source === MICROSOFT365_SOURCE
+        ? m365ChangePingBody(event.body)
+        : event.body;
+
+  const dedupId = event.deliveryId
+    ? createHash('sha256')
+        .update([event.tenantId, event.source, event.deliveryId].join('\n'))
+        .digest('hex')
+    : deduplicationId(event.tenantId, event.source, headers, payloadBody);
+
+  await sealAndEnqueue({
+    tenantId: event.tenantId,
+    source: event.source,
+    eventType: event.eventType,
+    payloadBody,
+    dedupId,
+  });
+
+  return { statusCode: 200 };
+}
+
 export const handler: APIGatewayProxyHandlerV2 = async (event) => {
-  const tenantId = event.pathParameters?.['tenant_id'];
-  const source = event.pathParameters?.['source'];
+  if (!event.pathParameters) {
+    const dispatchEvent = event as unknown as DispatcherEvent;
+    if (dispatchEvent.source && dispatchEvent.tenantId && dispatchEvent.body) {
+      await handleDispatcherInvoke(dispatchEvent);
+      return { statusCode: 200 };
+    }
+    return { statusCode: 400 };
+  }
+  const tenantId = event.pathParameters['tenant_id'];
+  const source = event.pathParameters['source'];
   if (!tenantId || !source) return { statusCode: 400 };
   if (!SIGNABLE_SOURCES.has(source)) return { statusCode: 400 };
+  return handleUrlRouted(event, tenantId, source);
+};
 
+async function handleUrlRouted(
+  event: Parameters<APIGatewayProxyHandlerV2>[0],
+  tenantId: string,
+  source: string,
+): Promise<ChallengeOrStatus> {
   const body = event.body ?? '';
   const headers = normalizeHeaders(event.headers);
 
@@ -975,4 +1040,4 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   });
 
   return { statusCode: 200 };
-};
+}

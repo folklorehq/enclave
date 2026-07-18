@@ -16,6 +16,7 @@ import type { RoutableMessage, TenantMessageRouter } from './tenant-message-rout
 // one poll cycle (≈20s), preserving single-tenant timing at N=1.
 const MAX_LONG_POLL_SECONDS = 20;
 const RECEIVE_BATCH = 10;
+const BATCH_TARGET = 50;
 // An empty pool has no queue long-poll to pace the loop, so wait before re-checking for an assignment.
 const EMPTY_POOL_POLL_INTERVAL_MS = 5_000;
 
@@ -38,6 +39,7 @@ export interface QueueSetDrainerDeps {
   haltGateFor: (tenantId: string) => HaltGate;
   writeIdle: (idle: boolean) => Promise<void>;
   idlePollThreshold: number;
+  onDrainComplete?: () => Promise<void>;
 }
 
 // Drains the set of per-tenant webhook queues (design §5). Every message is routed to its own
@@ -78,6 +80,7 @@ export class QueueSetDrainer {
     const received = await this.drainAllQueues(assignments, ackBatch);
     await ackBatch.commit();
     await this.updateIdle(received);
+    await this.deps.onDrainComplete?.();
   }
 
   private async drainAllQueues(
@@ -98,16 +101,23 @@ export class QueueSetDrainer {
     queueCount: number,
     ackBatch: DurableAckBatch,
   ): Promise<number> {
-    const resp = await this.deps.sqs.send(
-      new ReceiveMessageCommand({
-        QueueUrl: assignment.queueUrl,
-        MaxNumberOfMessages: RECEIVE_BATCH,
-        WaitTimeSeconds: this.waitSeconds(queueCount),
-      }),
-    );
-    const messages = resp.Messages ?? [];
-    for (const msg of messages) await this.handleMessage(assignment, msg, ackBatch);
-    return messages.length;
+    let total = 0;
+    let isFirstPoll = true;
+    while (total < BATCH_TARGET) {
+      const resp = await this.deps.sqs.send(
+        new ReceiveMessageCommand({
+          QueueUrl: assignment.queueUrl,
+          MaxNumberOfMessages: RECEIVE_BATCH,
+          WaitTimeSeconds: isFirstPoll ? this.waitSeconds(queueCount) : 0,
+        }),
+      );
+      const messages = resp.Messages ?? [];
+      if (messages.length === 0) break;
+      for (const msg of messages) await this.handleMessage(assignment, msg, ackBatch);
+      total += messages.length;
+      isFirstPoll = false;
+    }
+    return total;
   }
 
   private async handleMessage(

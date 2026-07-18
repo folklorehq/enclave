@@ -1696,3 +1696,133 @@ describe('SES inbound — SNS signature verification (email)', () => {
     expect(fetch).toHaveBeenCalledWith(SNS_SUBSCRIBE_URL);
   });
 });
+
+describe('handleDispatcherInvoke', () => {
+  const DISPATCHER_SECRET = 'test-dispatcher-secret-32-bytes-hex';
+  const TEST_TENANT = 'tenant-dispatch';
+  const TEST_SOURCE = 'github';
+  const TEST_BODY = JSON.stringify({ action: 'push', ref: 'refs/heads/main' });
+
+  beforeEach(() => {
+    process.env['DISPATCHER_AUTH_SECRET'] = DISPATCHER_SECRET;
+    // Reset the mock to a known state for these tests
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      throw Object.assign(new Error('ParameterNotFound'), { name: 'ParameterNotFound' });
+    });
+  });
+
+  afterEach(() => {
+    delete process.env['DISPATCHER_AUTH_SECRET'];
+    mockSqsSend.mockClear();
+  });
+
+  function makeHmac(tenantId: string, source: string, secret: string): string {
+    return createHmac('sha256', secret).update(`${tenantId}:${source}`).digest('hex');
+  }
+
+  function makeDispatcherEvent(overrides: Record<string, unknown> = {}) {
+    return {
+      source: TEST_SOURCE,
+      body: TEST_BODY,
+      tenantId: TEST_TENANT,
+      deliveryId: 'delivery-abc',
+      eventType: 'push',
+      headers: {},
+      authHmac: makeHmac(TEST_TENANT, TEST_SOURCE, DISPATCHER_SECRET),
+      ...overrides,
+    };
+  }
+
+  it('seals and enqueues a valid dispatcher invoke with correct auth HMAC', async () => {
+    const { handleDispatcherInvoke } = await import('../src/handler.js');
+    const event = makeDispatcherEvent();
+    const result = await handleDispatcherInvoke(event);
+    expect(result).toMatchObject({ statusCode: 200 });
+    expect(mockSqsSend).toHaveBeenCalledTimes(1);
+    const msg = mockSqsSend.mock.calls[0]![0] as Record<string, unknown>;
+    const payload = JSON.parse(msg['MessageBody'] as string) as Record<string, string>;
+    expect(payload['tenant_id']).toBe(TEST_TENANT);
+    expect(payload['source']).toBe(TEST_SOURCE);
+    expect(payload['eventType']).toBe('push');
+    expect(payload['ephemeralPublicKey']).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('returns 401 when auth HMAC is wrong', async () => {
+    const { handleDispatcherInvoke } = await import('../src/handler.js');
+    const event = makeDispatcherEvent({
+      authHmac: makeHmac(TEST_TENANT, TEST_SOURCE, 'wrong-secret'),
+    });
+    const result = await handleDispatcherInvoke(event);
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 when auth HMAC is for a different tenant', async () => {
+    const { handleDispatcherInvoke } = await import('../src/handler.js');
+    const event = makeDispatcherEvent({
+      authHmac: makeHmac('other-tenant', TEST_SOURCE, DISPATCHER_SECRET),
+    });
+    const result = await handleDispatcherInvoke(event);
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 when auth HMAC is for a different source', async () => {
+    const { handleDispatcherInvoke } = await import('../src/handler.js');
+    const event = makeDispatcherEvent({
+      authHmac: makeHmac(TEST_TENANT, 'slack', DISPATCHER_SECRET),
+    });
+    const result = await handleDispatcherInvoke(event);
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 when DISPATCHER_AUTH_SECRET is not set', async () => {
+    delete process.env['DISPATCHER_AUTH_SECRET'];
+    const { handleDispatcherInvoke } = await import('../src/handler.js');
+    const event = makeDispatcherEvent();
+    const result = await handleDispatcherInvoke(event);
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 when auth HMAC is an empty string', async () => {
+    const { handleDispatcherInvoke } = await import('../src/handler.js');
+    const event = makeDispatcherEvent({ authHmac: '' });
+    const result = await handleDispatcherInvoke(event);
+    expect(result).toMatchObject({ statusCode: 401 });
+    expect(mockSqsSend).not.toHaveBeenCalled();
+  });
+
+  it('passes through the eventType from the dispatcher event', async () => {
+    const { handleDispatcherInvoke } = await import('../src/handler.js');
+    const event = makeDispatcherEvent({
+      source: 'slack',
+      eventType: 'app_mention',
+      body: JSON.stringify({ type: 'app_mention', event: { type: 'app_mention' } }),
+      authHmac: makeHmac(TEST_TENANT, 'slack', DISPATCHER_SECRET),
+    });
+    const result = await handleDispatcherInvoke(event);
+    expect(result).toMatchObject({ statusCode: 200 });
+    expect(mockSqsSend).toHaveBeenCalledTimes(1);
+    const msg = mockSqsSend.mock.calls[0]![0] as Record<string, unknown>;
+    const payload = JSON.parse(msg['MessageBody'] as string) as Record<string, string>;
+    expect(payload['eventType']).toBe('app_mention');
+  });
+
+  it('produces a deterministic dedup id for the same body', async () => {
+    const { handleDispatcherInvoke } = await import('../src/handler.js');
+    const event = makeDispatcherEvent();
+    await handleDispatcherInvoke(event);
+    const firstDedup = (mockSqsSend.mock.calls[0]![0] as Record<string, unknown>)[
+      'MessageDeduplicationId'
+    ];
+    mockSqsSend.mockClear();
+    await handleDispatcherInvoke(event);
+    const secondDedup = (mockSqsSend.mock.calls[0]![0] as Record<string, unknown>)[
+      'MessageDeduplicationId'
+    ];
+    expect(secondDedup).toBe(firstDedup);
+  });
+});

@@ -39,7 +39,11 @@ import { installGlobalEgressDispatcher } from './egress/proxy.js';
 import { createContainer, type ApiContainer, type RetrieverDeps } from '@folklore/api';
 import { NoopTelemetryClient } from '@folklore/telemetry';
 import { RedisCache } from '@folklore/cache';
-import { BufferedOpsTelemetryClient, RedisOpsEventChannel } from '@folklore/control-plane';
+import {
+  BufferedOpsTelemetryClient,
+  RedisOpsEventChannel,
+  type PoolTenantUsage,
+} from '@folklore/control-plane';
 import { poolAssignmentsKey } from '@folklore/contracts';
 
 // ADL #42: route external egress through the parent CONNECT proxy — before any client is
@@ -300,6 +304,16 @@ const router = new TenantMessageRouter({
   agentToken: () => process.env['AGENT_TOKEN'] ?? '',
 });
 
+// §2.2: write per-tenant pool usage to Redis after each drain cycle so the agent can
+// read it on check-in (content-free: byte counts and opaque tenant ids only).
+const collectPoolUsage = (): PoolTenantUsage[] =>
+  registry.all().map((ctx) => ({
+    tenant_id: ctx.tenantId,
+    fact_count: ctx.hnsw.elementCount(),
+    index_bytes: ctx.hnsw.elementCount() * 17000,
+    key_count: 1,
+  }));
+
 const drainer = new QueueSetDrainer({
   sqs,
   s3,
@@ -312,6 +326,10 @@ const drainer = new QueueSetDrainer({
   haltGateFor: (tenantId) => new HaltGate(haltCache, tenantId),
   writeIdle: writeIdleFlag,
   idlePollThreshold: IDLE_POLL_THRESHOLD,
+  onDrainComplete: async () => {
+    if (!POOL_ID) return;
+    await haltCache.set(`pool:usage:${DEPLOYMENT_ID}`, collectPoolUsage(), 300);
+  },
 });
 
 async function shutdown(): Promise<void> {
