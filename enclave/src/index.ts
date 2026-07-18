@@ -123,8 +123,13 @@ const tenantFactory = new TenantContextFactory({
   processedOutputsBucket: PROCESSED_OUTPUTS_BUCKET,
 });
 const registry = new TenantRegistry();
-const assignmentApplier = new TenantAssignmentApplier(registry, (identity) =>
-  tenantFactory.build(identity),
+// Late-bound: the synthesis consumer is composed further down, but the applier must be able to evict
+// a torn-down tenant's resident theme index + LLM-cache RAM front the moment it drops it (§2.2 pt 5).
+let synthesisConsumer: SynthesisConsumer | undefined;
+const assignmentApplier = new TenantAssignmentApplier(
+  registry,
+  (identity) => tenantFactory.build(identity),
+  (tenantId) => synthesisConsumer?.evictTenant(tenantId),
 );
 await assignmentApplier.apply(bootAssignments);
 console.log('tenant contexts assigned', { count: registry.size });
@@ -171,6 +176,9 @@ async function refreshAssignments(): Promise<void> {
 }
 await refreshAssignments();
 const ASSIGNMENT_REFRESH_INTERVAL_MS = 30_000;
+// Bound how long shutdown waits for an in-flight synth to settle so a hung inference can't starve
+// the fact-index save; on timeout we proceed WITHOUT freeing a still-pinned index (shred at exit).
+const SHUTDOWN_QUIESCE_TIMEOUT_MS = 10_000;
 const assignmentRefreshTimer = setInterval(
   () => void refreshAssignments(),
   ASSIGNMENT_REFRESH_INTERVAL_MS,
@@ -259,7 +267,7 @@ new BoxServer(apiContainer?.app.fetch).start();
 // One consumer serves every assigned tenant: it resolves each request's keyring/crypto from the
 // message's own orgId (§4.2/§2.2), so wiki + theme synthesis run for the whole pool, not just N=1.
 if (SYNTHESIS_REQUEST_QUEUE_URL) {
-  new SynthesisConsumer({
+  synthesisConsumer = new SynthesisConsumer({
     sqs,
     s3,
     resolveTenant,
@@ -267,7 +275,8 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
     synthesisQueueUrl: SYNTHESIS_REQUEST_QUEUE_URL,
     processedQueueUrl: PROCESSED_QUEUE_URL,
     previewFetcher: fetchLinkPreview,
-  }).start();
+  });
+  synthesisConsumer.start();
 }
 
 async function writeIdleFlag(idle: boolean): Promise<void> {
@@ -308,6 +317,10 @@ const drainer = new QueueSetDrainer({
 async function shutdown(): Promise<void> {
   console.log('enclave shutting down — saving hnsw indices', { count: registry.size });
   clearInterval(assignmentRefreshTimer);
+  // Quiesce synthesis (await the in-flight op) and shred its theme indices + LLM-cache RAM fronts
+  // before the final save, so no synth runs concurrently with it (§2.2 pt 5).
+  if (synthesisConsumer)
+    await synthesisConsumer.dispose(SHUTDOWN_QUIESCE_TIMEOUT_MS).catch(() => {});
   await saveAllTenantIndices(registry.all(), s3, PROCESSED_OUTPUTS_BUCKET);
   if (apiContainer) await apiContainer.close().catch(() => {});
   await haltCache.close().catch(() => {});

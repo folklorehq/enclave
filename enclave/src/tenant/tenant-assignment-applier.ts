@@ -6,6 +6,11 @@ import type { QueueAssignment } from './queue-set-drainer.js';
 
 export type BuildTenantContext = (identity: TenantIdentity) => Promise<TenantContext>;
 
+// Called after a dropped tenant's context is zeroized so co-resident subsystems holding that org's
+// key material outside the registry (e.g. the synthesis consumer's resident theme index + LLM-cache
+// RAM front) can drop it too (§2.2 pt 5). Content-free (tenant id only); best-effort, never throws.
+export type OnTenantTornDown = (tenantId: string) => void | Promise<void>;
+
 // Rebuilds the live TenantRegistry to match a delivered assignment manifest (design §4.3/§5): builds
 // a context for each newly assigned tenant, and tears down + ZEROES the key material of every dropped
 // one (§2.2 point 5). Idempotent — re-applying the same set is a no-op. Also the source of truth for
@@ -17,6 +22,7 @@ export class TenantAssignmentApplier {
   constructor(
     private readonly registry: TenantRegistry,
     private readonly build: BuildTenantContext,
+    private readonly onTornDown?: OnTenantTornDown,
   ) {}
 
   queueAssignments(): QueueAssignment[] {
@@ -33,18 +39,26 @@ export class TenantAssignmentApplier {
     this.applying = true;
     try {
       const desired = new Map(assignments.map((a) => [a.tenantId, a] as const));
-      this.tearDownDropped(desired);
+      await this.tearDownDropped(desired);
       await this.buildAdded(desired);
     } finally {
       this.applying = false;
     }
   }
 
-  private tearDownDropped(desired: Map<string, TenantAssignment>): void {
+  private async tearDownDropped(desired: Map<string, TenantAssignment>): Promise<void> {
     for (const tenantId of [...this.assigned.keys()]) {
       if (desired.has(tenantId)) continue;
       this.assigned.delete(tenantId);
       this.registry.remove(tenantId)?.zeroize();
+      if (this.onTornDown) {
+        try {
+          await this.onTornDown(tenantId);
+        } catch {
+          // Best-effort hygiene — never let an eviction slip strand the rest of the rebuild (ADL #18).
+          console.error('tenant teardown hook failed', { tenant_id: tenantId });
+        }
+      }
     }
   }
 
