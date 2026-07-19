@@ -3,10 +3,10 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
 import type { APIGatewayProxyHandlerV2 } from 'aws-lambda';
-import { resolveTenant, EXTRACTORS } from './tenant-resolver.js';
-import { verifySignature, normalizeHeaders } from './signature-verifier.js';
+import { resolveTenant, EXTRACTORS } from '../tenant-resolver.js';
+import { verifySignature, normalizeHeaders } from '../signature-verifier.js';
 import { extractEventType } from './handler.js';
-import { checkRateLimit } from './rate-limiter.js';
+import { checkRateLimit } from '../rate-limiter.js';
 
 const ssm = new SSMClient({});
 const ddb = new DynamoDBClient({});
@@ -23,21 +23,31 @@ const MICROSOFT365_SOURCE = 'microsoft365';
 
 const VERIFICATION_CHALLENGE_SOURCES = new Set(['slack', 'notion']);
 
-const DISPATCHER_AUTH_SECRET = process.env['DISPATCHER_AUTH_SECRET'] ?? '';
+const DISPATCHER_AUTH_SSM_PATH = '/folklore/shared/dispatcher-auth-secret';
+const AUTH_CACHE_TTL = 5 * 60 * 1000;
+let authSecretCache: { secret: string; expiresAt: number } | null = null;
 
-function authHmac(tenantId: string, source: string, body: string): string {
-  return createHmac('sha256', DISPATCHER_AUTH_SECRET)
-    .update(`${tenantId}:${source}:${body}`)
-    .digest('hex');
+async function dispatcherAuthSecret(): Promise<string> {
+  if (authSecretCache && Date.now() < authSecretCache.expiresAt) return authSecretCache.secret;
+  const result = await ssm.send(
+    new GetParameterCommand({ Name: DISPATCHER_AUTH_SSM_PATH, WithDecryption: true }),
+  );
+  const secret = result.Parameter?.Value ?? '';
+  authSecretCache = { secret, expiresAt: Date.now() + AUTH_CACHE_TTL };
+  return secret;
 }
 
-function buildInvokePayload(
+async function buildInvokePayload(
   destTenantId: string,
   destSource: string,
   destBody: string,
   destHeaders: Record<string, string | undefined>,
   destFunctionName: string,
-): { FunctionName: string; InvocationType: 'Event'; Payload: Buffer } {
+): Promise<{ FunctionName: string; InvocationType: 'Event'; Payload: Buffer }> {
+  const secret = await dispatcherAuthSecret();
+  const hmac = createHmac('sha256', secret)
+    .update(`${destTenantId}:${destSource}:${destBody}`)
+    .digest('hex');
   return {
     FunctionName: destFunctionName,
     InvocationType: 'Event' as const,
@@ -47,7 +57,7 @@ function buildInvokePayload(
         body: destBody,
         tenantId: destTenantId,
         deliveryId: destHeaders['x-github-delivery'] ?? destHeaders['webhook-id'] ?? '',
-        authHmac: authHmac(destTenantId, destSource, destBody),
+        authHmac: hmac,
         eventType: extractEventType(destSource, destHeaders, destBody),
         headers: destHeaders,
       }),
@@ -153,49 +163,83 @@ function handleZoomCrc(source: string, body: unknown, secret: string): Challenge
 }
 
 export const handler: APIGatewayProxyHandlerV2 = async (event) => {
-  const source = event.pathParameters?.['source'];
-  const tenantId = event.pathParameters?.['tenant_id'];
-  if (!source) return { statusCode: 400 };
-
-  const body = event.body ?? '';
-  const headers = normalizeHeaders(event.headers);
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(body);
-  } catch {
-    parsed = null;
-  }
+    const source = event.pathParameters?.['source'];
+    const tenantId = event.pathParameters?.['tenant_id'];
+    if (!source) return { statusCode: 400 };
 
-  // Microsoft365 subscription validation: echo validationToken as text/plain (unsigned).
-  // Must happen before the EXTRACTORS check since microsoft365 has no extractor.
-  if (source === MICROSOFT365_SOURCE) {
-    const validationToken = event.queryStringParameters?.['validationToken'];
-    if (typeof validationToken === 'string' && validationToken.length > 0) {
-      return {
-        statusCode: 200,
-        headers: { 'content-type': 'text/plain' },
-        body: validationToken,
-      };
+    const body = event.body ?? '';
+    const headers = normalizeHeaders(event.headers);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      parsed = null;
     }
-  }
 
-  if (!EXTRACTORS[source] && !tenantId) return { statusCode: 400 };
-
-  // Check verification challenges BEFORE signature verification (Slack, Notion handshake)
-  if (isVerificationChallenge(source, parsed, headers)) {
-    const response = handleVerificationChallenge(source, parsed);
-    if (response) {
-      return {
-        statusCode: 200,
-        headers: { 'content-type': response.contentType },
-        body: response.body,
-      };
+    // Microsoft365 subscription validation: echo validationToken as text/plain (unsigned).
+    // Must happen before the EXTRACTORS check since microsoft365 has no extractor.
+    if (source === MICROSOFT365_SOURCE) {
+      const validationToken = event.queryStringParameters?.['validationToken'];
+      if (typeof validationToken === 'string' && validationToken.length > 0) {
+        return {
+          statusCode: 200,
+          headers: { 'content-type': 'text/plain' },
+          body: validationToken,
+        };
+      }
     }
-  }
 
-  // URL-routed mode: tenantId is in the path, use per-tenant secret, skip resolveTenant()
-  if (tenantId) {
-    const secret = await fetchPerTenantSecret(tenantId, source);
+    if (!EXTRACTORS[source] && !tenantId) return { statusCode: 400 };
+
+    // Check verification challenges BEFORE signature verification (Slack, Notion handshake)
+    if (isVerificationChallenge(source, parsed, headers)) {
+      const response = handleVerificationChallenge(source, parsed);
+      if (response) {
+        return {
+          statusCode: 200,
+          headers: { 'content-type': response.contentType },
+          body: response.body,
+        };
+      }
+    }
+
+    // URL-routed mode: tenantId is in the path, use per-tenant secret, skip resolveTenant()
+    if (tenantId) {
+      const secret = await fetchPerTenantSecret(tenantId, source);
+      if (!secret) return { statusCode: 503 };
+
+      const signatureValid = verifySignature(source, headers, body, secret);
+      if (!signatureValid) return { statusCode: 401 };
+
+      // Zoom CRC: handle endpoint.url_validation AFTER signature verification
+      const zoomCrc = handleZoomCrc(source, parsed, secret);
+      if (zoomCrc) {
+        return {
+          statusCode: 200,
+          headers: { 'content-type': zoomCrc.contentType },
+          body: zoomCrc.body,
+        };
+      }
+
+      // Rate limiting (skip if RATE_LIMIT_TABLE env var is not configured)
+      const rateLimitTable = process.env['RATE_LIMIT_TABLE'];
+      if (rateLimitTable) {
+        if (!(await checkRateLimit(tenantId, source))) {
+          return { statusCode: 429 };
+        }
+      }
+
+      await lambda.send(
+        new InvokeCommand(
+          await buildInvokePayload(tenantId, source, body, headers, `${tenantId}-ingest`),
+        ),
+      );
+      return { statusCode: 200 };
+    }
+
+    // Shared-secret mode: use shared secret for signature verification
+    const secret = await fetchSharedSecret(source);
     if (!secret) return { statusCode: 503 };
 
     const signatureValid = verifySignature(source, headers, body, secret);
@@ -211,78 +255,32 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       };
     }
 
+    const tenant = await resolveTenant(ddb, source, parsed, headers as Record<string, string>);
+    if (!tenant) return { statusCode: 401 };
+
     // Rate limiting (skip if RATE_LIMIT_TABLE env var is not configured)
     const rateLimitTable = process.env['RATE_LIMIT_TABLE'];
     if (rateLimitTable) {
-      if (!(await checkRateLimit(tenantId, source))) {
+      if (!(await checkRateLimit(tenant.orgId, source))) {
         return { statusCode: 429 };
       }
     }
 
-    const perTenantFunctionName = `${tenantId}-ingest`;
+    const fnName = tenant.functionName || `${tenant.orgId}-ingest`;
     await lambda.send(
-      new InvokeCommand({
-        FunctionName: perTenantFunctionName,
-        InvocationType: 'Event',
-        Payload: Buffer.from(
-          JSON.stringify({
-            source,
-            body,
-            tenantId,
-            deliveryId: headers['x-github-delivery'] ?? headers['webhook-id'] ?? '',
-            authHmac: dispatcherAuthHmac(tenantId, source),
-          }),
-        ),
-      }),
+      new InvokeCommand(await buildInvokePayload(tenant.orgId, source, body, headers, fnName)),
     );
 
     return { statusCode: 200 };
+  } catch (err) {
+    const source = event.pathParameters?.['source'] ?? 'unknown';
+    console.error(
+      JSON.stringify({
+        msg: 'dispatcher: unhandled error',
+        source,
+        errorName: err instanceof Error ? err.name : typeof err,
+      }),
+    );
+    return { statusCode: 500 };
   }
-
-  // Shared-secret mode: use shared secret for signature verification
-  const secret = await fetchSharedSecret(source);
-  if (!secret) return { statusCode: 503 };
-
-  const signatureValid = verifySignature(source, headers, body, secret);
-  if (!signatureValid) return { statusCode: 401 };
-
-  // Zoom CRC: handle endpoint.url_validation AFTER signature verification
-  const zoomCrc = handleZoomCrc(source, parsed, secret);
-  if (zoomCrc) {
-    return {
-      statusCode: 200,
-      headers: { 'content-type': zoomCrc.contentType },
-      body: zoomCrc.body,
-    };
-  }
-
-  const tenant = await resolveTenant(ddb, source, parsed, headers as Record<string, string>);
-  if (!tenant) return { statusCode: 401 };
-
-  // Rate limiting (skip if RATE_LIMIT_TABLE env var is not configured)
-  const rateLimitTable = process.env['RATE_LIMIT_TABLE'];
-  if (rateLimitTable) {
-    if (!(await checkRateLimit(tenant.orgId, source))) {
-      return { statusCode: 429 };
-    }
-  }
-
-  const perTenantFunctionName = `${tenant.orgId}-ingest`;
-  await lambda.send(
-    new InvokeCommand({
-      FunctionName: perTenantFunctionName,
-      InvocationType: 'Event',
-      Payload: Buffer.from(
-        JSON.stringify({
-          source,
-          body,
-          tenantId: tenant.orgId,
-          deliveryId: headers['x-github-delivery'] ?? headers['webhook-id'] ?? '',
-          authHmac: dispatcherAuthHmac(tenant.orgId, source),
-        }),
-      ),
-    }),
-  );
-
-  return { statusCode: 200 };
 };

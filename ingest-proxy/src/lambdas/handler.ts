@@ -16,7 +16,7 @@ import {
   timingSafeEqual,
 } from 'crypto';
 import type { APIGatewayProxyHandlerV2 } from 'aws-lambda';
-import { checkRateLimit } from './rate-limiter.js';
+import { checkRateLimit } from '../rate-limiter.js';
 
 const ssm = new SSMClient({});
 const sqs = new SQSClient({});
