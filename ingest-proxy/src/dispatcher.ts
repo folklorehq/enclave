@@ -25,10 +25,8 @@ const VERIFICATION_CHALLENGE_SOURCES = new Set(['slack', 'notion']);
 
 const DISPATCHER_AUTH_SECRET = process.env['DISPATCHER_AUTH_SECRET'] ?? '';
 
-function authHmac(tenantId: string, source: string, body: string): string {
-  return createHmac('sha256', DISPATCHER_AUTH_SECRET)
-    .update(`${tenantId}:${source}:${body}`)
-    .digest('hex');
+function dispatcherAuthHmac(tenantId: string, source: string): string {
+  return createHmac('sha256', DISPATCHER_AUTH_SECRET).update(`${tenantId}:${source}`).digest('hex');
 }
 
 function buildInvokePayload(
@@ -47,7 +45,7 @@ function buildInvokePayload(
         body: destBody,
         tenantId: destTenantId,
         deliveryId: destHeaders['x-github-delivery'] ?? destHeaders['webhook-id'] ?? '',
-        authHmac: authHmac(destTenantId, destSource, destBody),
+        authHmac: dispatcherAuthHmac(destTenantId, destSource),
         eventType: extractEventType(destSource, destHeaders, destBody),
         headers: destHeaders,
       }),
@@ -230,7 +228,6 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
             body,
             tenantId,
             deliveryId: headers['x-github-delivery'] ?? headers['webhook-id'] ?? '',
-            authHmac: dispatcherAuthHmac(tenantId, source),
           }),
         ),
       }),
