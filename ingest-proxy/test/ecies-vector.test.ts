@@ -1,6 +1,6 @@
 import { createDecipheriv, createPrivateKey, createPublicKey, diffieHellman } from 'crypto';
 import { describe, expect, it } from 'vitest';
-import { deriveAesKey } from '../src/handler.js';
+import { deriveAesKey } from '../src/lambdas/handler.js';
 
 // Frozen known-answer vector for the ingest ECIES scheme (ephemeral X25519 → HKDF-SHA256
 // with info `folklore-ingest-v1:` + both pubkeys → AES-256-GCM). Duplicated byte-for-byte in

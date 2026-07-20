@@ -26,7 +26,7 @@ vi.mock('@aws-sdk/client-dynamodb', () => ({
 
 process.env['QUEUE_URL'] = 'https://sqs.test/queue';
 
-const { handler } = await import('../src/handler.js');
+const { handler } = await import('../src/lambdas/handler.js');
 
 // A real X25519 key pair to serve as the "tenant" recipient key
 const { publicKey: testRecipientPub } = generateKeyPairSync('x25519');
@@ -972,7 +972,7 @@ describe('Recall inbound — absent GLOBAL secret (fresh module cache)', () => {
       if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
       throw Object.assign(new Error('ParameterNotFound'), { name: 'ParameterNotFound' });
     });
-    const { handler: freshHandler } = await import('../src/handler.js');
+    const { handler: freshHandler } = await import('../src/lambdas/handler.js');
     const ts = String(Math.floor(Date.now() / 1000));
     const body = JSON.stringify({ event: 'transcript.done', data: { bot: { id: 'bot-open' } } });
     const secret = 'whsec_' + Buffer.from('recall-workspace-secret').toString('base64');
@@ -1735,7 +1735,7 @@ describe('handleDispatcherInvoke', () => {
   }
 
   it('seals and enqueues a valid dispatcher invoke with correct auth HMAC', async () => {
-    const { handleDispatcherInvoke } = await import('../src/handler.js');
+    const { handleDispatcherInvoke } = await import('../src/lambdas/handler.js');
     const event = makeDispatcherEvent();
     const result = await handleDispatcherInvoke(event);
     expect(result).toMatchObject({ statusCode: 200 });
@@ -1749,7 +1749,7 @@ describe('handleDispatcherInvoke', () => {
   });
 
   it('returns 401 when auth HMAC is wrong', async () => {
-    const { handleDispatcherInvoke } = await import('../src/handler.js');
+    const { handleDispatcherInvoke } = await import('../src/lambdas/handler.js');
     const event = makeDispatcherEvent({
       authHmac: makeHmac(TEST_TENANT, TEST_SOURCE, 'wrong-secret'),
     });
@@ -1759,7 +1759,7 @@ describe('handleDispatcherInvoke', () => {
   });
 
   it('returns 401 when auth HMAC is for a different tenant', async () => {
-    const { handleDispatcherInvoke } = await import('../src/handler.js');
+    const { handleDispatcherInvoke } = await import('../src/lambdas/handler.js');
     const event = makeDispatcherEvent({
       authHmac: makeHmac('other-tenant', TEST_SOURCE, DISPATCHER_SECRET),
     });
@@ -1769,7 +1769,7 @@ describe('handleDispatcherInvoke', () => {
   });
 
   it('returns 401 when auth HMAC is for a different source', async () => {
-    const { handleDispatcherInvoke } = await import('../src/handler.js');
+    const { handleDispatcherInvoke } = await import('../src/lambdas/handler.js');
     const event = makeDispatcherEvent({
       authHmac: makeHmac(TEST_TENANT, 'slack', DISPATCHER_SECRET),
     });
@@ -1780,7 +1780,7 @@ describe('handleDispatcherInvoke', () => {
 
   it('returns 401 when DISPATCHER_AUTH_SECRET is not set', async () => {
     delete process.env['DISPATCHER_AUTH_SECRET'];
-    const { handleDispatcherInvoke } = await import('../src/handler.js');
+    const { handleDispatcherInvoke } = await import('../src/lambdas/handler.js');
     const event = makeDispatcherEvent();
     const result = await handleDispatcherInvoke(event);
     expect(result).toMatchObject({ statusCode: 401 });
@@ -1788,7 +1788,7 @@ describe('handleDispatcherInvoke', () => {
   });
 
   it('returns 401 when auth HMAC is an empty string', async () => {
-    const { handleDispatcherInvoke } = await import('../src/handler.js');
+    const { handleDispatcherInvoke } = await import('../src/lambdas/handler.js');
     const event = makeDispatcherEvent({ authHmac: '' });
     const result = await handleDispatcherInvoke(event);
     expect(result).toMatchObject({ statusCode: 401 });
@@ -1796,7 +1796,7 @@ describe('handleDispatcherInvoke', () => {
   });
 
   it('passes through the eventType from the dispatcher event', async () => {
-    const { handleDispatcherInvoke } = await import('../src/handler.js');
+    const { handleDispatcherInvoke } = await import('../src/lambdas/handler.js');
     const event = makeDispatcherEvent({
       source: 'slack',
       eventType: 'app_mention',
@@ -1812,7 +1812,7 @@ describe('handleDispatcherInvoke', () => {
   });
 
   it('produces a deterministic dedup id for the same body', async () => {
-    const { handleDispatcherInvoke } = await import('../src/handler.js');
+    const { handleDispatcherInvoke } = await import('../src/lambdas/handler.js');
     const event = makeDispatcherEvent();
     await handleDispatcherInvoke(event);
     const firstDedup = (mockSqsSend.mock.calls[0]![0] as Record<string, unknown>)[

@@ -5,7 +5,7 @@ import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
 import type { APIGatewayProxyHandlerV2 } from 'aws-lambda';
 import { resolveTenant, EXTRACTORS } from './tenant-resolver.js';
 import { verifySignature, normalizeHeaders } from './signature-verifier.js';
-import { extractEventType } from './handler.js';
+import { extractEventType } from './lambdas/handler.js';
 import { checkRateLimit } from './rate-limiter.js';
 
 const ssm = new SSMClient({});
