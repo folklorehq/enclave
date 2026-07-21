@@ -1,4 +1,4 @@
-/** Decrypts an ingest-Lambda webhook payload via ECIES (X25519 + HKDF-SHA256 + AES-256-GCM); must match ingest-proxy/src/handler.ts exactly. */
+/** Decrypts an ingest-Lambda webhook payload via ECIES (X25519 + HKDF-SHA256 + AES-256-GCM); must match ingest-proxy/src/lambdas/handler.ts exactly. */
 import { diffieHellman, hkdfSync, createDecipheriv, createPublicKey, KeyObject } from 'crypto';
 
 export interface EncryptedPayload {
