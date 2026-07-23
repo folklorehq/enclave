@@ -200,9 +200,9 @@ setInferenceTelemetry(opsTelemetry);
 // reads decrypted content over the in-enclave Postgres proxy and never leaves.
 let apiContainer: ApiContainer | undefined;
 try {
-  // ADL #34/#6: search + wiki/recommend are served by the in-enclave retriever — embed, ANN over
-  // the loaded index, decrypt, and audience-gate, all in-process. The retriever resolves its
-  // tenant's index + keyring per request from `params.orgId` (§4.2), so it serves every assigned
+  // ADL #34/#6: search is served by the in-enclave retriever — embed, ANN over the loaded
+  // index, decrypt, and audience-gate, all in-process. The retriever resolves its tenant's
+  // index + keyring per request from `params.orgId` (§4.2), so it serves every assigned
   // tenant from one instance without a union keyring.
   const buildRetriever = (retrieverDeps: RetrieverDeps) =>
     new EnclaveFactRetriever({
