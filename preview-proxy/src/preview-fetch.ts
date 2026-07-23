@@ -27,7 +27,7 @@ const DEFAULT_MAX_BYTES = 512 * 1024;
 const DEFAULT_TIMEOUT_MS = 5000;
 const MAX_TOTAL_REQUEST_MS = 15_000;
 const DEFAULT_MAX_REDIRECTS = 4;
-const DEFAULT_USER_AGENT = 'FolkloreLinkPreview/1.0 (+https://folklore.build)';
+const DEFAULT_USER_AGENT = 'FolkloreLinkPreview/1.0 (+https://folklorehq.com)';
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 type RequestOutcome =
