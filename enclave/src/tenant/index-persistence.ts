@@ -1,4 +1,5 @@
 import type { S3Client } from '@aws-sdk/client-s3';
+import type { Logger } from '@folklore/core';
 import type { TenantContext } from './tenant-context.js';
 
 // HNSW only auto-persists every SAVE_INTERVAL inserts, so shutdown must flush every tenant's
@@ -8,13 +9,14 @@ export async function saveAllTenantIndices(
   contexts: TenantContext[],
   s3: S3Client,
   bucket: string,
+  logger: Logger,
 ): Promise<void> {
   await Promise.all(
     contexts.map(async (context) => {
       try {
         await context.hnsw.save(s3, context.keyring, bucket, context.tenantId);
       } catch {
-        console.error('HNSW_SAVE_FAILED', { tenant: context.tenantId });
+        logger.error('HNSW_SAVE_FAILED', { tenant: context.tenantId });
       }
     }),
   );

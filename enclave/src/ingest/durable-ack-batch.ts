@@ -1,3 +1,5 @@
+import type { Logger } from '@folklore/core';
+
 export interface DurableAckItem {
   tenantId: string;
   hasUnsavedInserts(): boolean;
@@ -12,6 +14,8 @@ export interface DurableAckItem {
 export class DurableAckBatch {
   private readonly items: DurableAckItem[] = [];
 
+  constructor(private readonly logger: Logger) {}
+
   add(item: DurableAckItem): void {
     this.items.push(item);
   }
@@ -24,7 +28,7 @@ export class DurableAckBatch {
         if (first.hasUnsavedInserts()) await first.persist();
       } catch {
         // Content-free (ADL #18): leave this tenant's batch in queue for redelivery.
-        console.error('hnsw persist failed — batch left in queue for retry', {
+        this.logger.error('hnsw persist failed — batch left in queue for retry', {
           tenantId: first.tenantId,
         });
         continue;
@@ -34,7 +38,7 @@ export class DurableAckBatch {
           await item.ack();
         } catch {
           // A failed delete redelivers and reprocesses idempotently — never crash the drain loop.
-          console.error('ack failed — message left in queue for retry', {
+          this.logger.error('ack failed — message left in queue for retry', {
             tenantId: item.tenantId,
           });
         }

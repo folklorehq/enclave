@@ -6,6 +6,7 @@ import {
   type Message,
   type SQSClient,
 } from '@aws-sdk/client-sqs';
+import type { Logger } from '@folklore/core';
 import type { ProcessedFact } from '../pipeline/index.js';
 import type { PullCompleteSignal } from '../pull/pull-runner.js';
 import { HALT_POLL_INTERVAL_MS, type HaltGate } from '../control/halt-gate.js';
@@ -40,6 +41,7 @@ export interface QueueSetDrainerDeps {
   writeIdle: (idle: boolean) => Promise<void>;
   idlePollThreshold: number;
   onDrainComplete?: () => Promise<void>;
+  logger: Logger;
 }
 
 // Drains the set of per-tenant webhook queues (design §5). Every message is routed to its own
@@ -76,7 +78,7 @@ export class QueueSetDrainer {
       await this.updateIdle(false);
       return;
     }
-    const ackBatch = new DurableAckBatch();
+    const ackBatch = new DurableAckBatch(this.deps.logger);
     const received = await this.drainAllQueues(assignments, ackBatch);
     await ackBatch.commit();
     await this.updateIdle(received);
@@ -153,7 +155,7 @@ export class QueueSetDrainer {
       // unassigned or cross-tenant message is never acked here, so it stays in queue (then DLQ).
       // A tenant torn down mid-sweep (reassignment §4.3 zeroizes its context) lands here too — its
       // ingest key throws — so the message is left unacked and redelivered once reassigned; fail-closed.
-      console.error('failed to process message', { id: msg.MessageId });
+      this.deps.logger.error('failed to process message', { id: msg.MessageId });
     }
   }
 

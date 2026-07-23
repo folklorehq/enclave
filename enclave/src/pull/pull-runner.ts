@@ -20,6 +20,7 @@ import {
 } from '@folklore/connectors';
 import type { PullDueMessage } from '@folklore/contracts/enclave';
 import { externalHttpsProxyAgent } from '../egress/proxy.js';
+import { logger } from '../logger.js';
 import type { Pipeline, ProcessedFact } from '../pipeline/index.js';
 import {
   getDecryptedConnectionForKind,
@@ -81,15 +82,7 @@ export interface PullRunnerDeps {
   pipeline: Pipeline;
 }
 
-const consoleLogger: Logger = {
-  trace: (msg, ctx) => console.debug(msg, ctx ?? ''),
-  debug: (msg, ctx) => console.debug(msg, ctx ?? ''),
-  info: (msg, ctx) => console.info(msg, ctx ?? ''),
-  warn: (msg, ctx) => console.warn(msg, ctx ?? ''),
-  error: (msg, ctx) => console.error(msg, ctx ?? ''),
-  fatal: (msg, ctx) => console.error(msg, ctx ?? ''),
-  child: () => consoleLogger,
-};
+const consoleLogger: Logger = logger;
 
 function parseAllowlist(value: string | undefined): string[] {
   if (!value) return [];

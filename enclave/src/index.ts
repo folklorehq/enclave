@@ -39,6 +39,7 @@ import { installGlobalEgressDispatcher } from './egress/proxy.js';
 import { createContainer, type ApiContainer, type RetrieverDeps } from '@folklore/api';
 import { NoopTelemetryClient } from '@folklore/telemetry';
 import { RedisCache } from '@folklore/cache';
+import { logger } from './logger.js';
 import {
   BufferedOpsTelemetryClient,
   RedisOpsEventChannel,
@@ -87,7 +88,7 @@ async function loadInferenceKey(): Promise<void> {
     );
     if (resp.Parameter?.Value) process.env['TEE_API_KEY'] = resp.Parameter.Value;
   } catch (err) {
-    console.error('failed to load inference key from SSM', { err });
+    logger.error('failed to load inference key from SSM', { err });
   }
 }
 
@@ -99,7 +100,7 @@ async function loadAgentToken(): Promise<void> {
     );
     if (resp.Parameter?.Value) process.env['AGENT_TOKEN'] = resp.Parameter.Value;
   } catch (err) {
-    console.error('failed to load agent token from SSM', { err });
+    logger.error('failed to load agent token from SSM', { err });
   }
 }
 
@@ -133,6 +134,7 @@ let synthesisConsumer: SynthesisConsumer | undefined;
 const assignmentApplier = new TenantAssignmentApplier(
   registry,
   (identity) => tenantFactory.build(identity),
+  logger,
   (tenantId) => synthesisConsumer?.evictTenant(tenantId),
 );
 await assignmentApplier.apply(bootAssignments);
@@ -157,7 +159,7 @@ if (!DEPLOYMENT_ID || !REDIS_URL) {
 const haltCache = new RedisCache(REDIS_URL);
 // Pool-wide emergency halt (unchanged single-tenant semantics); per-tenant gates are built on demand
 // (§6.3) since the assigned set changes live, so halting tenant A never stops tenant B's queue.
-const poolHalt = new HaltGate(haltCache, DEPLOYMENT_ID);
+const poolHalt = new HaltGate(haltCache, DEPLOYMENT_ID, logger);
 
 // §4.3: the agent publishes this pool's content-free manifest to Redis on check-in; the enclave
 // re-reads it and rebuilds the registry (add/remove tenants, §2.2 pt 5). Idempotent, so a periodic
@@ -172,7 +174,7 @@ async function refreshAssignments(): Promise<void> {
     // Log the error NAME only, never the raw error (ADL #18 — a message could echo a manifest field).
     // A bad/foreign manifest leaves the current assignment set untouched — fail closed, don't tear
     // down live tenants on a parse slip.
-    console.error('assignment manifest refresh failed', {
+    logger.error('assignment manifest refresh failed', {
       pool_id: POOL_ID,
       error: err instanceof Error ? err.name : 'unknown',
     });
@@ -263,7 +265,7 @@ try {
 } catch (err) {
   // Degraded, not silent: the SPA still serves but /api/* returns 503 and /health reports
   // api:unavailable so the outage is observable, rather than a crash-looping boot.
-  console.error('BOX_API_DEGRADED', { err });
+  logger.error('BOX_API_DEGRADED', { err });
 }
 
 new BoxServer(apiContainer?.app.fetch).start();
@@ -279,6 +281,7 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
     synthesisQueueUrl: SYNTHESIS_REQUEST_QUEUE_URL,
     processedQueueUrl: PROCESSED_QUEUE_URL,
     previewFetcher: fetchLinkPreview,
+    logger,
   });
   synthesisConsumer.start();
 }
@@ -323,23 +326,24 @@ const drainer = new QueueSetDrainer({
   processedOutputsBucket: PROCESSED_OUTPUTS_BUCKET,
   rawPayloadsBucket: RAW_PAYLOADS_BUCKET,
   poolHalt,
-  haltGateFor: (tenantId) => new HaltGate(haltCache, tenantId),
+  haltGateFor: (tenantId) => new HaltGate(haltCache, tenantId, logger),
   writeIdle: writeIdleFlag,
   idlePollThreshold: IDLE_POLL_THRESHOLD,
   onDrainComplete: async () => {
     if (!POOL_ID) return;
     await haltCache.set(`pool:usage:${DEPLOYMENT_ID}`, collectPoolUsage(), 300);
   },
+  logger,
 });
 
 async function shutdown(): Promise<void> {
-  console.log('enclave shutting down — saving hnsw indices', { count: registry.size });
+  logger.info('enclave shutting down — saving hnsw indices', { count: registry.size });
   clearInterval(assignmentRefreshTimer);
   // Quiesce synthesis (await the in-flight op) and shred its theme indices + LLM-cache RAM fronts
   // before the final save, so no synth runs concurrently with it (§2.2 pt 5).
   if (synthesisConsumer)
     await synthesisConsumer.dispose(SHUTDOWN_QUIESCE_TIMEOUT_MS).catch(() => {});
-  await saveAllTenantIndices(registry.all(), s3, PROCESSED_OUTPUTS_BUCKET);
+  await saveAllTenantIndices(registry.all(), s3, PROCESSED_OUTPUTS_BUCKET, logger);
   if (apiContainer) await apiContainer.close().catch(() => {});
   await haltCache.close().catch(() => {});
   process.exit(0);

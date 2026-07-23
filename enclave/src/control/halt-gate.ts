@@ -1,4 +1,4 @@
-import type { Cache } from '@folklore/core';
+import type { Cache, Logger } from '@folklore/core';
 
 /** Redis key the operator break-glass halt command sets/clears (ADL #13). */
 export function haltKey(deploymentId: string): string {
@@ -25,6 +25,7 @@ export class HaltGate {
   constructor(
     private readonly cache: Pick<Cache, 'get'>,
     deploymentId: string,
+    private readonly logger: Logger,
   ) {
     this.keys = [haltKey(deploymentId), licenseHaltKey(deploymentId)];
   }
@@ -36,7 +37,7 @@ export class HaltGate {
         return flags.some(Boolean);
       } catch (err) {
         if (attempt === HALT_READ_MAX_ATTEMPTS) {
-          console.error('HALT_FLAG_UNREADABLE', { keys: this.keys, err });
+          this.logger.error('HALT_FLAG_UNREADABLE', { keys: this.keys, err });
         }
       }
     }
