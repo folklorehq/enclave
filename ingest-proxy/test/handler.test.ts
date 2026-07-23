@@ -1702,18 +1702,21 @@ describe('handleDispatcherInvoke', () => {
   const TEST_TENANT = 'tenant-dispatch';
   const TEST_SOURCE = 'github';
   const TEST_BODY = JSON.stringify({ action: 'push', ref: 'refs/heads/main' });
+  const DISPATCHER_SECRET_PARAM = '/folklore/shared/dispatcher-auth-secret';
 
+  // The dispatcher-auth secret has a tenant-independent cache key (dispatcher-auth.ts), so a
+  // fresh module import per test is required — same reasoning as the Recall global-secret tests
+  // above: a sibling test that provisions the secret would otherwise poison the shared cache.
   beforeEach(() => {
-    process.env['DISPATCHER_AUTH_SECRET'] = DISPATCHER_SECRET;
-    // Reset the mock to a known state for these tests
+    vi.resetModules();
     mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
       if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      if (cmd.Name === DISPATCHER_SECRET_PARAM) return { Parameter: { Value: DISPATCHER_SECRET } };
       throw Object.assign(new Error('ParameterNotFound'), { name: 'ParameterNotFound' });
     });
   });
 
   afterEach(() => {
-    delete process.env['DISPATCHER_AUTH_SECRET'];
     mockSqsSend.mockClear();
   });
 
@@ -1778,8 +1781,11 @@ describe('handleDispatcherInvoke', () => {
     expect(mockSqsSend).not.toHaveBeenCalled();
   });
 
-  it('returns 401 when DISPATCHER_AUTH_SECRET is not set', async () => {
-    delete process.env['DISPATCHER_AUTH_SECRET'];
+  it('returns 401 when the dispatcher-auth-secret SSM param is unprovisioned', async () => {
+    mockSsmSend.mockImplementation(async (cmd: { Name?: string }) => {
+      if (cmd.Name?.endsWith('/ingest-public-key')) return { Parameter: { Value: testPubHex } };
+      throw Object.assign(new Error('ParameterNotFound'), { name: 'ParameterNotFound' });
+    });
     const { handleDispatcherInvoke } = await import('../src/lambdas/handler.js');
     const event = makeDispatcherEvent();
     const result = await handleDispatcherInvoke(event);

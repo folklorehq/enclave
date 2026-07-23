@@ -7,6 +7,7 @@ import { resolveTenant, EXTRACTORS } from './tenant-resolver.js';
 import { verifySignature, normalizeHeaders } from './signature-verifier.js';
 import { extractEventType } from './lambdas/handler.js';
 import { checkRateLimit } from './rate-limiter.js';
+import { fetchDispatcherAuthSecret, computeDispatcherAuthHmac } from './dispatcher-auth.js';
 
 const ssm = new SSMClient({});
 const ddb = new DynamoDBClient({});
@@ -23,19 +24,18 @@ const MICROSOFT365_SOURCE = 'microsoft365';
 
 const VERIFICATION_CHALLENGE_SOURCES = new Set(['slack', 'notion']);
 
-const DISPATCHER_AUTH_SECRET = process.env['DISPATCHER_AUTH_SECRET'] ?? '';
-
-function dispatcherAuthHmac(tenantId: string, source: string): string {
-  return createHmac('sha256', DISPATCHER_AUTH_SECRET).update(`${tenantId}:${source}`).digest('hex');
-}
-
-function buildInvokePayload(
+// Returns null (never invokes downstream) when the shared auth secret isn't provisioned,
+// rather than sending an invoke the receiving ingest Lambda is guaranteed to reject.
+async function buildInvokePayload(
   destTenantId: string,
   destSource: string,
   destBody: string,
   destHeaders: Record<string, string | undefined>,
   destFunctionName: string,
-): { FunctionName: string; InvocationType: 'Event'; Payload: Buffer } {
+): Promise<{ FunctionName: string; InvocationType: 'Event'; Payload: Buffer } | null> {
+  const secret = await fetchDispatcherAuthSecret();
+  if (!secret) return null;
+
   return {
     FunctionName: destFunctionName,
     InvocationType: 'Event' as const,
@@ -45,7 +45,7 @@ function buildInvokePayload(
         body: destBody,
         tenantId: destTenantId,
         deliveryId: destHeaders['x-github-delivery'] ?? destHeaders['webhook-id'] ?? '',
-        authHmac: dispatcherAuthHmac(destTenantId, destSource),
+        authHmac: computeDispatcherAuthHmac(destTenantId, destSource, secret),
         eventType: extractEventType(destSource, destHeaders, destBody),
         headers: destHeaders,
       }),
@@ -151,49 +151,88 @@ function handleZoomCrc(source: string, body: unknown, secret: string): Challenge
 }
 
 export const handler: APIGatewayProxyHandlerV2 = async (event) => {
-  const source = event.pathParameters?.['source'];
-  const tenantId = event.pathParameters?.['tenant_id'];
-  if (!source) return { statusCode: 400 };
-
-  const body = event.body ?? '';
-  const headers = normalizeHeaders(event.headers);
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(body);
-  } catch {
-    parsed = null;
-  }
+    const source = event.pathParameters?.['source'];
+    const tenantId = event.pathParameters?.['tenant_id'];
+    if (!source) return { statusCode: 400 };
 
-  // Microsoft365 subscription validation: echo validationToken as text/plain (unsigned).
-  // Must happen before the EXTRACTORS check since microsoft365 has no extractor.
-  if (source === MICROSOFT365_SOURCE) {
-    const validationToken = event.queryStringParameters?.['validationToken'];
-    if (typeof validationToken === 'string' && validationToken.length > 0) {
-      return {
-        statusCode: 200,
-        headers: { 'content-type': 'text/plain' },
-        body: validationToken,
-      };
+    const body = event.body ?? '';
+    const headers = normalizeHeaders(event.headers);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      parsed = null;
     }
-  }
 
-  if (!EXTRACTORS[source] && !tenantId) return { statusCode: 400 };
-
-  // Check verification challenges BEFORE signature verification (Slack, Notion handshake)
-  if (isVerificationChallenge(source, parsed, headers)) {
-    const response = handleVerificationChallenge(source, parsed);
-    if (response) {
-      return {
-        statusCode: 200,
-        headers: { 'content-type': response.contentType },
-        body: response.body,
-      };
+    // Microsoft365 subscription validation: echo validationToken as text/plain (unsigned).
+    // Must happen before the EXTRACTORS check since microsoft365 has no extractor.
+    if (source === MICROSOFT365_SOURCE) {
+      const validationToken = event.queryStringParameters?.['validationToken'];
+      if (typeof validationToken === 'string' && validationToken.length > 0) {
+        return {
+          statusCode: 200,
+          headers: { 'content-type': 'text/plain' },
+          body: validationToken,
+        };
+      }
     }
-  }
 
-  // URL-routed mode: tenantId is in the path, use per-tenant secret, skip resolveTenant()
-  if (tenantId) {
-    const secret = await fetchPerTenantSecret(tenantId, source);
+    if (!EXTRACTORS[source] && !tenantId) return { statusCode: 400 };
+
+    // Check verification challenges BEFORE signature verification (Slack, Notion handshake)
+    if (isVerificationChallenge(source, parsed, headers)) {
+      const response = handleVerificationChallenge(source, parsed);
+      if (response) {
+        return {
+          statusCode: 200,
+          headers: { 'content-type': response.contentType },
+          body: response.body,
+        };
+      }
+    }
+
+    // URL-routed mode: tenantId is in the path, use per-tenant secret, skip resolveTenant()
+    if (tenantId) {
+      const secret = await fetchPerTenantSecret(tenantId, source);
+      if (!secret) return { statusCode: 503 };
+
+      const signatureValid = verifySignature(source, headers, body, secret);
+      if (!signatureValid) return { statusCode: 401 };
+
+      // Zoom CRC: handle endpoint.url_validation AFTER signature verification
+      const zoomCrc = handleZoomCrc(source, parsed, secret);
+      if (zoomCrc) {
+        return {
+          statusCode: 200,
+          headers: { 'content-type': zoomCrc.contentType },
+          body: zoomCrc.body,
+        };
+      }
+
+      // Rate limiting (skip if RATE_LIMIT_TABLE env var is not configured)
+      const rateLimitTable = process.env['RATE_LIMIT_TABLE'];
+      if (rateLimitTable) {
+        if (!(await checkRateLimit(tenantId, source))) {
+          return { statusCode: 429 };
+        }
+      }
+
+      const invokePayload = await buildInvokePayload(
+        tenantId,
+        source,
+        body,
+        headers,
+        `${tenantId}-ingest`,
+      );
+      if (!invokePayload) return { statusCode: 503 };
+      await lambda.send(new InvokeCommand(invokePayload));
+
+      return { statusCode: 200 };
+    }
+
+    // Shared-secret mode: use shared secret for signature verification
+    const secret = await fetchSharedSecret(source);
     if (!secret) return { statusCode: 503 };
 
     const signatureValid = verifySignature(source, headers, body, secret);
@@ -209,77 +248,37 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       };
     }
 
+    const tenant = await resolveTenant(ddb, source, parsed, headers as Record<string, string>);
+    if (!tenant) return { statusCode: 401 };
+
     // Rate limiting (skip if RATE_LIMIT_TABLE env var is not configured)
     const rateLimitTable = process.env['RATE_LIMIT_TABLE'];
     if (rateLimitTable) {
-      if (!(await checkRateLimit(tenantId, source))) {
+      if (!(await checkRateLimit(tenant.orgId, source))) {
         return { statusCode: 429 };
       }
     }
 
-    const perTenantFunctionName = `${tenantId}-ingest`;
-    await lambda.send(
-      new InvokeCommand({
-        FunctionName: perTenantFunctionName,
-        InvocationType: 'Event',
-        Payload: Buffer.from(
-          JSON.stringify({
-            source,
-            body,
-            tenantId,
-            deliveryId: headers['x-github-delivery'] ?? headers['webhook-id'] ?? '',
-          }),
-        ),
-      }),
+    const invokePayload = await buildInvokePayload(
+      tenant.orgId,
+      source,
+      body,
+      headers,
+      `${tenant.orgId}-ingest`,
     );
+    if (!invokePayload) return { statusCode: 503 };
+    await lambda.send(new InvokeCommand(invokePayload));
 
     return { statusCode: 200 };
+  } catch (err) {
+    const source = event.pathParameters?.['source'] ?? 'unknown';
+    console.error(
+      JSON.stringify({
+        msg: 'dispatcher: unhandled error',
+        source,
+        errorName: err instanceof Error ? err.name : typeof err,
+      }),
+    );
+    return { statusCode: 500 };
   }
-
-  // Shared-secret mode: use shared secret for signature verification
-  const secret = await fetchSharedSecret(source);
-  if (!secret) return { statusCode: 503 };
-
-  const signatureValid = verifySignature(source, headers, body, secret);
-  if (!signatureValid) return { statusCode: 401 };
-
-  // Zoom CRC: handle endpoint.url_validation AFTER signature verification
-  const zoomCrc = handleZoomCrc(source, parsed, secret);
-  if (zoomCrc) {
-    return {
-      statusCode: 200,
-      headers: { 'content-type': zoomCrc.contentType },
-      body: zoomCrc.body,
-    };
-  }
-
-  const tenant = await resolveTenant(ddb, source, parsed, headers as Record<string, string>);
-  if (!tenant) return { statusCode: 401 };
-
-  // Rate limiting (skip if RATE_LIMIT_TABLE env var is not configured)
-  const rateLimitTable = process.env['RATE_LIMIT_TABLE'];
-  if (rateLimitTable) {
-    if (!(await checkRateLimit(tenant.orgId, source))) {
-      return { statusCode: 429 };
-    }
-  }
-
-  const perTenantFunctionName = `${tenant.orgId}-ingest`;
-  await lambda.send(
-    new InvokeCommand({
-      FunctionName: perTenantFunctionName,
-      InvocationType: 'Event',
-      Payload: Buffer.from(
-        JSON.stringify({
-          source,
-          body,
-          tenantId: tenant.orgId,
-          deliveryId: headers['x-github-delivery'] ?? headers['webhook-id'] ?? '',
-          authHmac: dispatcherAuthHmac(tenant.orgId, source),
-        }),
-      ),
-    }),
-  );
-
-  return { statusCode: 200 };
 };

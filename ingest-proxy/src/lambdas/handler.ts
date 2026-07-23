@@ -17,6 +17,7 @@ import {
 } from 'crypto';
 import type { APIGatewayProxyHandlerV2 } from 'aws-lambda';
 import { checkRateLimit } from '../rate-limiter.js';
+import { fetchDispatcherAuthSecret, computeDispatcherAuthHmac } from '../dispatcher-auth.js';
 
 const ssm = new SSMClient({});
 const sqs = new SQSClient({});
@@ -911,11 +912,13 @@ export interface DispatcherEvent {
 export async function handleDispatcherInvoke(
   event: DispatcherEvent,
 ): Promise<{ statusCode: number }> {
-  const authSecret = process.env['DISPATCHER_AUTH_SECRET'] ?? '';
+  const authSecret = await fetchDispatcherAuthSecret();
   if (!authSecret) return { statusCode: 401 };
 
-  const expectedPayload = `${event.tenantId}:${event.source}`;
-  const expectedHmac = createHmac('sha256', authSecret).update(expectedPayload).digest();
+  const expectedHmac = Buffer.from(
+    computeDispatcherAuthHmac(event.tenantId, event.source, authSecret),
+    'hex',
+  );
 
   const provided = Buffer.from(event.authHmac, 'hex');
   if (provided.length !== expectedHmac.length || !timingSafeEqual(provided, expectedHmac)) {
