@@ -296,7 +296,11 @@ async function writeIdleFlag(idle: boolean): Promise<void> {
         Overwrite: true,
       }),
     )
-    .catch(() => {}); // non-fatal — parent timer will catch next cycle
+    .catch((err) =>
+      console.error('shutdown: non-fatal', {
+        reason: err instanceof Error ? err.message : String(err),
+      }),
+    ); // non-fatal — parent timer will catch next cycle
 }
 
 const router = new TenantMessageRouter({
@@ -342,10 +346,23 @@ async function shutdown(): Promise<void> {
   // Quiesce synthesis (await the in-flight op) and shred its theme indices + LLM-cache RAM fronts
   // before the final save, so no synth runs concurrently with it (§2.2 pt 5).
   if (synthesisConsumer)
-    await synthesisConsumer.dispose(SHUTDOWN_QUIESCE_TIMEOUT_MS).catch(() => {});
+    await synthesisConsumer.dispose(SHUTDOWN_QUIESCE_TIMEOUT_MS).catch((err) =>
+      logger.error('shutdown: non-fatal', {
+        reason: err instanceof Error ? err.message : String(err),
+      }),
+    );
   await saveAllTenantIndices(registry.all(), s3, PROCESSED_OUTPUTS_BUCKET, logger);
-  if (apiContainer) await apiContainer.close().catch(() => {});
-  await haltCache.close().catch(() => {});
+  if (apiContainer)
+    await apiContainer.close().catch((err) =>
+      logger.error('shutdown: non-fatal', {
+        reason: err instanceof Error ? err.message : String(err),
+      }),
+    );
+  await haltCache.close().catch((err) =>
+    logger.error('shutdown: non-fatal', {
+      reason: err instanceof Error ? err.message : String(err),
+    }),
+  );
   process.exit(0);
 }
 
