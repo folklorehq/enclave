@@ -268,7 +268,9 @@ try {
   logger.error('BOX_API_DEGRADED', { err });
 }
 
-new BoxServer(apiContainer?.app.fetch).start();
+// The API container is the single source of the collab port it binds; absent it, there is none to reach.
+const boxServer = new BoxServer(apiContainer?.app.fetch, { collabPort: apiContainer?.collabPort });
+await boxServer.start().catch((err) => logger.error('BOX_SERVER_START_FAILED', { err }));
 
 // One consumer serves every assigned tenant: it resolves each request's keyring/crypto from the
 // message's own orgId (§4.2/§2.2), so wiki + theme synthesis run for the whole pool, not just N=1.
@@ -351,6 +353,11 @@ async function shutdown(): Promise<void> {
         reason: err instanceof Error ? err.message : String(err),
       }),
     );
+  await boxServer.close().catch((err) =>
+    logger.error('shutdown: non-fatal', {
+      reason: err instanceof Error ? err.message : String(err),
+    }),
+  );
   await saveAllTenantIndices(registry.all(), s3, PROCESSED_OUTPUTS_BUCKET, logger);
   if (apiContainer)
     await apiContainer.close().catch((err) =>
