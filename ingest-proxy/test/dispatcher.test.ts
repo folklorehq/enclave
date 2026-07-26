@@ -194,3 +194,34 @@ describe('dispatcher — shared-secret mode', () => {
     expect(mockLambdaSend).not.toHaveBeenCalled();
   });
 });
+
+describe('dispatcher — secret-fetch failures are observable', () => {
+  it('logs a content-free record when the per-tenant SSM read is denied', async () => {
+    mockSsmSend.mockImplementation(async () => {
+      throw Object.assign(new Error('is not authorized to perform: ssm:GetParameter'), {
+        name: 'AccessDeniedException',
+      });
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { handler } = await import('../src/dispatcher.js');
+    const body = JSON.stringify({ action: 'push' });
+    const event = makeEvent(TEST_TENANT, TEST_SOURCE, body, {
+      'x-hub-signature-256': githubSig(body, 'irrelevant'),
+    });
+
+    const result = await handler(event as never, {} as never, vi.fn());
+
+    expect(result).toMatchObject({ statusCode: 503 });
+    const logged = errorSpy.mock.calls.map(([line]) => String(line));
+    const entry = logged.find((line) => line.includes('webhook secret fetch failed'));
+    expect(entry).toBeDefined();
+    expect(JSON.parse(entry!)).toMatchObject({
+      scope: 'per-tenant',
+      source: TEST_SOURCE,
+      tenantId: TEST_TENANT,
+      errorName: 'AccessDeniedException',
+    });
+    expect(entry).not.toContain(body);
+    errorSpy.mockRestore();
+  });
+});

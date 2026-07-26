@@ -53,6 +53,25 @@ async function buildInvokePayload(
   };
 }
 
+// A denied read and an unprovisioned secret both collapse to the same 503, so without this an IAM
+// misgrant is silently indistinguishable from normal unprovisioned state (ADL #18: names, no body).
+function logSecretFetchFailure(
+  scope: string,
+  source: string,
+  err: unknown,
+  tenantId?: string,
+): void {
+  console.error(
+    JSON.stringify({
+      msg: 'dispatcher: webhook secret fetch failed',
+      scope,
+      source,
+      ...(tenantId ? { tenantId } : {}),
+      errorName: err instanceof Error ? err.name : typeof err,
+    }),
+  );
+}
+
 async function fetchSharedSecret(source: string): Promise<string | null> {
   const cached = secretCache.get(source);
   if (cached && Date.now() < cached.expiresAt) return cached.secret;
@@ -69,7 +88,8 @@ async function fetchSharedSecret(source: string): Promise<string | null> {
       secretCache.set(source, { secret, expiresAt: Date.now() + CACHE_TTL_MS });
     }
     return secret;
-  } catch {
+  } catch (err) {
+    logSecretFetchFailure('shared', source, err);
     return null;
   }
 }
@@ -91,7 +111,8 @@ async function fetchPerTenantSecret(tenantId: string, source: string): Promise<s
       secretCache.set(cacheKey, { secret, expiresAt: Date.now() + CACHE_TTL_MS });
     }
     return secret;
-  } catch {
+  } catch (err) {
+    logSecretFetchFailure('per-tenant', source, err, tenantId);
     return null;
   }
 }
