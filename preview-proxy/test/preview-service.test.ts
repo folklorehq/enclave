@@ -1,9 +1,9 @@
 import { createServer, type Server } from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { assertPublicIp, SsrfBlockedError } from '../src/ssrf.js';
-import { SsrfSafeFetcher, type DnsLookup } from '../src/preview-fetch.js';
-import { PreviewService } from '../src/preview-service.js';
-import { RateLimiter } from '../src/rate-limiter.js';
+import { SsrfSafeFetcher, type DnsLookup } from '../src/SsrfSafeFetcher.js';
+import { PreviewService } from '../src/services/PreviewService.js';
+import { RateLimiter } from '../src/RateLimiter.js';
 import { handlePreviewRequest } from '../src/handler.js';
 
 const OG_HTML = `<head>

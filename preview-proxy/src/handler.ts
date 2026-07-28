@@ -1,6 +1,6 @@
 import { previewRequestSchema, previewResponseSchema } from '@folklore/contracts';
-import type { PreviewService } from './preview-service.js';
-import type { RateLimiter } from './rate-limiter.js';
+import type { PreviewService } from './services/PreviewService.js';
+import type { RateLimiter } from './RateLimiter.js';
 
 export interface HttpReply {
   status: number;

@@ -14,8 +14,8 @@ import {
   CachedInference,
   LLM_CACHE_PROMPT_VERSION,
   type InferenceModel,
-} from '../inference/cached-inference.js';
-import { S3LlmCache } from '../inference/s3-llm-cache.js';
+} from '../inference/CachedInference.js';
+import { S3LlmCache } from '../inference/S3LlmCache.js';
 import { TenantContext } from './tenant-context.js';
 
 export interface TenantIdentity {

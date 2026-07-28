@@ -1,6 +1,6 @@
 import { type Command, Ed25519CommandAuthorizer } from '@folklore/control-plane';
 import { resealForSharedParamsSchema } from '@folklore/contracts';
-import { resealMasterKey, type ResealDeps } from '../sealing/reseal.js';
+import { resealMasterKey, type ResealDeps } from '../../sealing/reseal.js';
 
 export interface ResealForSharedHandlerDeps {
   authorizer: Ed25519CommandAuthorizer;

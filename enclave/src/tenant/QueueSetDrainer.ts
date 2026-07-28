@@ -9,8 +9,8 @@ import {
 import type { Logger } from '@folklore/core';
 import type { ProcessedFact } from '../pipeline/index.js';
 import type { PullCompleteSignal } from '../pull/pull-runner.js';
-import { HALT_POLL_INTERVAL_MS, type HaltGate } from '../control/halt-gate.js';
-import { DurableAckBatch } from '../ingest/durable-ack-batch.js';
+import { HALT_POLL_INTERVAL_MS, type HaltGate } from '../control/HaltGate.js';
+import { DurableAckBatch } from '../ingest/DurableAckBatch.js';
 import type { RoutableMessage, TenantMessageRouter } from './tenant-message-router.js';
 
 // SQS long-poll budget shared across the assigned queues so a full sweep of N queues costs roughly

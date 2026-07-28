@@ -7,7 +7,7 @@ import {
   type ToolSpec,
 } from '@folklore/inference';
 import { createTelemetryClient, type TelemetryClient } from '@folklore/telemetry';
-import type { InferenceModel } from './cached-inference.js';
+import type { InferenceModel } from './CachedInference.js';
 
 const PROXY_PORT = process.env['VSOCK_INFERENCE_PROXY_PORT'] ?? '';
 export const EMBED_MODEL = process.env['EMBED_MODEL'] ?? 'qwen/qwen3-embedding-8b';

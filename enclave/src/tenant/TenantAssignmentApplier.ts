@@ -1,9 +1,9 @@
 import type { Logger } from '@folklore/core';
 import type { TenantAssignment } from '@folklore/contracts';
 import type { TenantContext } from './tenant-context.js';
-import type { TenantIdentity } from './tenant-context-factory.js';
+import type { TenantIdentity } from './TenantContextFactory.js';
 import type { TenantRegistry } from './tenant-registry.js';
-import type { QueueAssignment } from './queue-set-drainer.js';
+import type { QueueAssignment } from './QueueSetDrainer.js';
 
 export type BuildTenantContext = (identity: TenantIdentity) => Promise<TenantContext>;
 
