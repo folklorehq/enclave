@@ -1,6 +1,6 @@
 import { isIP } from 'node:net';
 
-// SSRF egress guard (ADL #54). The only address class we allow the proxy to connect to
+// SSRF egress guard. The only address class we allow the proxy to connect to
 // is public unicast; every private / loopback / link-local / CGNAT / metadata / multicast
 // / reserved range — v4, v6, and v4-embedded-in-v6 — is refused before a socket opens.
 

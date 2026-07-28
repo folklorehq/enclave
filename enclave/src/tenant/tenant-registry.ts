@@ -1,6 +1,6 @@
 import type { TenantContext } from './tenant-context.js';
 
-// Content-free (ADL #18): a tenant id is a content-free identifier, never customer data.
+// Content-free: a tenant id is a content-free identifier, never customer data.
 export class UnknownTenantError extends Error {
   constructor(readonly tenantId: string) {
     super(`no tenant context assigned for ${tenantId}`);

@@ -41,14 +41,14 @@ const SIGNABLE_SOURCES = new Set([
   'zoom_bot',
 ]);
 
-// SES inbound (ADL #66): mail arrives via SNS, not a provider HMAC. Authenticity rests on the AWS SNS
+// SES inbound: mail arrives via SNS, not a provider HMAC. Authenticity rests on the AWS SNS
 // message signature; tenant routing rests on the unguessable per-tenant alias (SES receipt rule) plus
 // this global allowlist of Folklore-owned inbound topic ARNs (proves "our pipeline", not "tenant B").
 const EMAIL_SOURCE = 'email';
 const EMAIL_TOPIC_ARN_PARAM = '/folklore/email-inbound/sns-topic-arn';
 // A validly-signed SES notification proves "our pipeline" but not "this tenant": bind delivery to the
 // SNS-signed recipient alias `ingest+<token>@<domain>` and confirm token→tenant equals the URL path,
-// or fail closed — otherwise tenant A's mail POSTed to tenant B's path seals under B's key (ADL #12).
+// or fail closed — otherwise tenant A's mail POSTed to tenant B's path seals under B's key.
 const EMAIL_INBOUND_ALIAS_TABLE_ENV = 'EMAIL_INBOUND_ALIAS_TABLE';
 const EMAIL_INBOUND_DOMAIN_ENV = 'EMAIL_INBOUND_DOMAIN';
 const EMAIL_ALIAS_LOCAL_PREFIX = 'ingest+';
@@ -574,7 +574,7 @@ function providerDeliveryId(
       }
     }
     case EMAIL_SOURCE: {
-      // The RFC Message-ID is the dedup key (ADL #66); the SES message id is the fallback.
+      // The RFC Message-ID is the dedup key; the SES message id is the fallback.
       try {
         const mail = (
           JSON.parse(body) as {
@@ -788,7 +788,7 @@ async function resolveAliasTenant(table: string, token: string): Promise<string 
   return out.Item?.['tenantId']?.S ?? null;
 }
 
-// Cryptographic tenant binding (ADL #12/#66): resolve the SNS-signed recipient alias to a tenant and
+// Cryptographic tenant binding: resolve the SNS-signed recipient alias to a tenant and
 // require it to equal the URL-path tenant. Missing config, foreign/empty token, or an unknown alias
 // fail closed (reject → 401); only a transient DynamoDB error is retryable (error → 503).
 async function bindRecipientAlias(tenantId: string, notification: string): Promise<AliasBinding> {
@@ -817,7 +817,7 @@ function snsTimestampFresh(ts: string | undefined, toleranceS: number): boolean 
 
 // SES inbound: authenticate the SNS delivery (signature + Folklore-owned topic), then seal only the
 // SES notification (the SNS envelope is transport). No email body reaches a log, error, or SQS in
-// plaintext — it is ECIES-sealed exactly like every other connector (ADL #12/#42/#66).
+// plaintext — it is ECIES-sealed exactly like every other connector.
 async function handleEmailInbound(tenantId: string, body: string): Promise<ChallengeOrStatus> {
   const msg = parseSnsEnvelope(body);
   if (!msg) return { statusCode: 400 };
@@ -837,7 +837,7 @@ async function handleEmailInbound(tenantId: string, body: string): Promise<Chall
   const notification = msg.Message ?? '';
 
   // Bind the delivery to the SNS-signed recipient alias BEFORE sealing — a valid signature + allowed
-  // topic is not enough; the resolved tenant must equal the URL path or we fail closed (ADL #12/#66).
+  // topic is not enough; the resolved tenant must equal the URL path or we fail closed.
   const binding = await bindRecipientAlias(tenantId, notification);
   if (binding.status === 'error') return { statusCode: 503 };
   if (binding.status !== 'match') return { statusCode: 401 };
@@ -908,7 +908,7 @@ export interface DispatcherEvent {
   authHmac: string;
 }
 
-// HMAC-guarded dispatcher invoke (ADL #12/#41): only the dispatcher with the shared secret can invoke.
+// HMAC-guarded dispatcher invoke: only the dispatcher with the shared secret can invoke.
 export async function handleDispatcherInvoke(
   event: DispatcherEvent,
 ): Promise<{ statusCode: number }> {
@@ -973,7 +973,7 @@ async function handleUrlRouted(
   const body = event.body ?? '';
   const headers = normalizeHeaders(event.headers);
 
-  // SES inbound (ADL #66) is verified by AWS SNS signature, not a provider HMAC — its own path.
+  // SES inbound is verified by AWS SNS signature, not a provider HMAC — its own path.
   if (source === EMAIL_SOURCE) return handleEmailInbound(tenantId, body);
 
   // ACK Notion's unsigned subscription handshake (it carries only the verification_token, which the

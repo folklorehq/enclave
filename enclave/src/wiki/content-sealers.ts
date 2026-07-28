@@ -11,7 +11,7 @@ import type { ResolveTenant } from '../tenant/tenant-resolver.js';
 
 const UNSEAL_FAILED_EVENT = 'WIKI_UNSEAL_FAILED';
 
-// ADL #12: human-authored wiki prose at rest (live-collab snapshots, comments, feedback
+// human-authored wiki prose at rest (live-collab snapshots, comments, feedback
 // corrections) is sealed to the same key as wiki blocks and unsealed only in-enclave. The keyring
 // is selected per request from the ref's orgId (shared-tier design §4.2), so one tenant's blob is
 // only ever opened under its own key. A relocated/legacy/cross-tenant blob fails the AAD check and
@@ -32,7 +32,7 @@ abstract class EnclaveSealerBase {
     }
   }
 
-  // Content-free (ADL #12/#18): the error class/code only — never the message or plaintext — lets
+  // Content-free: the error class/code only — never the message or plaintext — lets
   // operators tell a genuine AAD-mismatch integrity event from a transient/infra (e.g. KMS) blip.
   private logUnsealFailure(err: unknown): void {
     const integrity = err instanceof EncryptionContextMismatchError;

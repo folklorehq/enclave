@@ -1,4 +1,4 @@
-// Customer-sole-holder recovery (ADL #55): the master-key BIP39 mnemonic is sealed to a
+// Customer-sole-holder recovery: the master-key BIP39 mnemonic is sealed to a
 // customer-provided X25519 public key so Folklore stores only ciphertext it cannot open.
 // Domain-separated from ingest (`folklore-recovery-v1:`) so a recovery box is never
 // interchangeable with an ingest payload. Scheme mirrors enclave/src/ingest/receiver.ts.
@@ -52,7 +52,7 @@ export function parseRecoveryPublicKey(hex: string): KeyObject {
   });
 }
 
-// Fail closed (ADL #55): no tenant may hold data with zero recovery path.
+// Fail closed: no tenant may hold data with zero recovery path.
 export function assertRecoveryConfigured(hex: string): KeyObject {
   if (!hex) {
     throw new Error(

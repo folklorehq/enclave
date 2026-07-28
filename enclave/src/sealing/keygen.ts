@@ -10,7 +10,7 @@ export function deriveKey(masterKey: Buffer, purpose: string, length = 32): Buff
   return Buffer.from(hkdfSync('sha256', masterKey, Buffer.alloc(0), purpose, length));
 }
 
-// BIP39 24-word recovery phrase; sealed to the customer's key at first boot, never held by Folklore (ADL #55).
+// BIP39 24-word recovery phrase; sealed to the customer's key at first boot, never held by Folklore.
 export function deriveMnemonic(masterKey: Buffer): string {
   // BIP39 requires exactly 256 bits (32 bytes) of entropy for a 24-word mnemonic.
   return entropyToMnemonic(masterKey.toString('hex'));

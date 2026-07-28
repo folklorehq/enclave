@@ -2,7 +2,7 @@ import { previewResponseSchema, type LinkPreview } from '@folklore/contracts';
 
 // The embed URL lives inside the encrypted wiki block, so only the enclave can read it.
 // The enclave has no arbitrary egress: it asks the parent-EC2 egress proxy (over vsock)
-// to fetch + SSRF-vet + parse the URL, and gets back only bounded preview fields (ADL #54).
+// to fetch + SSRF-vet + parse the URL, and gets back only bounded preview fields.
 const PROXY_PORT = process.env['VSOCK_PREVIEW_PROXY_PORT'] ?? '';
 const TIMEOUT_MS = Number(process.env['PREVIEW_PROXY_TIMEOUT_MS'] ?? '6000');
 const PREVIEW_PATH = '/preview';

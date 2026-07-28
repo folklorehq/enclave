@@ -9,7 +9,7 @@ export interface ResealForSharedHandlerDeps {
   resolveTenantCmk: (tenantId: string) => string | undefined;
 }
 
-// Re-verifies the deployment-bound Ed25519 quorum (ADL #13/#61) before re-sealing, so a quorum signed for another box or with swapped params cannot re-bind this tenant's key.
+// Re-verifies the deployment-bound Ed25519 quorum before re-sealing, so a quorum signed for another box or with swapped params cannot re-bind this tenant's key.
 // Not yet wired into an enclave command-dispatch path — no live caller reaches it.
 export class ResealForSharedHandler {
   constructor(private readonly deps: ResealForSharedHandlerDeps) {}
@@ -25,7 +25,7 @@ export class ResealForSharedHandler {
     const kmsKeyId = this.deps.resolveTenantCmk(params.tenantId);
     if (!kmsKeyId) throw new Error('reseal-for-shared: tenant not assigned to this enclave');
 
-    // ADL #61: the per-tenant CMK is unchanged; re-seal under the same key + tenant AAD so a pool
+    // the per-tenant CMK is unchanged; re-seal under the same key + tenant AAD so a pool
     // enclave (same PCR0) can unseal it. The pool-role KMS grant is an infra op outside the enclave.
     await resealMasterKey(this.deps.reseal, {
       tenantId: params.tenantId,

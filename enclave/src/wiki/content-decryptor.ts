@@ -1,7 +1,7 @@
 import type { EncryptedBlockBody, WikiBlockContentRef, WikiContentDecryptor } from '@folklore/api';
 import type { ResolveTenant } from '../tenant/tenant-resolver.js';
 
-// ADL #12: derived knowledge is decrypted only here, inside the enclave. The API read
+// derived knowledge is decrypted only here, inside the enclave. The API read
 // path has already run the audience gate on cleartext metadata; this turns a visible
 // block's ciphertext body back into its object. The keyring is selected per request from
 // `ref.orgId` (shared-tier design §4.2), so one tenant's block is only ever opened under its

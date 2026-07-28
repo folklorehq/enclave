@@ -1,7 +1,7 @@
 import type { WikiEditSealer, WikiEditSealRef } from '@folklore/api';
 import type { ResolveTenant } from '../tenant/tenant-resolver.js';
 
-// ADL #12/#45: the before/after prose of a mined edit is sealed to the same key as wiki blocks,
+// the before/after prose of a mined edit is sealed to the same key as wiki blocks,
 // bound to (org, theme, audience, blockType) in a distinct `edit-delta:` namespace so a delta
 // ciphertext can never be served through the block read path. The keyring is selected per request
 // from `ref.orgId` (shared-tier design §4.2). Sealed + unsealed only in-enclave.

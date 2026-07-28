@@ -1,6 +1,6 @@
 import type { Cache, Logger } from '@folklore/core';
 
-/** Redis key the operator break-glass halt command sets/clears (ADL #13). */
+/** Redis key the operator break-glass halt command sets/clears. */
 export function haltKey(deploymentId: string): string {
   return `control:halt:${deploymentId}`;
 }
@@ -17,7 +17,7 @@ const HALT_READ_MAX_ATTEMPTS = 3;
 
 // Fails toward halted: both flags are read straight from Redis every cycle (never
 // cached) and an unreadable flag refuses to process, so a rogue box cannot keep
-// decrypting past a halt (ADL #13). Halted when EITHER the operator or the billing
+// decrypting past a halt. Halted when EITHER the operator or the billing
 // flag is set.
 export class HaltGate {
   private readonly keys: readonly string[];

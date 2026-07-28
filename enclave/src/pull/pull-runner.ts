@@ -1,4 +1,4 @@
-/** Drives one connector pull() pass entirely inside the enclave (ADL #42) — plaintext never leaves the enclave. */
+/** Drives one connector pull() pass entirely inside the enclave — plaintext never leaves the enclave. */
 import type { KeyObject } from 'node:crypto';
 import { GetParameterCommand, PutParameterCommand, type SSMClient } from '@aws-sdk/client-ssm';
 import type { Logger } from '@folklore/core';
@@ -21,7 +21,7 @@ import { fetchGitHubInstallationToken } from './github-token-client.js';
 
 export type { PullDueMessage };
 
-// Content-free completion signal the worker uses to advance sync health (ADL #38); the
+// Content-free completion signal the worker uses to advance sync health; the
 // enclave has no DB access, so this is how last_successful_sync_at gets written worker-side.
 export interface PullCompleteSignal {
   type: 'pull-complete';
@@ -44,7 +44,7 @@ export function buildPullCompleteSignal(
   };
 }
 
-// ADL #29: the enclave (not the worker signal) owns the uniform 12-month backfill horizon,
+// the enclave (not the worker signal) owns the uniform 12-month backfill horizon,
 // so no wire message can widen how far back a pull reaches.
 const BACKFILL_WINDOW_MONTHS = 12;
 
@@ -126,7 +126,7 @@ export interface SourceTokenContext {
   privateKey: KeyObject;
 }
 
-// GitHub is a GitHub App: the enclave never holds the App private key (S1, ADL #42). It requests a
+// GitHub is a GitHub App: the enclave never holds the App private key (S1). It requests a
 // short-lived installation token from the control plane, which scopes it to this deployment's own
 // installation. Other kinds carry a bearer token in the decrypted connection.
 export async function resolveSourceToken(
@@ -147,7 +147,7 @@ export async function resolveSourceToken(
 
 // Every client here MUST egress via the proxy — either the global undici dispatcher
 // (fetch-based SDKs) or an explicit agent (axios/node:http SDKs like Slack), else its
-// pull dials the internet directly and fails closed on real hardware (ADL #42).
+// pull dials the internet directly and fails closed on real hardware.
 export function buildConnector(kind: string, token: string): Connector | null {
   const deps: PullConnectorDeps = {
     logger: consoleLogger,

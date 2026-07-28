@@ -19,15 +19,15 @@ export interface FactBodyRef {
 }
 
 // A live-editing Yjs snapshot is the full current wiki prose; sealed to the fact key, bound to
-// (org, page) so a snapshot relocated to another page fails to decrypt (ADL #12). Not bound to
-// theme: a page's theme can be rewritten (ADL #56 merge/aggregation), which must not orphan it.
+// (org, page) so a snapshot relocated to another page fails to decrypt. Not bound to
+// theme: a page's theme can be rewritten, which must not orphan it.
 export interface CollabSnapshotRef {
   orgId: string;
   pageId: string;
 }
 
 // Wiki comment prose is customer content, sealed bound to (org, page, field) so a body relocated
-// to another page — or an anchor excerpt swapped for a reply body — fails to decrypt (ADL #12).
+// to another page — or an anchor excerpt swapped for a reply body — fails to decrypt.
 export interface WikiCommentRef {
   orgId: string;
   pageId: string;
@@ -35,7 +35,7 @@ export interface WikiCommentRef {
 }
 
 // A human-written AI-feedback correction is raw wiki prose, sealed bound to (org, block) so a
-// correction relocated to another block fails to decrypt (ADL #12/#45).
+// correction relocated to another block fails to decrypt.
 export interface WikiFeedbackRef {
   orgId: string;
   blockId: string;
@@ -43,13 +43,13 @@ export interface WikiFeedbackRef {
 
 // Content-addressed LLM-output cache (determinism #1): outputs are decrypted-content-derived, so
 // the blob is sealed to the fact key bound to (org, cacheKey) — the cacheKey is the content-hash S3
-// suffix, so a blob relocated/overwritten onto another key fails to decrypt (ADL #12).
+// suffix, so a blob relocated/overwritten onto another key fails to decrypt.
 export interface LlmCacheRef {
   orgId: string;
   cacheKey: string;
 }
 
-// Derived-knowledge (ADL #12) is encrypted to the same key as fact bodies, but
+// Derived-knowledge is encrypted to the same key as fact bodies, but
 // bound to its own row identity: the article to (org, theme, audience), each block
 // to (org, theme, audience, blockType). `audienceKey` normalizes the all-members
 // null so encrypt and read reconstruct the same context.
@@ -65,7 +65,7 @@ export interface WikiBlockRef extends WikiArticleRef {
 
 // A cross-theme team-onboarding page is derived knowledge with no owning theme, so it binds to
 // (org, team, audience) — a distinct purpose from wiki-article so a body cannot be relocated
-// between a theme page and a team page (ADL #12/#68).
+// between a theme page and a team page.
 export interface TeamOnboardingArticleRef {
   orgId: string;
   teamId: string;
@@ -81,7 +81,7 @@ function audienceKey(audienceId: string | null): string {
 }
 
 // Decrypt succeeded but the bound row identity didn't match — a ciphertext relocated to another
-// row (ADL #12/#34). Distinct from an infra/KMS decrypt failure so callers can tell an integrity
+// row. Distinct from an infra/KMS decrypt failure so callers can tell an integrity
 // event from a transient hiccup.
 export class EncryptionContextMismatchError extends Error {
   constructor(purpose: string) {
@@ -92,7 +92,7 @@ export class EncryptionContextMismatchError extends Error {
 
 // The enclave's single ESDK surface. Every ciphertext binds its row identity into
 // the encryption context (AAD); every decrypt verifies it, so a ciphertext copied
-// to a different row is rejected rather than served into the wrong one (ADL #12/#34).
+// to a different row is rejected rather than served into the wrong one.
 // One place to audit crypto for the public mirror.
 export class EnclaveCrypto {
   constructor(private readonly keyring: KmsKeyringNode) {}

@@ -22,7 +22,7 @@ export interface ExportTargetRecord {
   themeId: string;
   kind: WikiExportTargetKind;
   ceiling: ExportCeiling;
-  // ADL #65 — the ONE audience an above-public export materializes (option B); null = public/all.
+  // the ONE audience an above-public export materializes (option B); null = public/all.
   audienceId: string | null;
   acknowledgedAbovePublic: boolean;
   workspaceRef: string;
@@ -34,7 +34,7 @@ export interface ExportPageSource {
   title: string;
   audienceId: string | null;
   blocks: StoredBlock[];
-  /** ADL #49 grant-gate input — the theme's owning department + team. */
+  /** grant-gate input — the theme's owning department + team. */
   owner: ExportThemeOwner;
   /** The target audience's resolved read access, for a non-public ceiling (option B); null = public/unresolved. */
   audienceAccess?: AudienceAccess | null;
@@ -45,7 +45,7 @@ export interface ExportPageSource {
 /** In-enclave reads over the tenant DB proxy — the same content-free metadata + ciphertext the read path loads. */
 export interface WikiExportReader {
   loadTarget(orgId: string, targetId: string): Promise<ExportTargetRecord | null>;
-  // audienceId resolves the target audience's access for a non-public ceiling (option B, ADL #65).
+  // audienceId resolves the target audience's access for a non-public ceiling (option B).
   loadPage(
     orgId: string,
     themeId: string,
@@ -53,7 +53,7 @@ export interface WikiExportReader {
   ): Promise<ExportPageSource | null>;
 }
 
-/** Resolves the ECIES-sealed destination token to plaintext, in-enclave only (ADL #42). Never returns to the worker. */
+/** Resolves the ECIES-sealed destination token to plaintext, in-enclave only. Never returns to the worker. */
 export interface ExportTokenProvider {
   resolveToken(orgId: string, targetId: string, kind: WikiExportTargetKind): Promise<string | null>;
 }
@@ -74,7 +74,7 @@ function isEncryptedBody(body: unknown): body is EncryptedBlockBody {
   );
 }
 
-/** Runs one content-free `export-due` signal end to end, in-enclave (ADL #65). Null = nothing written. */
+/** Runs one content-free `export-due` signal end to end, in-enclave. Null = nothing written. */
 export async function runExport(
   message: ExportDueMessage,
   deps: ExportRunnerDeps,
@@ -84,7 +84,7 @@ export async function runExport(
   if (!target) return null;
 
   // Fail closed: above-public is a one-way declassification that must carry the logged, DB-persisted
-  // acknowledgement — never trust the wire, and never export above public without it (ADL #65).
+  // acknowledgement — never trust the wire, and never export above public without it.
   if (target.ceiling !== 'public' && !target.acknowledgedAbovePublic) return null;
 
   const page = await deps.reader.loadPage(orgId, target.themeId, target.audienceId);
@@ -112,10 +112,10 @@ export async function runExport(
     redactOptions: page.internalNames ? { names: page.internalNames } : {},
   });
 
-  // Null projection = the theme is hidden to this export's audience (owner grant gate, ADL #49).
+  // Null projection = the theme is hidden to this export's audience (owner grant gate).
   if (!projected) return null;
 
-  // Re-export gate (ADL #65 sync semantics): skip the push when the projection is byte-identical.
+  // Re-export gate: skip the push when the projection is byte-identical.
   if (projected.contentHash === target.lastContentHash) return null;
 
   const client = (deps.buildClient ?? buildExportClient)(target.kind, token);
