@@ -1,4 +1,4 @@
-/** Fetches encrypted source-connection tokens from the control plane and decrypts them in-enclave (ADL #42) — the control plane only ever holds ciphertext. */
+/** Fetches encrypted source-connection tokens from the control plane and decrypts them in-enclave — the control plane only ever holds ciphertext. */
 import type { KeyObject } from 'node:crypto';
 import { decryptPayload, type EncryptedPayload } from '../ingest/receiver.js';
 

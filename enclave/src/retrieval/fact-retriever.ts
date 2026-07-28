@@ -27,7 +27,7 @@ export interface GatedFact {
   body: string;
 }
 
-// ADL #34/#6: semantic retrieval that never leaves the enclave. The query is
+// semantic retrieval that never leaves the enclave. The query is
 // embedded and matched against the in-enclave index; matches are audience-gated
 // on content-free metadata before any body is decrypted, and a body is decrypted
 // (AAD-bound to its row) only to preview a fact the caller is allowed to see.
@@ -82,7 +82,7 @@ export class EnclaveFactRetriever implements FactRetriever {
   }
 
   private isVisible(meta: FactMetadata, access: AudienceAccess): boolean {
-    // ADL #6 — sensitivity ceiling applies regardless of source-kind grant ('*' included).
+    // sensitivity ceiling applies regardless of source-kind grant ('*' included).
     if (!isSensitivityWithin(meta.sensitivityLevel, access.maxSensitivity)) return false;
     if (access.allowedSourceKinds === '*') return true;
     return access.allowedSourceKinds.has(meta.sourceKind);

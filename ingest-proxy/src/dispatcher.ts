@@ -54,7 +54,7 @@ async function buildInvokePayload(
 }
 
 // A denied read and an unprovisioned secret both collapse to the same 503, so without this an IAM
-// misgrant is silently indistinguishable from normal unprovisioned state (ADL #18: names, no body).
+// misgrant is silently indistinguishable from normal unprovisioned state.
 function logSecretFetchFailure(
   scope: string,
   source: string,

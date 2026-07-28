@@ -110,7 +110,7 @@ export class TenantContextFactory {
 
   private async firstBoot(identity: TenantIdentity): Promise<Buffer> {
     console.log('first boot — generating master key');
-    // Fail closed before generating a key we could never let the customer recover (ADL #55).
+    // Fail closed before generating a key we could never let the customer recover.
     const recoveryKey = assertRecoveryConfigured(identity.recoveryPubkey);
     const masterKey = generateMasterKey();
 

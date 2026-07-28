@@ -2,7 +2,7 @@ import { EnvHttpProxyAgent, ProxyAgent, setGlobalDispatcher } from 'undici';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 
 // Lock-step with the socat forwarder in enclave/entrypoint.sh and the vsock bridge in
-// infra/src/enclave.ts (EGRESS_PROXY_VSOCK_PORT) — one literal, three files (ADL #42).
+// infra/src/enclave.ts (EGRESS_PROXY_VSOCK_PORT) — one literal, three files.
 export const EGRESS_PROXY_PORT = 8002;
 const PROXY_URL = `http://localhost:${EGRESS_PROXY_PORT}`;
 
@@ -37,7 +37,7 @@ export function externalHttpsProxyAgent(): HttpsProxyAgent<string> {
 let exportProxyDispatcher: ProxyAgent | undefined;
 
 // A fetch bound explicitly to the CONNECT egress proxy for the outbound wiki-export clients
-// (ADL #65) — belt-and-suspenders over the global dispatcher, so the export write can never dial
+// — belt-and-suspenders over the global dispatcher, so the export write can never dial
 // a destination host directly and fails closed against the host allowlist.
 export function proxiedExportFetch(): typeof globalThis.fetch {
   const dispatcher = (exportProxyDispatcher ??= new ProxyAgent(PROXY_URL));

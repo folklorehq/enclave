@@ -16,8 +16,8 @@ const RAM_MAX_ENTRIES = 1000;
 
 // Durable, per-org LLM-output cache: ESDK-sealed in S3 exactly like `facts/`/`hnsw/`, bound to
 // (org, cacheKey) so a blob relocated to another org or overwritten onto another key fails to
-// decrypt (ADL #12). A run-local RAM LRU keyed by the org-namespaced object key fronts S3, so a
-// shared-pool instance (ADL #61) can't serve org A's value to org B even in RAM.
+// decrypt. A run-local RAM LRU keyed by the org-namespaced object key fronts S3, so a
+// shared-pool instance can't serve org A's value to org B even in RAM.
 export class S3LlmCache implements Cache {
   private readonly ram = new InProcessCache(RAM_MAX_ENTRIES);
 

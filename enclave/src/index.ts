@@ -47,7 +47,7 @@ import {
 } from '@folklore/control-plane';
 import { poolAssignmentsKey } from '@folklore/contracts';
 
-// ADL #42: route external egress through the parent CONNECT proxy — before any client is
+// route external egress through the parent CONNECT proxy — before any client is
 // built, so undici SDKs pick up the dispatcher (loopback bypasses it, keeping AWS/inference).
 installGlobalEgressDispatcher();
 
@@ -59,7 +59,7 @@ const RAW_PAYLOADS_BUCKET = process.env['RAW_PAYLOADS_BUCKET'] ?? '';
 const SYNTHESIS_REQUEST_QUEUE_URL = process.env['SYNTHESIS_REQUEST_QUEUE_URL'] ?? '';
 const TEE_API_KEY_SSM_PATH = process.env['TEE_API_KEY_SSM_PATH'] ?? '';
 const PROXY_PORT = process.env['VSOCK_KMS_PROXY_PORT'] ?? '8000';
-// ADL #42: pull transports run in-enclave. The control plane only ever hands back
+// pull transports run in-enclave. The control plane only ever hands back
 // ciphertext (source OAuth tokens ECIES-encrypted to this enclave's public key);
 // this shared deployment secret (the same one `apps/agent` uses to check in) is
 // what authenticates the enclave's fetch of those encrypted connections.
@@ -67,7 +67,7 @@ const CONTROL_PLANE_URL = process.env['CONTROL_PLANE_URL'] ?? '';
 const DEPLOYMENT_ID = process.env['DEPLOYMENT_ID'] ?? '';
 const AGENT_TOKEN_SSM_PATH = process.env['AGENT_TOKEN_SSM_PATH'] ?? '';
 // Break-glass halt flag lives in the shared Redis, reached over the in-enclave
-// vsock proxy (ADL #13, #31). Required — the enclave refuses to boot without it (see below).
+// vsock proxy. Required — the enclave refuses to boot without it (see below).
 const REDIS_URL = process.env['REDIS_URL'] ?? '';
 
 // After 15 consecutive empty long-polls (~5 min) across ALL assigned queues the enclave signals idle.
@@ -149,7 +149,7 @@ await loadAgentToken();
 // orgId not in the assigned set BEFORE any keyring is reachable. No single boot-time "box context".
 const resolveTenant = createTenantResolver(registry);
 
-// ADL #13: the break-glass halt and billing suspension gate every dequeue. Without a
+// the break-glass halt and billing suspension gate every dequeue. Without a
 // halt gate the loop would drain/decrypt fail-open, so refuse to boot rather than run ungated.
 if (!DEPLOYMENT_ID || !REDIS_URL) {
   throw new Error(
@@ -171,7 +171,7 @@ async function refreshAssignments(): Promise<void> {
     if (!manifest) return;
     await assignmentApplier.apply(parseAssignmentManifest(manifest, POOL_ID));
   } catch (err) {
-    // Log the error NAME only, never the raw error (ADL #18 — a message could echo a manifest field).
+    // Log the error NAME only, never the raw error — a message could echo manifest field values.
     // A bad/foreign manifest leaves the current assignment set untouched — fail closed, don't tear
     // down live tenants on a parse slip.
     logger.error('assignment manifest refresh failed', {
@@ -190,7 +190,7 @@ const assignmentRefreshTimer = setInterval(
   ASSIGNMENT_REFRESH_INTERVAL_MS,
 );
 
-// ADL #18: the enclave has no PostHog egress, so ops telemetry (attestation failures, receipt
+// the enclave has no PostHog egress, so ops telemetry (attestation failures, receipt
 // verifications, model-gate rejections) is buffered onto the shared Redis list the box agent
 // drains into its content-free check-in.
 const opsTelemetry = new BufferedOpsTelemetryClient(
@@ -198,11 +198,11 @@ const opsTelemetry = new BufferedOpsTelemetryClient(
 );
 setInferenceTelemetry(opsTelemetry);
 
-// ADL #31: the box API is composed and served in-process. Every /api/* request
+// the box API is composed and served in-process. Every /api/* request
 // reads decrypted content over the in-enclave Postgres proxy and never leaves.
 let apiContainer: ApiContainer | undefined;
 try {
-  // ADL #34/#6: search is served by the in-enclave retriever — embed, ANN over the loaded
+  // search is served by the in-enclave retriever — embed, ANN over the loaded
   // index, decrypt, and audience-gate, all in-process. The retriever resolves its tenant's
   // index + keyring per request from `params.orgId` (§4.2), so it serves every assigned
   // tenant from one instance without a union keyring.
@@ -213,7 +213,7 @@ try {
       s3,
       processedBucket: PROCESSED_OUTPUTS_BUCKET,
     });
-  // Content-addressed, ESDK-sealed per-org LLM cache in front of phala (determinism #1, ADL #12):
+  // Content-addressed, ESDK-sealed per-org LLM cache in front of phala (determinism #1):
   // a repeated question over an unchanged fact set replays without a fresh TEE call. Resolved PER
   // REQUEST from the answer's orgId (§4.2) — never a boot-time context — so the cache blob is sealed
   // and read under the requesting tenant's own key/orgId AAD and can't cross tenants. Memoized per
@@ -237,25 +237,25 @@ try {
     return inference;
   };
   apiContainer = createContainer({
-    // ADL #18/#35: content-touching enclave opens no data-carrying egress — box-API telemetry inert by composition, not by omitting POSTHOG_API_KEY.
+    // content-touching enclave opens no data-carrying egress — box-API telemetry inert by composition, not by omitting POSTHOG_API_KEY.
     telemetry: new NoopTelemetryClient(),
     // The box API serves reads for every assigned tenant; the verified JWT orgId must be in the
     // assigned set (else 403) — this gate runs before any handler touches a keyring (§4.2 step 2).
     isAssignedOrg: (orgId: string) => registry.has(orgId),
     retrieverFactory: buildRetriever,
-    // ADL #34/#27: grounded answers reuse the same per-request gated retrieval spine, then feed only
+    // grounded answers reuse the same per-request gated retrieval spine, then feed only
     // audience-visible decrypted bodies to the in-enclave TEE model — nothing leaves the enclave.
     // `generate` is stateless (no per-org seal), so the answer path is per-request via the retriever.
     answerServiceFactory: (retrieverDeps) =>
       new EnclaveFactAnswerer(buildRetriever(retrieverDeps), (orgId, prompt, systemPrompt) =>
         answerInferenceFor(orgId).generate(prompt, systemPrompt),
       ),
-    // ADL #12: synthesized wiki text is ciphertext at rest; the read path decrypts audience-visible
+    // synthesized wiki text is ciphertext at rest; the read path decrypts audience-visible
     // blocks here, in-enclave, over the requesting tenant's sealed key (resolved from `ref.orgId`).
     wikiContentDecryptor: new EnclaveWikiContentDecryptor(resolveTenant),
-    // ADL #12/#45: mined draft→edit prose is sealed to the requesting tenant's key, in-enclave only.
+    // mined draft→edit prose is sealed to the requesting tenant's key, in-enclave only.
     wikiEditSealer: new EnclaveWikiEditSealer(resolveTenant),
-    // ADL #12: live-collab Yjs snapshots, comments, and feedback corrections are sealed to the
+    // live-collab Yjs snapshots, comments, and feedback corrections are sealed to the
     // requesting tenant's key, in-enclave only.
     wikiSnapshotSealer: new EnclaveWikiSnapshotSealer(resolveTenant),
     wikiCommentSealer: new EnclaveWikiCommentSealer(resolveTenant),

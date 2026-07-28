@@ -57,7 +57,7 @@ export class TenantAssignmentApplier {
         try {
           await this.onTornDown(tenantId);
         } catch {
-          // Best-effort hygiene — never let an eviction slip strand the rest of the rebuild (ADL #18).
+          // Best-effort hygiene — never let an eviction slip strand the rest of the rebuild.
           this.logger.error('tenant teardown hook failed', { tenant_id: tenantId });
         }
       }
@@ -82,7 +82,7 @@ export class TenantAssignmentApplier {
         this.assigned.set(assignment.tenantId, assignment);
       } catch (err) {
         // One tenant's boot failure (KMS/S3) must not starve its co-tenants; the next refresh retries
-        // it. Log the error NAME only, never the raw error, and the content-free id (ADL #18).
+        // it. Log the error NAME only, never the raw error, and the content-free id.
         this.logger.error('tenant context build failed', {
           tenant_id: assignment.tenantId,
           error: err instanceof Error ? err.name : 'unknown',

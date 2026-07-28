@@ -1,4 +1,4 @@
-/** Requests a scoped GitHub installation token from the control plane (S1, ADL #42) — the App private key never enters the enclave, and the installation is fixed to this deployment's own by the control plane. The token arrives ECIES-sealed to this enclave's public key and is decrypted here. */
+/** Requests a scoped GitHub installation token from the control plane (S1) — the App private key never enters the enclave, and the installation is fixed to this deployment's own by the control plane. The token arrives ECIES-sealed to this enclave's public key and is decrypted here. */
 import type { KeyObject } from 'node:crypto';
 import type { EncryptedInstallationToken } from '@folklore/contracts/enclave';
 import { decryptPayload, type EncryptedPayload } from '../ingest/receiver.js';

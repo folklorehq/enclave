@@ -13,12 +13,12 @@ const PROXY_PORT = process.env['VSOCK_INFERENCE_PROXY_PORT'] ?? '';
 export const EMBED_MODEL = process.env['EMBED_MODEL'] ?? 'qwen/qwen3-embedding-8b';
 export const GENERATE_MODEL = process.env['GENERATE_MODEL'] ?? 'z-ai/glm-5.2';
 // The relevance/citation judge — a smaller allowlisted TEE-verified model; decrypted content
-// still goes only to a verified upstream (ADL #30/#40). Low temperature: this is classification.
+// still goes only to a verified upstream. Low temperature: this is classification.
 const JUDGE_MODEL = process.env['JUDGE_MODEL'] ?? 'qwen/qwen3-32b';
 const JUDGE_MAX_TOKENS = Number(process.env['JUDGE_MAX_TOKENS'] ?? '4096');
 
 // Fail-closed guard: only these live-verified TEE-confidential models may receive decrypted
-// content (ADL #30/#40). inference.phala.com serves unverified models on the same endpoint.
+// content. inference.phala.com serves unverified models on the same endpoint.
 const MODEL_ALLOWLIST = parseModelAllowlist(process.env['INFERENCE_MODEL_ALLOWLIST']);
 
 // ACI receipt verification (attestation pin + per-response upstream.verified). Enabled via
@@ -27,7 +27,7 @@ const VERIFY_RECEIPTS = process.env['INFERENCE_ACI_VERIFY'] === '1';
 const ENFORCE_RECEIPT_SIGNATURE = process.env['INFERENCE_ACI_ENFORCE_SIGNATURE'] === '1';
 
 // Enclave synthesis is async (not user-latency-critical), so verify every receipt — this
-// catches a gateway that reroutes a mid-session call to an unverified upstream (ADL #30/#40).
+// catches a gateway that reroutes a mid-session call to an unverified upstream.
 export const RECEIPT_POLICY: ReceiptVerificationPolicy =
   process.env['INFERENCE_ACI_POLICY'] === 'first-call' ? 'first-call' : 'per-call';
 
@@ -47,7 +47,7 @@ function apiKey(): string | undefined {
   return process.env['TEE_API_KEY'];
 }
 
-// ADL #40: no hardcoded provider host as a functional default — a dead default URL
+// no hardcoded provider host as a functional default — a dead default URL
 // soft-fails to empty wikis. In-enclave the vsock proxy port wins; otherwise
 // TEE_ENDPOINT_URL is required.
 function resolveBaseUrl(): string {
@@ -65,7 +65,7 @@ let _backend: TeeEndpointBackend | null = null;
 let _telemetry: TelemetryClient | null = null;
 
 // In-enclave there is no PostHog egress, so boot injects a sink that buffers ops events
-// onto the check-in (ADL #18). Absent an injection (dev/local) this falls back to the
+// onto the check-in. Absent an injection (dev/local) this falls back to the
 // env-resolved client, which is a Noop without POSTHOG_API_KEY.
 export function setInferenceTelemetry(client: TelemetryClient): void {
   _telemetry = client;
@@ -103,7 +103,7 @@ function getBackend(): TeeEndpointBackend {
   return _backend;
 }
 
-// ADL #40: a missing endpoint/key must fail loudly — a silent zero-vector / empty-string
+// a missing endpoint/key must fail loudly — a silent zero-vector / empty-string
 // fallback would poison the HNSW index and persist empty wikis as if synthesis worked.
 export function assertInferenceConfigured(): void {
   if (!PROXY_PORT && !apiKey()) {

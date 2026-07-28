@@ -27,7 +27,7 @@ export class DurableAckBatch {
       try {
         if (first.hasUnsavedInserts()) await first.persist();
       } catch {
-        // Content-free (ADL #18): leave this tenant's batch in queue for redelivery.
+        // Content-free: leave this tenant's batch in queue for redelivery.
         this.logger.error('hnsw persist failed — batch left in queue for retry', {
           tenantId: first.tenantId,
         });

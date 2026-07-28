@@ -60,7 +60,7 @@ export class QueueSetDrainer {
     console.log('processing loop started', { queues: this.deps.assignments().length });
     for (;;) {
       // Pool-wide break-glass halt gates the whole sweep; a halted pool idles without touching any
-      // queue (ADL #13). Per-tenant halts are applied per queue inside the sweep (§6.3).
+      // queue. Per-tenant halts are applied per queue inside the sweep (§6.3).
       if (await this.deps.poolHalt.isHalted()) {
         await this.sleep(HALT_POLL_INTERVAL_MS);
         continue;
@@ -151,7 +151,7 @@ export class QueueSetDrainer {
         ack: () => this.ackMessage(assignment.queueUrl, msg.ReceiptHandle!),
       });
     } catch {
-      // Content-free SQS id only — err could carry a decrypted-content snippet (ADL #18). An
+      // Content-free SQS id only — err could carry a decrypted-content snippet. An
       // unassigned or cross-tenant message is never acked here, so it stays in queue (then DLQ).
       // A tenant torn down mid-sweep (reassignment §4.3 zeroizes its context) lands here too — its
       // ingest key throws — so the message is left unacked and redelivered once reassigned; fail-closed.

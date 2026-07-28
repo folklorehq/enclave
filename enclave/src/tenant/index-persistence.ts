@@ -4,7 +4,7 @@ import type { TenantContext } from './tenant-context.js';
 
 // HNSW only auto-persists every SAVE_INTERVAL inserts, so shutdown must flush every tenant's
 // in-RAM window on scale-to-zero. One tenant's save failure must not strand the others, so each
-// is isolated; the log is content-free (tenant id only, ADL #18).
+// is isolated; the log is content-free (tenant id only).
 export async function saveAllTenantIndices(
   contexts: TenantContext[],
   s3: S3Client,

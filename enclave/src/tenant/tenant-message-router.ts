@@ -37,7 +37,7 @@ export interface TenantMessageRouterDeps {
 }
 
 // A message arrived on a queue owned by one tenant but its body names a different one — the two
-// authorities disagree, so it is poison, never processed. Content-free: only tenant ids (ADL #18).
+// authorities disagree, so it is poison, never processed. Content-free: only tenant ids.
 export class CrossTenantRoutingError extends Error {
   constructor(
     readonly queueTenantId: string,

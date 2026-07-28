@@ -66,7 +66,7 @@ export class BoxServer {
 
     if (this.api) {
       const api = this.api;
-      // ADL #31: every /api/* request runs in-process over content decrypted only
+      // every /api/* request runs in-process over content decrypted only
       // inside this enclave — no decrypted body is ever proxied to the parent.
       this.app.all('/api/*', (c) => api(c.req.raw));
     } else {
@@ -83,7 +83,7 @@ export class BoxServer {
     return this.app.fetch;
   }
 
-  // Live relayed-collab count: the activity signal the idle/self-stop path needs (ADL #31 amendment).
+  // Live relayed-collab count: the activity signal the idle/self-stop path needs.
   get activeCollabConnections(): number {
     return this.activeCollabProxies;
   }
@@ -222,7 +222,7 @@ export class BoxServer {
     client.destroySoon();
   }
 
-  // Content-free + throttled per reason (ADL #18): a silently wedged collab path is exactly the
+  // Content-free + throttled per reason: a silently wedged collab path is exactly the
   // failure this proxy exists to end, so it must never fail quietly itself.
   private reportRefusal(reason: string): void {
     const now = Date.now();
