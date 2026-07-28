@@ -4,19 +4,10 @@ import { GetParameterCommand, PutParameterCommand, type SSMClient } from '@aws-s
 import type { Logger } from '@folklore/core';
 import {
   type Connector,
+  createPullConnector,
+  type PullConnectorDeps,
   type PullOptions,
   type SyncCursor,
-  confluence,
-  email,
-  github,
-  googleDrive,
-  intercom,
-  jira,
-  linear,
-  microsoft365,
-  notion,
-  slack,
-  zoom,
 } from '@folklore/connectors';
 import type { PullDueMessage } from '@folklore/contracts/enclave';
 import { externalHttpsProxyAgent } from '../egress/proxy.js';
@@ -158,73 +149,14 @@ export async function resolveSourceToken(
 // (fetch-based SDKs) or an explicit agent (axios/node:http SDKs like Slack), else its
 // pull dials the internet directly and fails closed on real hardware (ADL #42).
 export function buildConnector(kind: string, token: string): Connector | null {
-  switch (kind) {
-    case 'github':
-      return new github.GitHubConnector(
-        { logger: consoleLogger },
-        new github.OctokitGitHubClient(token),
-      );
-    case 'slack':
-      // Slack's axios client ignores the global undici dispatcher, so hand it the proxy agent.
-      return new slack.SlackConnector(
-        { logger: consoleLogger },
-        new slack.HttpSlackClient(token, externalHttpsProxyAgent()),
-      );
-    case 'notion':
-      return new notion.NotionConnector({ logger: consoleLogger }, new notion.NotionClient(token));
-    case 'linear':
-      return new linear.LinearConnector(
-        { logger: consoleLogger },
-        new linear.LinearSdkClient(token),
-      );
-    case 'jira':
-      return new jira.JiraConnector({ logger: consoleLogger }, new jira.JiraHttpClient(token));
-    case 'confluence':
-      return new confluence.ConfluenceConnector(
-        { logger: consoleLogger },
-        new confluence.ConfluenceHttpClient(token),
-      );
-    case 'intercom':
-      return new intercom.IntercomConnector(
-        { logger: consoleLogger },
-        new intercom.IntercomSdkClient(token),
-      );
-    case 'google_drive':
-      // gaxios ignores the global undici dispatcher, so hand it the egress proxy agent (ADL #42).
-      return new googleDrive.GoogleDriveConnector(
-        { logger: consoleLogger },
-        new googleDrive.GoogleDriveClient(token, externalHttpsProxyAgent()),
-      );
-    case 'microsoft365':
-      // Hand-rolled fetch against graph.microsoft.com — auto-covered by the enclave's global undici
-      // egress dispatcher, so no explicit proxy agent is needed (ADL #42).
-      return new microsoft365.Microsoft365Connector(
-        { logger: consoleLogger },
-        new microsoft365.Microsoft365Client(token),
-      );
-    case 'gmail':
-      // Fetch-based Gmail mailbox pull, reusing the Phase 1 email normalizer (ADL #66); auto-proxied
-      // by the global undici dispatcher. The optional label allowlist scopes ingest (Q5).
-      return new email.EmailConnector(
-        { logger: consoleLogger },
-        new email.GmailMailClient(
-          token,
-          parseAllowlist(process.env['EMAIL_GMAIL_LABEL_ALLOWLIST']),
-        ),
-      );
-    case 'microsoft365_mail':
-      return new email.EmailConnector(
-        { logger: consoleLogger },
-        new email.GraphMailClient(
-          token,
-          parseAllowlist(process.env['EMAIL_M365_FOLDER_ALLOWLIST']),
-        ),
-      );
-    case 'zoom':
-      return new zoom.ZoomConnector({ logger: consoleLogger }, new zoom.HttpZoomClient(token));
-    default:
-      return null;
-  }
+  const deps: PullConnectorDeps = {
+    logger: consoleLogger,
+    token,
+    httpsProxyAgent: externalHttpsProxyAgent(),
+    gmailLabelAllowlist: parseAllowlist(process.env['EMAIL_GMAIL_LABEL_ALLOWLIST']),
+    m365FolderAllowlist: parseAllowlist(process.env['EMAIL_M365_FOLDER_ALLOWLIST']),
+  };
+  return createPullConnector(kind, deps);
 }
 
 /** Handles a single content-free `pull-due` signal end to end, in-enclave. */
