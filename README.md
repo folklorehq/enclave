@@ -59,7 +59,7 @@ AWS Nitro Attestation Documents are CBOR-encoded, COSE-signed by the Nitro attes
 KMS key policies reference specific PCR0 values. PCR0 is the SHA-384 hash of the EIF (Enclave Image Format) binary. Folklore publishes the PCR0 from each CI-built EIF alongside the corresponding Git commit. An auditor can:
 
 1. Check out the commit and review the trust-verification source in this repository against the scheme described above.
-2. Rebuild the EIF from that source with the enclave build configuration and confirm the resulting PCR0 matches the published value.
+2. Rebuild the EIF from that source with the enclave build configuration and confirm the resulting PCR0 matches the published value (`nitro-cli describe-eif`), or run `folklore verify-attestation --eif <path>` from the [folklore-sdk repo](https://github.com/folklorehq/sdk) CLI against a local `attestation.json`.
 3. Confirm the running enclave's attestation document reports that same PCR0 and that the active KMS key policy admits only it.
 
 Because KMS releases the sealed key only to an enclave that measures to the policy's PCR0, a match proves the running enclave is executing the measured build for that commit. The build configuration and the closed product modules are not part of this open trust surface (see "What is not in this repository").
