@@ -1,22 +1,22 @@
 import { S3Client } from '@aws-sdk/client-s3';
 import { SQSClient } from '@aws-sdk/client-sqs';
 import { SSMClient, PutParameterCommand, GetParameterCommand } from '@aws-sdk/client-ssm';
-import { TenantContextFactory } from './tenant/tenant-context-factory.js';
+import { TenantContextFactory } from './tenant/TenantContextFactory.js';
 import { TenantRegistry } from './tenant/tenant-registry.js';
 import { resolveBootAssignments, parseAssignmentManifest } from './tenant/tenant-assignments.js';
-import { TenantAssignmentApplier } from './tenant/tenant-assignment-applier.js';
+import { TenantAssignmentApplier } from './tenant/TenantAssignmentApplier.js';
 import { TenantMessageRouter } from './tenant/tenant-message-router.js';
-import { QueueSetDrainer } from './tenant/queue-set-drainer.js';
+import { QueueSetDrainer } from './tenant/QueueSetDrainer.js';
 import { saveAllTenantIndices } from './tenant/index-persistence.js';
 import { createTenantResolver } from './tenant/tenant-resolver.js';
-import { BoxServer } from './http/server.js';
-import { SynthesisConsumer } from './workers/synthesis-consumer.js';
+import { BoxServer } from './http/BoxServer.js';
+import { SynthesisConsumer } from './workers/SynthesisConsumer.js';
 import { fetchLinkPreview } from './preview/preview-client.js';
-import { HaltGate } from './control/halt-gate.js';
-import { EnclaveFactRetriever } from './retrieval/fact-retriever.js';
-import { EnclaveFactAnswerer } from './workers/fact-answerer.js';
-import { EnclaveWikiContentDecryptor } from './wiki/content-decryptor.js';
-import { EnclaveWikiEditSealer } from './wiki/edit-sealer.js';
+import { HaltGate } from './control/HaltGate.js';
+import { EnclaveFactRetriever } from './retrieval/EnclaveFactRetriever.js';
+import { EnclaveFactAnswerer } from './workers/EnclaveFactAnswerer.js';
+import { EnclaveWikiContentDecryptor } from './wiki/EnclaveWikiContentDecryptor.js';
+import { EnclaveWikiEditSealer } from './wiki/EnclaveWikiEditSealer.js';
 import {
   EnclaveWikiCommentSealer,
   EnclaveWikiFeedbackSealer,
@@ -33,8 +33,8 @@ import {
   CachedInference,
   LLM_CACHE_PROMPT_VERSION,
   type InferenceModel,
-} from './inference/cached-inference.js';
-import { S3LlmCache } from './inference/s3-llm-cache.js';
+} from './inference/CachedInference.js';
+import { S3LlmCache } from './inference/S3LlmCache.js';
 import { installGlobalEgressDispatcher } from './egress/proxy.js';
 import { createContainer, type ApiContainer, type RetrieverDeps } from '@folklore/api';
 import { NoopTelemetryClient } from '@folklore/telemetry';

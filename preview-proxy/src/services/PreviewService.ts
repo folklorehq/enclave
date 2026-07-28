@@ -1,6 +1,6 @@
 import { linkPreviewSchema, type LinkPreview } from '@folklore/contracts';
-import { parseHtmlPreview, parseOembedPreview, type UrlGuard } from './og-parse.js';
-import { SsrfSafeFetcher } from './preview-fetch.js';
+import { parseHtmlPreview, parseOembedPreview, type UrlGuard } from '../og-parse.js';
+import { SsrfSafeFetcher } from '../SsrfSafeFetcher.js';
 
 const HTML_TYPES = ['text/html', 'application/xhtml+xml'];
 const JSON_OEMBED_TYPES = ['application/json+oembed', 'text/json+oembed', 'application/json'];

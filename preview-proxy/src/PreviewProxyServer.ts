@@ -1,8 +1,8 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { handlePreviewRequest } from './handler.js';
-import { PreviewService } from './preview-service.js';
-import { SsrfSafeFetcher } from './preview-fetch.js';
-import { RateLimiter } from './rate-limiter.js';
+import { PreviewService } from './services/PreviewService.js';
+import { SsrfSafeFetcher } from './SsrfSafeFetcher.js';
+import { RateLimiter } from './RateLimiter.js';
 
 const HOST = process.env['PREVIEW_PROXY_HOST'] ?? '127.0.0.1';
 const PORT = Number(process.env['PREVIEW_PROXY_PORT'] ?? 8100);

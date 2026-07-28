@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parseHtmlPreview, parseOembedPreview, type UrlGuard } from '../src/og-parse.js';
-import { SsrfSafeFetcher, type DnsLookup } from '../src/preview-fetch.js';
+import { SsrfSafeFetcher, type DnsLookup } from '../src/SsrfSafeFetcher.js';
 import { assertPublicIp } from '../src/ssrf.js';
 
 const BASE = 'https://example.com/article';
