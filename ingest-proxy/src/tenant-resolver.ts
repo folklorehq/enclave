@@ -10,12 +10,9 @@ export type ExtractorFn = (body: unknown, headers: Record<string, string>) => st
 
 interface RoutingEntry {
   orgId: string;
-  functionName: string;
 }
 
 const ROUTING_TABLE = process.env['WEBHOOK_ROUTING_TABLE'] ?? '';
-const CACHE_TTL_MS = 60_000;
-const routingCache = new Map<string, { entry: RoutingEntry; expiresAt: number }>();
 
 async function fetchRoutingEntry(
   ddb: DynamoDBClient,
@@ -23,32 +20,21 @@ async function fetchRoutingEntry(
   externalId: string,
 ): Promise<RoutingEntry | null> {
   const cacheKey = `${source}#${externalId}`;
-  const cached = routingCache.get(cacheKey);
-  if (cached && Date.now() < cached.expiresAt) return cached.entry;
-
   if (!ROUTING_TABLE) return null;
 
   const out = await ddb.send(
     new GetItemCommand({
       TableName: ROUTING_TABLE,
       Key: { routingKey: { S: cacheKey } },
-      ProjectionExpression: 'orgId,functionName',
+      ProjectionExpression: 'orgId',
+      ConsistentRead: true,
     }),
   );
 
   const item = out.Item;
   if (!item?.orgId?.S) return null;
 
-  const entry: RoutingEntry = {
-    orgId: item.orgId.S,
-    functionName: item.functionName?.S ?? '',
-  };
-  routingCache.set(cacheKey, { entry, expiresAt: Date.now() + CACHE_TTL_MS });
-  return entry;
-}
-
-export function clearRoutingCache(): void {
-  routingCache.clear();
+  return { orgId: item.orgId.S };
 }
 
 const githubExtractor: ExtractorFn = (body) => {
@@ -123,15 +109,12 @@ export async function resolveTenant(
   source: string,
   body: unknown,
   headers: Record<string, string>,
-): Promise<{ orgId: string; functionName: string } | null> {
+): Promise<{ orgId: string } | null> {
   const extractor = EXTRACTORS[source];
   if (!extractor) return null;
 
   const externalId = extractor(body, headers);
   if (!externalId) return null;
 
-  const entry = await fetchRoutingEntry(ddb, source, externalId);
-  if (!entry) return null;
-
-  return { orgId: entry.orgId, functionName: entry.functionName };
+  return fetchRoutingEntry(ddb, source, externalId);
 }

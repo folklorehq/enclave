@@ -4,20 +4,21 @@ import type {
   FactMetadata,
   FactRetriever,
   FactSearchParams,
+  FactSnippetParams,
   RetrievedFact,
   RetrieverDeps,
 } from '@folklore/api';
+import { SNIPPET_MAX_CHARS } from '@folklore/contracts';
 import { isSensitivityWithin } from '@folklore/wiki';
 import type { EnclaveCrypto } from '../crypto/esdk.js';
 import { embedText } from '../inference/phala.js';
 import type { ResolveTenant } from '../tenant/tenant-resolver.js';
 
-const SNIPPET_LIMIT = 280;
-
 export interface FactRetrieverDeps extends RetrieverDeps {
   resolveTenant: ResolveTenant;
   s3: S3Client;
   processedBucket: string;
+  processedBucketFor?: (orgId: string) => string;
 }
 
 /** An audience-visible hit with its decrypted body, for callers (e.g. answer synthesis) that need more than a snippet. */
@@ -35,15 +36,47 @@ export class EnclaveFactRetriever implements FactRetriever {
   constructor(private readonly deps: FactRetrieverDeps) {}
 
   async search(params: FactSearchParams): Promise<RetrievedFact[]> {
-    const gated = await this.retrieveGated(params, SNIPPET_LIMIT);
+    const gated = await this.retrieveGated(params, SNIPPET_MAX_CHARS);
     return gated.map((g) => ({
       id: g.meta.id,
       kind: g.meta.kind,
       occurredAt: g.meta.occurredAt,
       sourceId: g.meta.sourceId,
+      sourceKind: g.meta.sourceKind,
       distance: g.distance,
       snippet: g.body,
     }));
+  }
+
+  // By-factId, no embedding, no ANN — the review queue already names its rows. Same fail-closed
+  // order as search: tenant first, audience gate before any decrypt; unauthorized facts are absent.
+  async snippetForFactIds(params: FactSnippetParams): Promise<Map<string, string>> {
+    const { orgId, userId, factIds } = params;
+    if (factIds.length === 0) return new Map();
+
+    const tenant = this.deps.resolveTenant(orgId);
+    const [metaRows, access] = await Promise.all([
+      this.deps.loadFactMetadata(orgId, factIds),
+      this.deps.resolveAudienceAccess(orgId, userId),
+    ]);
+
+    // Independent, fail-closed work (decryptBody returns null on failure), so the per-fact decrypts
+    // run concurrently instead of N serial S3 GET + decrypt round-trips for an N-row page.
+    const visible = metaRows.filter((meta) => this.isVisible(meta, access));
+    const decrypted = await Promise.all(
+      visible.map(async (meta) => ({
+        meta,
+        body: await this.decryptBody(tenant.crypto, orgId, meta, SNIPPET_MAX_CHARS),
+      })),
+    );
+
+    const snippets = new Map<string, string>();
+    for (const { meta, body } of decrypted) {
+      // decryptBody returns '' for a null bodyS3Key — a null body key means absent.
+      if (body === null || body === '') continue;
+      snippets.set(meta.id, body);
+    }
+    return snippets;
   }
 
   // Embed → ANN → audience-gate → decrypt, shared by snippet search and answer grounding.
@@ -97,7 +130,10 @@ export class EnclaveFactRetriever implements FactRetriever {
     if (!meta.bodyS3Key) return '';
     try {
       const obj = await this.deps.s3.send(
-        new GetObjectCommand({ Bucket: this.deps.processedBucket, Key: meta.bodyS3Key }),
+        new GetObjectCommand({
+          Bucket: this.deps.processedBucketFor?.(orgId) ?? this.deps.processedBucket,
+          Key: meta.bodyS3Key,
+        }),
       );
       const raw = await obj.Body!.transformToByteArray();
       const enc = Buffer.from(Buffer.from(raw).toString('utf8'), 'base64');

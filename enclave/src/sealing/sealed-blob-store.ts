@@ -13,7 +13,8 @@ export async function readSealedBlob(
     const obj = await s3.send(
       new GetObjectCommand({ Bucket: bucket, Key: sealedBlobKey(tenantId) }),
     );
-    return Buffer.from(await obj.Body!.transformToByteArray());
+    if (!obj.Body) throw new Error('sealed blob unavailable');
+    return Buffer.from(await obj.Body.transformToByteArray());
   } catch (err) {
     if (!(err instanceof NoSuchKey)) throw err;
     return null;

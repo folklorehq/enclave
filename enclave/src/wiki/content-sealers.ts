@@ -7,6 +7,7 @@ import type {
   WikiSnapshotSealer,
 } from '@folklore/api';
 import { EnclaveCrypto, EncryptionContextMismatchError } from '../crypto/esdk.js';
+import { errorCode, errorName } from '../logging/error-fields.js';
 import type { ResolveTenant } from '../tenant/tenant-resolver.js';
 
 const UNSEAL_FAILED_EVENT = 'WIKI_UNSEAL_FAILED';
@@ -38,15 +39,9 @@ abstract class EnclaveSealerBase {
     const integrity = err instanceof EncryptionContextMismatchError;
     console.warn(UNSEAL_FAILED_EVENT, {
       kind: integrity ? 'aad-mismatch' : 'decrypt-error',
-      errorName: err instanceof Error ? err.name : typeof err,
-      errorCode: this.errorCode(err),
+      errorName: errorName(err),
+      errorCode: errorCode(err),
     });
-  }
-
-  private errorCode(err: unknown): string | undefined {
-    if (typeof err !== 'object' || err === null || !('code' in err)) return undefined;
-    const code = (err as { code: unknown }).code;
-    return typeof code === 'string' ? code : undefined;
   }
 }
 

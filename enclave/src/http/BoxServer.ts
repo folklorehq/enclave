@@ -12,6 +12,7 @@ type FetchHandler = (req: Request) => Response | Promise<Response>;
 export interface BoxServerOptions {
   readonly httpPort?: number;
   readonly collabPort?: number;
+  readonly oauthIngress?: FetchHandler;
 }
 
 const DEFAULT_HTTP_PORT = 3000;
@@ -63,6 +64,17 @@ export class BoxServer {
 
     // Without this a non-upgrade GET would fall through to the catch-all and answer 200 index.html.
     this.app.all(COLLAB_WS_PATH, (c) => c.text('upgrade required', 426));
+
+    if (options.oauthIngress) {
+      const oauthIngress = options.oauthIngress;
+      this.app.all('/oauth-submission/*', (c) => {
+        const url = new URL(c.req.url);
+        url.pathname = url.pathname.slice('/oauth-submission'.length) || '/';
+        return oauthIngress(new Request(url, c.req.raw));
+      });
+    } else {
+      this.app.all('/oauth-submission/*', (c) => c.json({ error: 'oauth_unavailable' }, 503));
+    }
 
     if (this.api) {
       const api = this.api;

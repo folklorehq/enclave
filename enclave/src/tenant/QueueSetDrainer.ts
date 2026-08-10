@@ -24,6 +24,8 @@ const EMPTY_POOL_POLL_INTERVAL_MS = 5_000;
 export interface QueueAssignment {
   tenantId: string;
   queueUrl: string;
+  rawPayloadsBucket?: string;
+  processedBucket?: string;
 }
 
 export interface QueueSetDrainerDeps {
@@ -34,12 +36,15 @@ export interface QueueSetDrainerDeps {
   // registry on (re)assignment (§4.3), so each sweep drains the currently-assigned queues.
   assignments: () => QueueAssignment[];
   processedQueueUrl: string;
-  processedOutputsBucket: string;
-  rawPayloadsBucket: string;
+  processedOutputsBucket?: string;
+  rawPayloadsBucket?: string;
   poolHalt: HaltGate;
   haltGateFor: (tenantId: string) => HaltGate;
   writeIdle: (idle: boolean) => Promise<void>;
   idlePollThreshold: number;
+  // Activity the queues cannot see — a reader on the box API, a live editing session, an in-flight
+  // synthesis — counts as a busy poll, so the host is never stopped out from under it.
+  isBusy?: () => boolean;
   onDrainComplete?: () => Promise<void>;
   logger: Logger;
 }
@@ -52,7 +57,11 @@ export interface QueueSetDrainerDeps {
 // and one tenant's persist/ack failure never acks or blocks another's (batch groups by tenant).
 export class QueueSetDrainer {
   private idlePolls = 0;
-  private isIdle = false;
+  // Tracks the last value actually written, not merely the in-process idle transition: a freshly
+  // booted process has no prior write, so its first non-idle sweep must write `false` unconditionally
+  // — otherwise a stale `"1"` written before a prior self-stop survives the stop/start cycle and the
+  // parent's systemd timer stops the host again before the enclave finishes booting.
+  private lastWrittenIdle: boolean | undefined;
 
   constructor(private readonly deps: QueueSetDrainerDeps) {}
 
@@ -127,7 +136,11 @@ export class QueueSetDrainer {
     msg: Message,
     ackBatch: DurableAckBatch,
   ): Promise<void> {
-    this.archive(assignment.tenantId, msg);
+    this.archive(
+      assignment.tenantId,
+      msg,
+      assignment.rawPayloadsBucket ?? this.deps.rawPayloadsBucket ?? '',
+    );
     try {
       const raw = JSON.parse(msg.Body!) as RoutableMessage;
       const { context, facts, pullComplete } = await this.deps.router.route(
@@ -145,7 +158,7 @@ export class QueueSetDrainer {
           context.hnsw.save(
             this.deps.s3,
             context.keyring,
-            this.deps.processedOutputsBucket,
+            assignment.processedBucket || this.deps.processedOutputsBucket || '',
             context.tenantId,
           ),
         ack: () => this.ackMessage(assignment.queueUrl, msg.ReceiptHandle!),
@@ -189,12 +202,13 @@ export class QueueSetDrainer {
     );
   }
 
-  private archive(tenantId: string, msg: Message): void {
-    if (!this.deps.rawPayloadsBucket || !msg.MessageId || !msg.Body) return;
+  private archive(tenantId: string, msg: Message, bucket: string): void {
+    const archiveBucket = bucket || this.deps.rawPayloadsBucket || '';
+    if (!archiveBucket || !msg.MessageId || !msg.Body) return;
     void this.deps.s3
       .send(
         new PutObjectCommand({
-          Bucket: this.deps.rawPayloadsBucket,
+          Bucket: archiveBucket,
           Key: this.archiveKey(tenantId, msg.MessageId),
           Body: msg.Body,
           ContentType: 'text/plain',
@@ -211,19 +225,22 @@ export class QueueSetDrainer {
   }
 
   private async updateIdle(received: boolean): Promise<void> {
-    if (received) {
+    const active = received || (this.deps.isBusy?.() ?? false);
+    if (active) {
       this.idlePolls = 0;
-      if (this.isIdle) {
-        this.isIdle = false;
-        await this.deps.writeIdle(false);
-      }
+      await this.writeIdleIfChanged(false);
       return;
     }
     this.idlePolls += 1;
-    if (this.idlePolls >= this.deps.idlePollThreshold && !this.isIdle) {
-      this.isIdle = true;
-      await this.deps.writeIdle(true);
+    if (this.idlePolls >= this.deps.idlePollThreshold) {
+      await this.writeIdleIfChanged(true);
     }
+  }
+
+  private async writeIdleIfChanged(idle: boolean): Promise<void> {
+    if (this.lastWrittenIdle === idle) return;
+    this.lastWrittenIdle = idle;
+    await this.deps.writeIdle(idle);
   }
 
   private waitSeconds(queueCount: number): number {

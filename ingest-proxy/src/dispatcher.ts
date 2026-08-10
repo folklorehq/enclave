@@ -8,6 +8,17 @@ import { verifySignature, normalizeHeaders } from './signature-verifier.js';
 import { extractEventType } from './lambdas/handler.js';
 import { checkRateLimit } from './rate-limiter.js';
 import { fetchDispatcherAuthSecret, computeDispatcherAuthHmac } from './dispatcher-auth.js';
+import {
+  captureNotionVerificationToken,
+  getNotionVerificationCaptureConfig,
+  isNotionVerificationChallenge,
+} from './notion-verification-capture.js';
+import {
+  findRoutingAllowlistEntry,
+  normalizeRoutingAllowlist,
+  verifyRoutingHmac,
+  type RoutingMode,
+} from './routing-allowlist.js';
 
 const ssm = new SSMClient({});
 const ddb = new DynamoDBClient({});
@@ -15,14 +26,18 @@ const lambda = new LambdaClient({});
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const secretCache = new Map<string, { secret: string; expiresAt: number }>();
+const allowlistCache = new Map<
+  string,
+  { entries: ReturnType<typeof normalizeRoutingAllowlist>; expiresAt: number }
+>();
 
 const SHARED_SECRET_SSM_PREFIX = '/folklore/shared-webhook-secrets';
 const PER_TENANT_SECRET_SSM_PREFIX = '/folklore';
 const ZOOM_SOURCE = 'zoom';
 const ZOOM_URL_VALIDATION_EVENT = 'endpoint.url_validation';
 const MICROSOFT365_SOURCE = 'microsoft365';
-
-const VERIFICATION_CHALLENGE_SOURCES = new Set(['slack', 'notion']);
+const INTERCOM_SOURCE = 'intercom';
+const INTERCOM_LIVENESS_ROUTE = 'HEAD /ingest/intercom';
 
 // Returns null (never invokes downstream) when the shared auth secret isn't provisioned,
 // rather than sending an invoke the receiving ingest Lambda is guaranteed to reject.
@@ -32,6 +47,7 @@ async function buildInvokePayload(
   destBody: string,
   destHeaders: Record<string, string | undefined>,
   destFunctionName: string,
+  mode: RoutingMode,
 ): Promise<{ FunctionName: string; InvocationType: 'Event'; Payload: Buffer } | null> {
   const secret = await fetchDispatcherAuthSecret();
   if (!secret) return null;
@@ -45,12 +61,50 @@ async function buildInvokePayload(
         body: destBody,
         tenantId: destTenantId,
         deliveryId: destHeaders['x-github-delivery'] ?? destHeaders['webhook-id'] ?? '',
-        authHmac: computeDispatcherAuthHmac(destTenantId, destSource, secret),
+        authHmac: computeDispatcherAuthHmac(destTenantId, destSource, secret, mode),
+        routingMode: mode,
         eventType: extractEventType(destSource, destHeaders, destBody),
         headers: destHeaders,
       }),
     ),
   };
+}
+
+async function fetchRoutingAllowlist(
+  orgId: string,
+): Promise<ReturnType<typeof normalizeRoutingAllowlist>> {
+  const cached = allowlistCache.get(orgId);
+  if (cached && Date.now() < cached.expiresAt) return cached.entries;
+  try {
+    const result = await ssm.send(
+      new GetParameterCommand({
+        Name: `/folklore/${orgId}/webhook-routing-allowlist`,
+        WithDecryption: false,
+      }),
+    );
+    const parsed: unknown = JSON.parse(result.Parameter?.Value ?? '[]');
+    const entries = normalizeRoutingAllowlist(parsed);
+    allowlistCache.set(orgId, { entries, expiresAt: Date.now() + CACHE_TTL_MS });
+    return entries;
+  } catch {
+    return [];
+  }
+}
+
+type RoutingDecision = 'allowed' | 'denied' | 'unavailable';
+
+async function isRoutingAllowed(
+  orgId: string,
+  source: string,
+  mode: RoutingMode,
+): Promise<RoutingDecision> {
+  const entries = await fetchRoutingAllowlist(orgId);
+  const entry = findRoutingAllowlistEntry(entries, orgId, source, mode);
+  if (!entry?.hmac) return 'denied';
+  const secret = await fetchPerTenantSecret(orgId, source);
+  if (!secret) return 'unavailable';
+  const expected = createHmac('sha256', secret).update(`${orgId}:${source}:${mode}`).digest('hex');
+  return verifyRoutingHmac(expected, entry.hmac, entry.previousHmac) ? 'allowed' : 'denied';
 }
 
 // A denied read and an unprovisioned secret both collapse to the same 503, so without this an IAM
@@ -117,22 +171,11 @@ async function fetchPerTenantSecret(tenantId: string, source: string): Promise<s
   }
 }
 
-function isVerificationChallenge(
-  source: string,
-  body: unknown,
-  headers: Record<string, string | undefined>,
-): boolean {
-  if (!VERIFICATION_CHALLENGE_SOURCES.has(source)) return false;
+function isVerificationChallenge(source: string, body: unknown): boolean {
   const b = body as Record<string, unknown> | null;
   if (!b) return false;
 
-  if (source === 'slack' && b.type === 'url_verification') return true;
-  if (source === 'notion' && typeof b.verification_token === 'string' && b.type === undefined) {
-    // If x-notion-signature is present, it is a real signed event, not a handshake.
-    if (headers['x-notion-signature']) return false;
-    return true;
-  }
-  return false;
+  return source === 'slack' && b.type === 'url_verification';
 }
 
 type ChallengeResponse = { body: string; contentType: string } | null;
@@ -146,11 +189,6 @@ function handleVerificationChallenge(source: string, body: unknown): ChallengeRe
     return typeof challenge === 'string'
       ? { body: JSON.stringify({ challenge }), contentType: 'application/json' }
       : null;
-  }
-
-  // Notion handshake has no secret, just return HTTP 200 with empty body
-  if (source === 'notion') {
-    return { body: '', contentType: 'text/plain' };
   }
 
   return null;
@@ -171,8 +209,26 @@ function handleZoomCrc(source: string, body: unknown, secret: string): Challenge
   };
 }
 
+function isIntercomPing(body: unknown): boolean {
+  if (typeof body !== 'object' || body === null) return false;
+  const payload = body as Record<string, unknown>;
+  if (payload['type'] !== 'notification_event' || payload['topic'] !== 'ping') return false;
+  const data = payload['data'];
+  if (typeof data !== 'object' || data === null) return false;
+  const item = (data as Record<string, unknown>)['item'];
+  return (
+    typeof item === 'object' &&
+    item !== null &&
+    (item as Record<string, unknown>)['type'] === 'ping'
+  );
+}
+
 export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   try {
+    if (event.routeKey === INTERCOM_LIVENESS_ROUTE && event.requestContext.http.method === 'HEAD') {
+      return { statusCode: 204 };
+    }
+
     const source = event.pathParameters?.['source'];
     const tenantId = event.pathParameters?.['tenant_id'];
     if (!source) return { statusCode: 400 };
@@ -201,8 +257,19 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 
     if (!EXTRACTORS[source] && !tenantId) return { statusCode: 400 };
 
-    // Check verification challenges BEFORE signature verification (Slack, Notion handshake)
-    if (isVerificationChallenge(source, parsed, headers)) {
+    if (!tenantId && source === 'notion' && isNotionVerificationChallenge(parsed)) {
+      const result = await captureNotionVerificationToken(
+        ssm,
+        getNotionVerificationCaptureConfig(),
+        parsed.verification_token,
+        () => new Date(),
+      );
+      return result === 'captured'
+        ? { statusCode: 200, headers: { 'content-type': 'text/plain' }, body: '' }
+        : { statusCode: 503 };
+    }
+
+    if (isVerificationChallenge(source, parsed)) {
       const response = handleVerificationChallenge(source, parsed);
       if (response) {
         return {
@@ -215,6 +282,9 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 
     // URL-routed mode: tenantId is in the path, use per-tenant secret, skip resolveTenant()
     if (tenantId) {
+      const routingDecision = await isRoutingAllowed(tenantId, source, 'url');
+      if (routingDecision === 'unavailable') return { statusCode: 503 };
+      if (routingDecision !== 'allowed') return { statusCode: 401 };
       const secret = await fetchPerTenantSecret(tenantId, source);
       if (!secret) return { statusCode: 503 };
 
@@ -245,6 +315,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
         body,
         headers,
         `${tenantId}-ingest`,
+        'url',
       );
       if (!invokePayload) return { statusCode: 503 };
       await lambda.send(new InvokeCommand(invokePayload));
@@ -259,6 +330,10 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     const signatureValid = verifySignature(source, headers, body, secret);
     if (!signatureValid) return { statusCode: 401 };
 
+    if (source === INTERCOM_SOURCE && isIntercomPing(parsed)) {
+      return { statusCode: 200 };
+    }
+
     // Zoom CRC: handle endpoint.url_validation AFTER signature verification
     const zoomCrc = handleZoomCrc(source, parsed, secret);
     if (zoomCrc) {
@@ -271,6 +346,9 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 
     const tenant = await resolveTenant(ddb, source, parsed, headers as Record<string, string>);
     if (!tenant) return { statusCode: 401 };
+    const routingDecision = await isRoutingAllowed(tenant.orgId, source, 'payload');
+    if (routingDecision === 'unavailable') return { statusCode: 503 };
+    if (routingDecision !== 'allowed') return { statusCode: 401 };
 
     // Rate limiting (skip if RATE_LIMIT_TABLE env var is not configured)
     const rateLimitTable = process.env['RATE_LIMIT_TABLE'];
@@ -286,6 +364,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       body,
       headers,
       `${tenant.orgId}-ingest`,
+      'payload',
     );
     if (!invokePayload) return { statusCode: 503 };
     await lambda.send(new InvokeCommand(invokePayload));

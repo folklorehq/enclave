@@ -1,5 +1,6 @@
-import { createHmac } from 'crypto';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
+import { createHmac } from 'crypto';
+import { type RoutingMode, routingHmacMessage } from './routing-allowlist.js';
 
 const ssm = new SSMClient({});
 
@@ -29,6 +30,9 @@ export function computeDispatcherAuthHmac(
   tenantId: string,
   source: string,
   secret: string,
+  mode: RoutingMode = 'payload',
 ): string {
-  return createHmac('sha256', secret).update(`${tenantId}:${source}`).digest('hex');
+  return createHmac('sha256', secret)
+    .update(routingHmacMessage(tenantId, source, mode))
+    .digest('hex');
 }

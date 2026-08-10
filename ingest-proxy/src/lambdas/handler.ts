@@ -18,6 +18,7 @@ import {
 import type { APIGatewayProxyHandlerV2 } from 'aws-lambda';
 import { checkRateLimit } from '../rate-limiter.js';
 import { fetchDispatcherAuthSecret, computeDispatcherAuthHmac } from '../dispatcher-auth.js';
+import type { RoutingMode } from '../routing-allowlist.js';
 
 const ssm = new SSMClient({});
 const sqs = new SQSClient({});
@@ -906,6 +907,7 @@ export interface DispatcherEvent {
   headers: Record<string, string>;
   eventType: string;
   authHmac: string;
+  routingMode?: RoutingMode;
 }
 
 // HMAC-guarded dispatcher invoke: only the dispatcher with the shared secret can invoke.
@@ -914,9 +916,10 @@ export async function handleDispatcherInvoke(
 ): Promise<{ statusCode: number }> {
   const authSecret = await fetchDispatcherAuthSecret();
   if (!authSecret) return { statusCode: 401 };
+  if (event.routingMode !== 'payload' && event.routingMode !== 'url') return { statusCode: 401 };
 
   const expectedHmac = Buffer.from(
-    computeDispatcherAuthHmac(event.tenantId, event.source, authSecret),
+    computeDispatcherAuthHmac(event.tenantId, event.source, authSecret, event.routingMode),
     'hex',
   );
 

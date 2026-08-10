@@ -32,6 +32,9 @@ export class TenantContext {
     readonly masterKey: Buffer,
     hnsw: HnswStore,
     pipeline: Pipeline,
+    readonly sealedBlobBucket = '',
+    readonly rawPayloadsBucket = '',
+    readonly processedOutputsBucket = '',
   ) {
     this.keyringOrNull = keyring;
     this.hnswOrNull = hnsw;
@@ -63,6 +66,14 @@ export class TenantContext {
   get pipeline(): Pipeline {
     if (!this.pipelineOrNull) throw new TenantContextZeroizedError(this.tenantId);
     return this.pipelineOrNull;
+  }
+
+  encryptStorageCanary(plaintext: Buffer, generation: number): Promise<Buffer> {
+    return this.crypto.encryptStorageCanary(plaintext, this.tenantId, generation);
+  }
+
+  decryptStorageCanary(ciphertext: Buffer, generation: number): Promise<Buffer> {
+    return this.crypto.decryptStorageCanary(ciphertext, this.tenantId, generation);
   }
 
   // §2.2 point 5 (crypto-shred boundary): teardown wipes the decrypted master secret from RAM,

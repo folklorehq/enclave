@@ -1,9 +1,9 @@
 // KMS recipient attestation: response is encrypted to our ephemeral key — plaintext never leaves this heap.
 import { KMSClient, DecryptCommand, EncryptCommand } from '@aws-sdk/client-kms';
 import { generateKeyPairSync, privateDecrypt, constants } from 'crypto';
+import { awsClientTransport } from '../aws/aws-transport.js';
 import { getAttestationDoc } from './nsm.js';
 
-const PROXY_PORT = process.env['VSOCK_KMS_PROXY_PORT'] ?? '8000';
 const REGION = process.env['AWS_REGION'] ?? 'us-east-1';
 const MASTER_KEY_PURPOSE = 'master-key';
 const MASTER_KEY_VERSION = '1';
@@ -23,7 +23,7 @@ function masterKeyContext(tenantId?: string): Record<string, string> {
 function kmsClient(): KMSClient {
   return new KMSClient({
     region: REGION,
-    endpoint: `https://localhost:${PROXY_PORT}`,
+    ...awsClientTransport(),
   });
 }
 
@@ -67,6 +67,22 @@ async function decryptWithContext(
   kmsKeyId: string,
   encryptionContext: Record<string, string>,
 ): Promise<Buffer> {
+  return (await decryptWithContextAndKeyId(ciphertext, kmsKeyId, encryptionContext)).plaintext;
+}
+
+export async function decryptRecipientCiphertextWithKeyId(
+  ciphertext: Buffer,
+  kmsKeyId: string,
+  encryptionContext: Record<string, string>,
+): Promise<{ keyId: string; plaintext: Buffer }> {
+  return decryptWithContextAndKeyId(ciphertext, kmsKeyId, encryptionContext);
+}
+
+async function decryptWithContextAndKeyId(
+  ciphertext: Buffer,
+  kmsKeyId: string,
+  encryptionContext: Record<string, string>,
+): Promise<{ keyId: string; plaintext: Buffer }> {
   // ephemeral key embedded in attDoc so KMS encrypts the response to us, not over the wire
   const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const ephemeralPubDer = Buffer.from(publicKey.export({ type: 'spki', format: 'der' }));
@@ -85,8 +101,21 @@ async function decryptWithContext(
     }),
   );
 
-  return privateDecrypt(
-    { key: privateKey, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' },
-    Buffer.from(response.CiphertextForRecipient!),
-  );
+  if (!response.KeyId || !response.CiphertextForRecipient)
+    throw new Error('recipient_kms_output_invalid');
+  return {
+    keyId: response.KeyId,
+    plaintext: privateDecrypt(
+      { key: privateKey, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' },
+      Buffer.from(response.CiphertextForRecipient),
+    ),
+  };
+}
+
+export async function decryptRecipientCiphertext(
+  ciphertext: Buffer,
+  kmsKeyId: string,
+  encryptionContext: Record<string, string>,
+): Promise<Buffer> {
+  return decryptWithContext(ciphertext, kmsKeyId, encryptionContext);
 }

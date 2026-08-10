@@ -1,15 +1,21 @@
+import { timingSafeEqual } from 'node:crypto';
 import { PutObjectCommand, type S3Client } from '@aws-sdk/client-s3';
-import { PutParameterCommand, type SSMClient } from '@aws-sdk/client-ssm';
-import { KMSClient } from '@aws-sdk/client-kms';
+import AWS from 'aws-sdk';
 import { KmsKeyringNode } from '@aws-crypto/client-node';
-import { deriveIngestKeypair, generateMasterKey } from '../sealing/keygen.js';
-import { sealMasterKey, unsealMasterKey } from '../sealing/seal.js';
+import { generateMasterKey } from '../sealing/keygen.js';
+import { awsV2ClientTransport } from '../aws/aws-transport.js';
+import { createRecipientKmsClient } from '../aws/RecipientKmsClient.js';
+import {
+  decryptRecipientCiphertextWithKeyId,
+  sealMasterKey,
+  unsealMasterKey,
+} from '../sealing/seal.js';
 import { readSealedBlob, writeSealedBlob } from '../sealing/sealed-blob-store.js';
 import { assertRecoveryConfigured, sealRecoveryMnemonic } from '../sealing/recovery.js';
 import { HnswStore } from '../hnsw/index.js';
 import { Pipeline } from '../pipeline/index.js';
 import { EnclaveCrypto } from '../crypto/esdk.js';
-import { EMBED_MODEL, GENERATE_MODEL, phalaInference } from '../inference/phala.js';
+import { CRITIQUE_MODEL, EMBED_MODEL, GENERATE_MODEL, phalaInference } from '../inference/phala.js';
 import {
   CachedInference,
   LLM_CACHE_PROMPT_VERSION,
@@ -20,18 +26,46 @@ import { TenantContext } from './tenant-context.js';
 
 export interface TenantIdentity {
   tenantId: string;
+  /** Master CMK — seals/unseals the master blob only, never content. */
   kmsKeyId: string;
+  /** The tenant's STORAGE key — the ESDK content keyring is built from this, never the master CMK. */
+  storageKeyId: string;
   recoveryPubkey: string;
+  signedRecoveryPubkey?: string;
+  sealedBlobBucket?: string;
+  rawPayloadsBucket?: string;
+  processedBucket?: string;
 }
+
+export type SealMasterKeyFn = (
+  masterKey: Buffer,
+  kmsKeyId: string,
+  tenantId: string,
+) => Promise<Buffer>;
+
+export type UnsealMasterKeyFn = (
+  blob: Buffer,
+  kmsKeyId: string,
+  tenantId: string,
+) => Promise<Buffer>;
 
 export interface TenantContextFactoryDeps {
   s3: S3Client;
-  ssm: SSMClient;
   region: string;
-  proxyEndpoint: string;
+  /** From the root-signed boot manifest (audit F2), read late: it is verified after this is built. */
+  signedRecoveryPubkey?: () => string | undefined;
+  /** The tenant's storage key ARN from the verified boot manifest; the identity's env value must agree. */
+  signedStorageKeyArn?: () => string | undefined;
+  /** Test seam: replaces the AWS SDK v2 KMS client constructor the ESDK keyring uses. */
+  kmsClientProvider?: (region?: string) => AWS.KMS;
   sealedBlobBucket: string;
   processedOutputsBucket: string;
+  sealMasterKey?: SealMasterKeyFn;
+  unsealMasterKey?: UnsealMasterKeyFn;
 }
+
+const MASTER_KEY_BYTES = 32;
+const VERIFIED_BOOT_PROOF_ERROR = 'verified boot proof failed';
 
 // Builds one tenant's isolated context (single-CMK keyring, unsealed master key, per-org HNSW,
 // pipeline). One factory serves the whole enclave; Stage 1 builds exactly one context, but the
@@ -40,114 +74,212 @@ export class TenantContextFactory {
   constructor(private readonly deps: TenantContextFactoryDeps) {}
 
   async build(identity: TenantIdentity): Promise<TenantContext> {
-    const keyring = this.buildKeyring(identity.kmsKeyId);
+    const sealedBlobBucket = this.resolveBucket(
+      identity.sealedBlobBucket ?? '',
+      this.deps.sealedBlobBucket,
+    );
+    const processedBucket = this.resolveBucket(
+      identity.processedBucket ?? '',
+      this.deps.processedOutputsBucket,
+    );
+    const keyring = this.buildKeyring(this.resolveStorageKeyId(identity));
     const masterKey = await this.bootMasterKey(identity);
-    const hnsw = await HnswStore.load(
-      this.deps.s3,
-      keyring,
-      this.deps.processedOutputsBucket,
-      identity.tenantId,
-    );
-    const pipeline = new Pipeline(
-      hnsw,
-      this.deps.s3,
-      keyring,
-      this.deps.processedOutputsBucket,
-      identity.tenantId,
-      this.buildInference(keyring, identity.tenantId),
-    );
-    return new TenantContext(
-      identity.tenantId,
-      identity.kmsKeyId,
-      keyring,
-      masterKey,
-      hnsw,
-      pipeline,
-    );
+    try {
+      const hnsw = await HnswStore.load(this.deps.s3, keyring, processedBucket, identity.tenantId);
+      const pipeline = new Pipeline(
+        hnsw,
+        this.deps.s3,
+        keyring,
+        processedBucket,
+        identity.tenantId,
+        this.buildInference(keyring, identity.tenantId, processedBucket),
+      );
+      return new TenantContext(
+        identity.tenantId,
+        identity.kmsKeyId,
+        keyring,
+        masterKey,
+        hnsw,
+        pipeline,
+        sealedBlobBucket,
+        identity.rawPayloadsBucket ?? '',
+        processedBucket,
+      );
+    } catch (error) {
+      masterKey.fill(0);
+      throw error;
+    }
   }
 
-  private buildInference(keyring: KmsKeyringNode, tenantId: string): InferenceModel {
+  private buildInference(
+    keyring: KmsKeyringNode,
+    tenantId: string,
+    processedBucket: string,
+  ): InferenceModel {
     const cache = new S3LlmCache({
       s3: this.deps.s3,
       crypto: new EnclaveCrypto(keyring),
-      bucket: this.deps.processedOutputsBucket,
+      bucket: processedBucket,
       orgId: tenantId,
     });
     return new CachedInference(phalaInference, cache, {
       embedModel: EMBED_MODEL,
       generateModel: GENERATE_MODEL,
+      critiqueModel: CRITIQUE_MODEL,
       promptVersion: LLM_CACHE_PROMPT_VERSION,
     });
   }
 
+  // The content keyring is built from the tenant's STORAGE key, never the master key: the master
+  // key's Decrypt is attestation-gated, and an IAM decrypt on it would be a non-attested unseal
+  // path. The dedicated box's storage key arrives in the SIGNED boot manifest; the pool box's in
+  // the assignment manifest. Either may be absent only if the other is present, and the two must
+  // agree — a mismatch or a total absence refuses the boot.
+  private resolveStorageKeyId(identity: TenantIdentity): string {
+    const identityKey = (identity.storageKeyId ?? '').trim();
+    const signedKey = this.deps.signedStorageKeyArn?.()?.trim() ?? '';
+    if (identityKey && signedKey && identityKey !== signedKey) {
+      throw new Error('refusing boot: storage key disagrees with the signed boot manifest');
+    }
+    const chosen = signedKey || identityKey;
+    if (!chosen) {
+      throw new Error(
+        'refusing boot: no storage key configured (content keyring must never fall back to the master CMK)',
+      );
+    }
+    // Last line: even if a producer or schema regression let an equal key through, never build the
+    // content keyring on the master key — its Decrypt is attestation-gated, so content would seal
+    // write-only and be unrecoverable.
+    if (chosen === identity.kmsKeyId.trim()) {
+      throw new Error('refusing boot: storage key must differ from the master CMK');
+    }
+    return chosen;
+  }
+
   private buildKeyring(kmsKeyId: string): KmsKeyringNode {
+    const provider =
+      this.deps.kmsClientProvider ??
+      ((r?: string) =>
+        new AWS.KMS({
+          region: r || this.deps.region,
+          ...awsV2ClientTransport(),
+        }));
     return new KmsKeyringNode({
       generatorKeyId: kmsKeyId,
-      clientProvider: (r?: string) =>
-        new KMSClient({
-          region: r ?? this.deps.region,
-          endpoint: this.deps.proxyEndpoint,
-        }) as never,
+      clientProvider: (region?: string) =>
+        createRecipientKmsClient(
+          provider(region || this.deps.region),
+          ({ ciphertext, keyId, encryptionContext }) =>
+            decryptRecipientCiphertextWithKeyId(ciphertext, keyId, encryptionContext),
+          kmsKeyId,
+        ),
     });
   }
 
   private async bootMasterKey(identity: TenantIdentity): Promise<Buffer> {
-    const sealedBlob = await readSealedBlob(
-      this.deps.s3,
+    const sealedBlobBucket = this.resolveBucket(
+      identity.sealedBlobBucket ?? '',
       this.deps.sealedBlobBucket,
-      identity.tenantId,
     );
+    const sealedBlob = await readSealedBlob(this.deps.s3, sealedBlobBucket, identity.tenantId);
 
     if (sealedBlob) {
-      console.log('unsealing master key via KMS');
-      const masterKey = await unsealMasterKey(sealedBlob, identity.kmsKeyId, identity.tenantId);
-      console.log('unseal ok');
-      return masterKey;
+      return this.unsealExistingMasterKey(sealedBlob, identity);
     }
 
     return this.firstBoot(identity);
   }
 
   private async firstBoot(identity: TenantIdentity): Promise<Buffer> {
-    console.log('first boot — generating master key');
-    // Fail closed before generating a key we could never let the customer recover.
-    const recoveryKey = assertRecoveryConfigured(identity.recoveryPubkey);
+    const sealedBlobBucket = this.resolveBucket(
+      identity.sealedBlobBucket ?? '',
+      this.deps.sealedBlobBucket,
+    );
+    const recoveryKey = assertRecoveryConfigured(
+      identity.recoveryPubkey,
+      identity.signedRecoveryPubkey ?? this.deps.signedRecoveryPubkey?.(),
+    );
     const masterKey = generateMasterKey();
+    try {
+      const recoveryBox = sealRecoveryMnemonic(masterKey, recoveryKey);
+      await this.deps.s3.send(
+        new PutObjectCommand({
+          Bucket: sealedBlobBucket,
+          Key: this.recoveryBlobKey(identity.tenantId),
+          Body: JSON.stringify(recoveryBox),
+          ContentType: 'application/json',
+        }),
+      );
 
-    // Store only ciphertext the customer alone can open; write it before persisting the master
-    // blob so a recovery-store failure leaves no ingestible tenant behind.
-    const recoveryBox = sealRecoveryMnemonic(masterKey, recoveryKey);
-    await this.deps.s3.send(
-      new PutObjectCommand({
-        Bucket: this.deps.sealedBlobBucket,
-        Key: this.recoveryBlobKey(identity.tenantId),
-        Body: JSON.stringify(recoveryBox),
-        ContentType: 'application/json',
-      }),
+      const blob = await this.seal(masterKey, identity);
+      await this.verifyFirstBootRoundTrip(blob, masterKey, identity);
+      await writeSealedBlob(this.deps.s3, sealedBlobBucket, identity.tenantId, blob);
+      return masterKey;
+    } catch (error) {
+      masterKey.fill(0);
+      throw error;
+    }
+  }
+
+  private resolveBucket(identityBucket: string, fallbackBucket: string): string {
+    const bucket = identityBucket.trim() || fallbackBucket.trim();
+    if (!bucket) throw new Error('tenant storage bucket is not configured');
+    return bucket;
+  }
+
+  private async seal(masterKey: Buffer, identity: TenantIdentity): Promise<Buffer> {
+    return (this.deps.sealMasterKey ?? sealMasterKey)(
+      masterKey,
+      identity.kmsKeyId,
+      identity.tenantId,
     );
+  }
 
-    const blob = await sealMasterKey(masterKey, identity.kmsKeyId, identity.tenantId);
-    await writeSealedBlob(this.deps.s3, this.deps.sealedBlobBucket, identity.tenantId, blob);
+  private async verifyFirstBootRoundTrip(
+    blob: Buffer,
+    masterKey: Buffer,
+    identity: TenantIdentity,
+  ): Promise<void> {
+    let roundTripMasterKey: Buffer | undefined;
+    try {
+      const unsealedMasterKey = await (this.deps.unsealMasterKey ?? unsealMasterKey)(
+        blob,
+        identity.kmsKeyId,
+        identity.tenantId,
+      );
+      if (!Buffer.isBuffer(unsealedMasterKey)) throw new Error(VERIFIED_BOOT_PROOF_ERROR);
+      roundTripMasterKey = unsealedMasterKey;
+      if (
+        roundTripMasterKey.length !== MASTER_KEY_BYTES ||
+        !timingSafeEqual(roundTripMasterKey, masterKey)
+      ) {
+        throw new Error(VERIFIED_BOOT_PROOF_ERROR);
+      }
+    } catch {
+      masterKey.fill(0);
+      throw new Error(VERIFIED_BOOT_PROOF_ERROR);
+    } finally {
+      roundTripMasterKey?.fill(0);
+    }
+  }
 
-    const { publicKeyRaw } = deriveIngestKeypair(masterKey);
-    await this.deps.ssm.send(
-      new PutParameterCommand({
-        Name: this.ingestKeySsmPath(identity.tenantId),
-        Value: publicKeyRaw.toString('hex'),
-        Type: 'String',
-        Overwrite: true,
-      }),
-    );
-
-    console.log('FIRST_BOOT', { tenant: identity.tenantId });
-    return masterKey;
+  private async unsealExistingMasterKey(blob: Buffer, identity: TenantIdentity): Promise<Buffer> {
+    let masterKey: Buffer | undefined;
+    try {
+      masterKey = await (this.deps.unsealMasterKey ?? unsealMasterKey)(
+        blob,
+        identity.kmsKeyId,
+        identity.tenantId,
+      );
+      if (masterKey.length !== MASTER_KEY_BYTES) throw new Error(VERIFIED_BOOT_PROOF_ERROR);
+      return masterKey;
+    } catch {
+      masterKey?.fill(0);
+      throw new Error(VERIFIED_BOOT_PROOF_ERROR);
+    }
   }
 
   private recoveryBlobKey(tenantId: string): string {
     return `recovery/${tenantId}/mnemonic.enc`;
-  }
-
-  private ingestKeySsmPath(tenantId: string): string {
-    return `/folklore/${tenantId}/ingest-public-key`;
   }
 }

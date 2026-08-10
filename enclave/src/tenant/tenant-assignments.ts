@@ -1,7 +1,9 @@
 import {
   type AssignmentManifest,
+  type SignedAssignmentManifest,
   type TenantAssignment,
   parseAssignmentManifest as parseContractManifest,
+  parseVersionedAssignmentManifest as parseContractVersionedManifest,
   tenantAssignmentSchema,
 } from '@folklore/contracts';
 
@@ -10,7 +12,17 @@ import {
 // `parseAssignmentManifest` is the runtime path for a manifest delivered on the check-in channel.
 export type { TenantAssignment, AssignmentManifest };
 
-const REQUIRED_FIELDS = ['tenantId', 'kmsKeyId', 'queueUrl'] as const;
+// Storage key is REQUIRED so a manifest/env without one fails closed — the ESDK content keyring
+// must never fall back to the master key (its Decrypt is attestation-gated).
+const REQUIRED_FIELDS = [
+  'tenantId',
+  'kmsKeyId',
+  'storageKeyId',
+  'queueUrl',
+  'sealedBlobBucket',
+  'rawPayloadsBucket',
+  'processedBucket',
+] as const;
 
 /** Resolves the enclave's assigned tenants from env: TENANT_ASSIGNMENTS (a JSON array, shared pool) or the TENANT_ID single-tenant fallback (a dedicated box, the default tier §6.1). */
 export function parseTenantAssignments(env: NodeJS.ProcessEnv): TenantAssignment[] {
@@ -43,6 +55,17 @@ export function parseAssignmentManifest(
   return parsed.assignments;
 }
 
+/** Validates a signed assignment revision before the registry receives its assignment set. */
+export function parseVersionedAssignmentManifest(
+  manifest: unknown,
+  expectedPoolId: string,
+  lastGeneration: number,
+): SignedAssignmentManifest {
+  const parsed = parseContractVersionedManifest(manifest, expectedPoolId, lastGeneration);
+  assertNoDuplicates(parsed.assignments);
+  return parsed;
+}
+
 function parseManifest(manifest: string): TenantAssignment[] {
   let parsed: unknown;
   try {
@@ -62,7 +85,11 @@ function parseSingleTenant(env: NodeJS.ProcessEnv): TenantAssignment[] {
       {
         tenantId,
         kmsKeyId: env['KMS_KEY_ID'],
+        storageKeyId: env['STORAGE_KEY_ARN'],
         queueUrl: env['QUEUE_URL'],
+        sealedBlobBucket: env['SEALED_BLOB_BUCKET'],
+        rawPayloadsBucket: env['RAW_PAYLOADS_BUCKET'],
+        processedBucket: env['PROCESSED_OUTPUTS_BUCKET'],
         recoveryPubkey: env['RECOVERY_PUBKEY'] ?? '',
       },
       0,
@@ -87,7 +114,11 @@ function toAssignment(entry: unknown, index: number): TenantAssignment {
   return tenantAssignmentSchema.parse({
     tenantId: (record['tenantId'] as string).trim(),
     kmsKeyId: (record['kmsKeyId'] as string).trim(),
+    storageKeyId: (record['storageKeyId'] as string).trim(),
     queueUrl: (record['queueUrl'] as string).trim(),
+    sealedBlobBucket: (record['sealedBlobBucket'] as string).trim(),
+    rawPayloadsBucket: (record['rawPayloadsBucket'] as string).trim(),
+    processedBucket: (record['processedBucket'] as string).trim(),
     recoveryPubkey: typeof record['recoveryPubkey'] === 'string' ? record['recoveryPubkey'] : '',
   });
 }

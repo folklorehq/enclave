@@ -6,8 +6,10 @@ import { HttpsProxyAgent } from 'https-proxy-agent';
 export const EGRESS_PROXY_PORT = 8002;
 const PROXY_URL = `http://localhost:${EGRESS_PROXY_PORT}`;
 
-// AWS (:8000) and inference (:8001) reach the parent over their own vsock proxies, so
-// loopback must bypass the egress proxy or unseal/synthesis break.
+// Loopback callers — the AWS vsock proxy (:8000) and the inference vsock fallback (:8001) — must
+// bypass the egress proxy or unseal and synthesis break. Production inference no longer takes that
+// fallback after this lane: it keeps its real hostname and leaves through the CONNECT proxy, so
+// `inference.phala.com` has to be in `egressHosts` (infra/src/enclave.ts) — added in PR #683.
 export const LOOPBACK_NO_PROXY = 'localhost,127.0.0.1';
 
 export interface EgressProxyConfig {

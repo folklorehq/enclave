@@ -1,6 +1,8 @@
 import type { SSMClient } from '@aws-sdk/client-ssm';
+import type { S3Client } from '@aws-sdk/client-s3';
 import { decryptPayload, type EncryptedPayload } from '../ingest/receiver.js';
 import type { ProcessedFact } from '../pipeline/index.js';
+import type { OAuthRefreshCommand, OAuthRefreshMetadataUpdate } from '@folklore/contracts/enclave';
 import {
   buildPullCompleteSignal,
   runPull,
@@ -31,9 +33,16 @@ export interface RoutedResult {
 export interface TenantMessageRouterDeps {
   registry: TenantRegistry;
   ssm: SSMClient;
+  s3?: S3Client;
+  processedBucket?: string;
   controlPlaneUrl: string;
+  controlPlaneFetch: typeof globalThis.fetch;
   deploymentId: string;
   agentToken: () => string;
+  refreshOAuthCredential?: (input: OAuthRefreshCommand) => Promise<OAuthRefreshMetadataUpdate>;
+  mintGitHubInstallationToken?: (input: {
+    installationId: string;
+  }) => Promise<{ accessToken: string; expiresAt: string }>;
 }
 
 // A message arrived on a queue owned by one tenant but its body names a different one — the two
@@ -68,11 +77,17 @@ export class TenantMessageRouter {
     if (isPullDueMessage(raw)) {
       const facts = await runPull(raw, {
         ssm: this.deps.ssm,
-        privateKey: context.ingestPrivateKey,
+        s3: this.deps.s3,
+        processedBucket: context.processedOutputsBucket || this.deps.processedBucket,
+        orgId: queueTenantId,
+        crypto: context.crypto,
         controlPlaneUrl: this.deps.controlPlaneUrl,
+        controlPlaneFetch: this.deps.controlPlaneFetch,
         deploymentId: this.deps.deploymentId,
         agentToken: this.deps.agentToken(),
         pipeline: context.pipeline,
+        refreshOAuthCredential: this.deps.refreshOAuthCredential,
+        mintGitHubInstallationToken: this.deps.mintGitHubInstallationToken,
       });
       return { context, facts, pullComplete: buildPullCompleteSignal(raw) };
     }

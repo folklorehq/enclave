@@ -1,5 +1,6 @@
 import { buildClient, CommitmentPolicy, type KmsKeyringNode } from '@aws-crypto/client-node';
 import type { WikiCommentField } from '@folklore/contracts';
+import type { SensitivityLevel } from '@folklore/wiki';
 
 const { encrypt, decrypt } = buildClient(CommitmentPolicy.REQUIRE_ENCRYPT_REQUIRE_DECRYPT);
 
@@ -12,6 +13,10 @@ const COLLAB_SNAPSHOT_PURPOSE = 'collab-snapshot';
 const WIKI_COMMENT_PURPOSE = 'wiki-comment';
 const WIKI_FEEDBACK_PURPOSE = 'wiki-feedback';
 const LLM_CACHE_PURPOSE = 'llm-cache';
+const OAUTH_CREDENTIAL_PURPOSE = 'oauth-credential';
+const PULL_CURSOR_PURPOSE = 'pull-cursor';
+
+export const WIKI_PUBLICATION_ENVELOPE_FORMAT = 'esdk-wiki-publication-v1';
 
 export interface FactBodyRef {
   factId: string;
@@ -49,6 +54,21 @@ export interface LlmCacheRef {
   cacheKey: string;
 }
 
+// The `code` connector's per-repo pull cursor carries raw file paths (content-derived), so it is
+// sealed like every other tenant blob — enclave-written, enclave-read, never worker-readable.
+export interface PullCursorRef {
+  orgId: string;
+  sourceId: string;
+}
+
+export interface OAuthCredentialRef {
+  orgId: string;
+  sourceKind: string;
+  connectionId: string;
+  purpose: 'access' | 'refresh';
+  generation: string;
+}
+
 // Derived-knowledge is encrypted to the same key as fact bodies, but
 // bound to its own row identity: the article to (org, theme, audience), each block
 // to (org, theme, audience, blockType). `audienceKey` normalizes the all-members
@@ -76,6 +96,32 @@ export interface TeamOnboardingBlockRef extends TeamOnboardingArticleRef {
   blockType: string;
 }
 
+export interface WikiPublicationSnapshotRef {
+  purpose: 'wiki-publication-yjs';
+  orgId: string;
+  pageId: string;
+  publicationId: string;
+  parentPublicationId: string | null;
+  revision: number;
+  titleHash: string;
+  markdownHash: string;
+  policyHash: string;
+}
+
+export interface WikiPublishedBlockRef {
+  purpose: 'wiki-publication-block';
+  orgId: string;
+  pageId: string;
+  publicationId: string;
+  blockId: string;
+  logicalId: string;
+  type: string;
+  position: number;
+  sensitivityLevel: SensitivityLevel;
+  provenanceHash: string;
+  contentHash: string;
+}
+
 function audienceKey(audienceId: string | null): string {
   return audienceId ?? 'all';
 }
@@ -95,6 +141,22 @@ export class EncryptionContextMismatchError extends Error {
 // to a different row is rejected rather than served into the wrong one.
 // One place to audit crypto for the public mirror.
 export class EnclaveCrypto {
+  encryptStorageCanary(plaintext: Buffer, orgId: string, generation: number): Promise<Buffer> {
+    return this.seal(plaintext, {
+      purpose: 'storage-canary',
+      orgId,
+      generation: String(generation),
+    });
+  }
+
+  decryptStorageCanary(ciphertext: Buffer, orgId: string, generation: number): Promise<Buffer> {
+    return this.openContext(
+      ciphertext,
+      { purpose: 'storage-canary', orgId, generation: String(generation) },
+      'storage-canary',
+    );
+  }
+
   constructor(private readonly keyring: KmsKeyringNode) {}
 
   encryptFactBody(plaintext: Buffer, ref: FactBodyRef & { sha256: string }): Promise<Buffer> {
@@ -253,6 +315,68 @@ export class EnclaveCrypto {
     });
   }
 
+  encryptPullCursor(plaintext: Buffer, ref: PullCursorRef): Promise<Buffer> {
+    return this.seal(plaintext, {
+      orgId: ref.orgId,
+      sourceId: ref.sourceId,
+      purpose: PULL_CURSOR_PURPOSE,
+    });
+  }
+
+  decryptPullCursor(ciphertext: Buffer, expected: PullCursorRef): Promise<Buffer> {
+    return this.open(ciphertext, PULL_CURSOR_PURPOSE, {
+      orgId: expected.orgId,
+      sourceId: expected.sourceId,
+    });
+  }
+
+  encryptOAuthCredential(plaintext: Buffer, ref: OAuthCredentialRef): Promise<Buffer> {
+    return this.seal(plaintext, {
+      orgId: ref.orgId,
+      sourceKind: ref.sourceKind,
+      connectionId: ref.connectionId,
+      credentialPurpose: ref.purpose,
+      generation: ref.generation,
+      purpose: OAUTH_CREDENTIAL_PURPOSE,
+    });
+  }
+
+  decryptOAuthCredential(ciphertext: Buffer, expected: OAuthCredentialRef): Promise<Buffer> {
+    return this.open(ciphertext, OAUTH_CREDENTIAL_PURPOSE, {
+      orgId: expected.orgId,
+      sourceKind: expected.sourceKind,
+      connectionId: expected.connectionId,
+      credentialPurpose: expected.purpose,
+      generation: expected.generation,
+    });
+  }
+
+  encryptWikiPublicationSnapshot(
+    plaintext: Buffer,
+    ref: WikiPublicationSnapshotRef,
+  ): Promise<Buffer> {
+    return this.seal(plaintext, this.publicationSnapshotContext(ref));
+  }
+
+  decryptWikiPublicationSnapshot(
+    ciphertext: Buffer,
+    expected: WikiPublicationSnapshotRef,
+  ): Promise<Buffer> {
+    return this.openContext(
+      ciphertext,
+      this.publicationSnapshotContext(expected),
+      expected.purpose,
+    );
+  }
+
+  encryptWikiPublishedBlock(plaintext: Buffer, ref: WikiPublishedBlockRef): Promise<Buffer> {
+    return this.seal(plaintext, this.publishedBlockContext(ref));
+  }
+
+  decryptWikiPublishedBlock(ciphertext: Buffer, expected: WikiPublishedBlockRef): Promise<Buffer> {
+    return this.openContext(ciphertext, this.publishedBlockContext(expected), expected.purpose);
+  }
+
   private async seal(
     plaintext: Buffer,
     encryptionContext: Record<string, string>,
@@ -268,12 +392,50 @@ export class EnclaveCrypto {
     purpose: string,
     identity: Record<string, string>,
   ): Promise<Buffer> {
+    return this.openContext(ciphertext, { purpose, ...identity }, purpose);
+  }
+
+  private async openContext(
+    ciphertext: Buffer,
+    expected: Record<string, string>,
+    purpose: string,
+  ): Promise<Buffer> {
     const { plaintext, messageHeader } = await decrypt(this.keyring, ciphertext);
     const ctx = messageHeader.encryptionContext;
-    const mismatch =
-      ctx['purpose'] !== purpose ||
-      Object.entries(identity).some(([key, value]) => ctx[key] !== value);
+    const mismatch = Object.entries(expected).some(([key, value]) => ctx[key] !== value);
     if (mismatch) throw new EncryptionContextMismatchError(purpose);
     return Buffer.from(plaintext);
+  }
+
+  private publicationSnapshotContext(ref: WikiPublicationSnapshotRef): Record<string, string> {
+    return {
+      format: WIKI_PUBLICATION_ENVELOPE_FORMAT,
+      purpose: ref.purpose,
+      orgId: ref.orgId,
+      pageId: ref.pageId,
+      publicationId: ref.publicationId,
+      parentPublicationId: ref.parentPublicationId ?? '',
+      revision: String(ref.revision),
+      titleHash: ref.titleHash,
+      markdownHash: ref.markdownHash,
+      policyHash: ref.policyHash,
+    };
+  }
+
+  private publishedBlockContext(ref: WikiPublishedBlockRef): Record<string, string> {
+    return {
+      format: WIKI_PUBLICATION_ENVELOPE_FORMAT,
+      purpose: ref.purpose,
+      orgId: ref.orgId,
+      pageId: ref.pageId,
+      publicationId: ref.publicationId,
+      blockId: ref.blockId,
+      logicalId: ref.logicalId,
+      type: ref.type,
+      position: String(ref.position),
+      sensitivityLevel: ref.sensitivityLevel,
+      provenanceHash: ref.provenanceHash,
+      contentHash: ref.contentHash,
+    };
   }
 }

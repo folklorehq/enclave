@@ -14,7 +14,12 @@ export async function saveAllTenantIndices(
   await Promise.all(
     contexts.map(async (context) => {
       try {
-        await context.hnsw.save(s3, context.keyring, bucket, context.tenantId);
+        await context.hnsw.save(
+          s3,
+          context.keyring,
+          context.processedOutputsBucket || bucket,
+          context.tenantId,
+        );
       } catch {
         logger.error('HNSW_SAVE_FAILED', { tenant: context.tenantId });
       }

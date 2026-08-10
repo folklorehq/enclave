@@ -52,14 +52,46 @@ export function parseRecoveryPublicKey(hex: string): KeyObject {
   });
 }
 
-// Fail closed: no tenant may hold data with zero recovery path.
-export function assertRecoveryConfigured(hex: string): KeyObject {
-  if (!hex) {
+// Recovery is the one master-key path the PCR gate does not cover: whoever holds the private half
+// of this key can decrypt the sealed mnemonic and reach all content. So in production the key must
+// come from the root-signed boot manifest, never from the parent-written env file — a parent that
+// substitutes its own key gets a refused boot, not a decryptable mnemonic (audit F2). Dev and test
+// have no manifest signer, so they still take the env value.
+export function assertRecoveryConfigured(hex: string, signed?: string): KeyObject {
+  const envKey = normalizeRecoveryKey(hex);
+  const signedKey = normalizeRecoveryKey(signed);
+  if (signedKey && envKey && signedKey !== envKey) {
+    throw new Error('refusing first boot: RECOVERY_PUBKEY disagrees with the signed boot manifest');
+  }
+  if (!signedKey && requiresSignedRecoveryKey()) {
+    throw new Error(
+      'refusing first boot: the signed boot manifest carries no recovery public key, and a production enclave will not seal the master-key mnemonic to a parent-chosen one',
+    );
+  }
+  const chosen = signedKey || envKey;
+  if (!chosen) {
     throw new Error(
       'refusing first boot: no customer recovery public key configured (RECOVERY_PUBKEY)',
     );
   }
-  return parseRecoveryPublicKey(hex);
+  return parseRecoveryPublicKey(chosen);
+}
+
+// entrypoint.sh pins NODE_ENV=production after parsing the parent's env file, so the parent cannot
+// claim to be a dev run to reach the env-key path.
+//
+// Deliberately not scoped to "a boot manifest was configured": the parent decides whether the
+// manifest env vars arrive at all, so gating on their presence would hand it the downgrade this
+// check exists to refuse. Shared pools receive this evidence only from their verified versioned
+// assignment manifest, never directly from an env assignment.
+function requiresSignedRecoveryKey(): boolean {
+  return process.env['NODE_ENV'] === 'production';
+}
+
+// Hex case is not identity: an env value and a manifest value that differ only in case name the
+// same key, and treating them as a disagreement would refuse a legitimate boot.
+function normalizeRecoveryKey(value: string | undefined): string {
+  return value?.trim().toLowerCase() ?? '';
 }
 
 export function sealToRecoveryKey(
