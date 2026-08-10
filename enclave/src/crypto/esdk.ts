@@ -1,5 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import { buildClient, CommitmentPolicy, type KmsKeyringNode } from '@aws-crypto/client-node';
 import type { WikiCommentField } from '@folklore/contracts';
+import {
+  sealedContentEnvelopeV1Schema,
+  type SealedContentEnvelopeV1,
+} from '@folklore/contracts/enclave';
 import type { SensitivityLevel } from '@folklore/wiki';
 
 const { encrypt, decrypt } = buildClient(CommitmentPolicy.REQUIRE_ENCRYPT_REQUIRE_DECRYPT);
@@ -96,6 +101,21 @@ export interface TeamOnboardingBlockRef extends TeamOnboardingArticleRef {
   blockType: string;
 }
 
+type SealedBlockHeader = Omit<SealedContentEnvelopeV1, 'ciphertext' | 'purpose'> & {
+  purpose: 'wiki-block' | 'team-onboarding-block';
+};
+
+export interface SealedContentKeyringConfig {
+  activeVersion: number;
+  keyrings: ReadonlyMap<number, KmsKeyringNode>;
+}
+
+export function singleVersionSealedContentKeyring(
+  keyring: KmsKeyringNode,
+): SealedContentKeyringConfig {
+  return { activeVersion: 1, keyrings: new Map([[1, keyring]]) };
+}
+
 export interface WikiPublicationSnapshotRef {
   purpose: 'wiki-publication-yjs';
   orgId: string;
@@ -157,7 +177,21 @@ export class EnclaveCrypto {
     );
   }
 
-  constructor(private readonly keyring: KmsKeyringNode) {}
+  private readonly sealedContentKeyrings: SealedContentKeyringConfig;
+
+  constructor(
+    private readonly keyring: KmsKeyringNode,
+    sealedContentKeyrings: SealedContentKeyringConfig,
+  ) {
+    if (
+      !Number.isSafeInteger(sealedContentKeyrings.activeVersion) ||
+      sealedContentKeyrings.activeVersion < 1 ||
+      !sealedContentKeyrings.keyrings.has(sealedContentKeyrings.activeVersion)
+    ) {
+      throw new Error('sealed content keyring configuration is invalid');
+    }
+    this.sealedContentKeyrings = sealedContentKeyrings;
+  }
 
   encryptFactBody(plaintext: Buffer, ref: FactBodyRef & { sha256: string }): Promise<Buffer> {
     return this.seal(plaintext, {
@@ -211,6 +245,37 @@ export class EnclaveCrypto {
     });
   }
 
+  async sealWikiBlockEnvelope(
+    plaintext: Buffer,
+    ref: WikiBlockRef,
+  ): Promise<SealedContentEnvelopeV1> {
+    return this.sealBlockEnvelope(
+      plaintext,
+      this.sealedBlockHeader(ref.orgId, WIKI_BLOCK_PURPOSE),
+      {
+        orgId: ref.orgId,
+        themeId: ref.themeId,
+        audienceId: audienceKey(ref.audienceId),
+        blockType: ref.blockType,
+      },
+    );
+  }
+
+  async openWikiBlockEnvelope(envelope: unknown, expected: WikiBlockRef): Promise<Buffer> {
+    const sealed = sealedContentEnvelopeV1Schema.parse(envelope);
+    this.requireSealedBlockIdentity(sealed, expected.orgId, WIKI_BLOCK_PURPOSE);
+    return this.openSealedBlockContext(
+      Buffer.from(sealed.ciphertext, 'base64'),
+      this.sealedBlockContext(sealed, {
+        orgId: expected.orgId,
+        themeId: expected.themeId,
+        audienceId: audienceKey(expected.audienceId),
+        blockType: expected.blockType,
+      }),
+      WIKI_BLOCK_PURPOSE,
+    );
+  }
+
   encryptTeamOnboardingArticle(plaintext: Buffer, ref: TeamOnboardingArticleRef): Promise<Buffer> {
     return this.seal(plaintext, {
       orgId: ref.orgId,
@@ -251,6 +316,40 @@ export class EnclaveCrypto {
       audienceId: audienceKey(expected.audienceId),
       blockType: expected.blockType,
     });
+  }
+
+  async sealTeamOnboardingBlockEnvelope(
+    plaintext: Buffer,
+    ref: TeamOnboardingBlockRef,
+  ): Promise<SealedContentEnvelopeV1> {
+    return this.sealBlockEnvelope(
+      plaintext,
+      this.sealedBlockHeader(ref.orgId, TEAM_ONBOARDING_BLOCK_PURPOSE),
+      {
+        orgId: ref.orgId,
+        teamId: ref.teamId,
+        audienceId: audienceKey(ref.audienceId),
+        blockType: ref.blockType,
+      },
+    );
+  }
+
+  async openTeamOnboardingBlockEnvelope(
+    envelope: unknown,
+    expected: TeamOnboardingBlockRef,
+  ): Promise<Buffer> {
+    const sealed = sealedContentEnvelopeV1Schema.parse(envelope);
+    this.requireSealedBlockIdentity(sealed, expected.orgId, TEAM_ONBOARDING_BLOCK_PURPOSE);
+    return this.openSealedBlockContext(
+      Buffer.from(sealed.ciphertext, 'base64'),
+      this.sealedBlockContext(sealed, {
+        orgId: expected.orgId,
+        teamId: expected.teamId,
+        audienceId: audienceKey(expected.audienceId),
+        blockType: expected.blockType,
+      }),
+      TEAM_ONBOARDING_BLOCK_PURPOSE,
+    );
   }
 
   encryptCollabSnapshot(plaintext: Buffer, ref: CollabSnapshotRef): Promise<Buffer> {
@@ -385,6 +484,19 @@ export class EnclaveCrypto {
     return result;
   }
 
+  private async sealBlockEnvelope(
+    plaintext: Buffer,
+    header: SealedBlockHeader,
+    identity: Record<string, string>,
+  ): Promise<SealedContentEnvelopeV1> {
+    const ciphertext = await this.sealWithKeyring(
+      this.sealedContentKeyring(header.contentKeyVersion, header.purpose),
+      plaintext,
+      this.sealedBlockContext(header, identity),
+    );
+    return { ...header, ciphertext: ciphertext.toString('base64') };
+  }
+
   // Decrypts and re-checks the bound `purpose` plus every identity field; any mismatch (a ciphertext
   // relocated to another row, or a legacy/plaintext blob that isn't a valid ESDK message) throws.
   private async open(
@@ -402,7 +514,34 @@ export class EnclaveCrypto {
   ): Promise<Buffer> {
     const { plaintext, messageHeader } = await decrypt(this.keyring, ciphertext);
     const ctx = messageHeader.encryptionContext;
-    const mismatch = Object.entries(expected).some(([key, value]) => ctx[key] !== value);
+    const mismatch =
+      this.hasSealedEnvelopeMarker(ctx) ||
+      Object.entries(expected).some(([key, value]) => ctx[key] !== value);
+    if (mismatch) throw new EncryptionContextMismatchError(purpose);
+    return Buffer.from(plaintext);
+  }
+
+  private async sealWithKeyring(
+    keyring: KmsKeyringNode,
+    plaintext: Buffer,
+    encryptionContext: Record<string, string>,
+  ): Promise<Buffer> {
+    const { result } = await encrypt(keyring, plaintext, { encryptionContext });
+    return result;
+  }
+
+  private async openSealedBlockContext(
+    ciphertext: Buffer,
+    expected: Record<string, string>,
+    purpose: 'wiki-block' | 'team-onboarding-block',
+  ): Promise<Buffer> {
+    const { plaintext, messageHeader } = await decrypt(
+      this.sealedContentKeyring(Number(expected.contentKeyVersion), purpose),
+      ciphertext,
+    );
+    const mismatch = Object.entries(expected).some(
+      ([key, value]) => messageHeader.encryptionContext[key] !== value,
+    );
     if (mismatch) throw new EncryptionContextMismatchError(purpose);
     return Buffer.from(plaintext);
   }
@@ -437,5 +576,63 @@ export class EnclaveCrypto {
       provenanceHash: ref.provenanceHash,
       contentHash: ref.contentHash,
     };
+  }
+
+  private sealedBlockHeader(
+    orgId: string,
+    purpose: 'wiki-block' | 'team-onboarding-block',
+  ): SealedBlockHeader {
+    return {
+      version: 1,
+      algorithm: 'ALG_AES256_GCM_IV12_TAG16_HKDF_SHA512_COMMIT_KEY_ECDSA_P384',
+      orgId,
+      objectId: randomUUID(),
+      purpose,
+      formatVersion: 1,
+      contentKeyVersion: this.sealedContentKeyrings.activeVersion,
+    };
+  }
+
+  private sealedBlockContext(
+    header: SealedBlockHeader,
+    identity: Record<string, string>,
+  ): Record<string, string> {
+    return {
+      version: String(header.version),
+      algorithm: header.algorithm,
+      orgId: header.orgId,
+      objectId: header.objectId,
+      purpose: header.purpose,
+      formatVersion: String(header.formatVersion),
+      contentKeyVersion: String(header.contentKeyVersion),
+      ...identity,
+    };
+  }
+
+  private requireSealedBlockIdentity(
+    envelope: SealedContentEnvelopeV1,
+    orgId: string,
+    purpose: 'wiki-block' | 'team-onboarding-block',
+  ): asserts envelope is SealedContentEnvelopeV1 & {
+    purpose: 'wiki-block' | 'team-onboarding-block';
+  } {
+    if (envelope.orgId !== orgId || envelope.purpose !== purpose) {
+      throw new EncryptionContextMismatchError(purpose);
+    }
+  }
+
+  private sealedContentKeyring(
+    version: number,
+    purpose: 'wiki-block' | 'team-onboarding-block',
+  ): KmsKeyringNode {
+    const keyring = this.sealedContentKeyrings.keyrings.get(version);
+    if (!keyring) throw new EncryptionContextMismatchError(purpose);
+    return keyring;
+  }
+
+  private hasSealedEnvelopeMarker(encryptionContext: Record<string, string>): boolean {
+    return ['version', 'algorithm', 'objectId', 'formatVersion', 'contentKeyVersion'].some(
+      (key) => encryptionContext[key] !== undefined,
+    );
   }
 }

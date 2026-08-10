@@ -194,14 +194,20 @@ const registry = new TenantRegistry();
 // separately-held S3LlmCache/EnclaveCrypto reference this map captured earlier.
 let synthesisConsumer: SynthesisConsumer | undefined;
 let apiContainer: ApiContainer | undefined;
-let evictAnswerInference: ((tenantId: string) => void) | undefined;
+let evictAnswerInference: ((tenantId: string) => Promise<void>) | undefined;
 const assignmentApplier = new TenantAssignmentApplier(
   registry,
   (identity) => tenantFactory.build(identity),
   logger,
-  (tenantId) => {
-    void synthesisConsumer?.evictTenant(tenantId);
-    evictAnswerInference?.(tenantId);
+  async (tenantId) => {
+    const teardown = [
+      synthesisConsumer?.evictTenant(tenantId),
+      evictAnswerInference?.(tenantId),
+    ].filter((result): result is Promise<void> => result !== undefined);
+    const results = await Promise.allSettled(teardown);
+    if (results.some((result) => result.status === 'rejected')) {
+      throw new Error('tenant_subsystem_teardown_failed');
+    }
   },
 );
 let runtimeAttestation =
@@ -481,11 +487,11 @@ try {
   };
   // A removed tenant's crypto/decrypted-answer RAM cache must not outlive its assignment: zeroize()
   // only reaches the TenantContext's own handles, not this map's independently-held S3LlmCache.
-  evictAnswerInference = (tenantId) => {
+  evictAnswerInference = async (tenantId) => {
     const entry = answerInferenceByOrg.get(tenantId);
     if (!entry) return;
     answerInferenceByOrg.delete(tenantId);
-    void entry.cache.close();
+    await entry.cache.close();
   };
   apiContainer = createContainer({
     // content-touching enclave opens no data-carrying egress — box-API telemetry inert by composition, not by omitting POSTHOG_API_KEY.

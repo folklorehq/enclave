@@ -14,7 +14,11 @@ import { readSealedBlob, writeSealedBlob } from '../sealing/sealed-blob-store.js
 import { assertRecoveryConfigured, sealRecoveryMnemonic } from '../sealing/recovery.js';
 import { HnswStore } from '../hnsw/index.js';
 import { Pipeline } from '../pipeline/index.js';
-import { EnclaveCrypto } from '../crypto/esdk.js';
+import {
+  EnclaveCrypto,
+  singleVersionSealedContentKeyring,
+  type SealedContentKeyringConfig,
+} from '../crypto/esdk.js';
 import { CRITIQUE_MODEL, EMBED_MODEL, GENERATE_MODEL, phalaInference } from '../inference/phala.js';
 import {
   CachedInference,
@@ -28,8 +32,8 @@ export interface TenantIdentity {
   tenantId: string;
   /** Master CMK — seals/unseals the master blob only, never content. */
   kmsKeyId: string;
-  /** The tenant's STORAGE key — the ESDK content keyring is built from this, never the master CMK. */
-  storageKeyId: string;
+  activeStorageKeyVersion: number;
+  storageKeyHistory: readonly { version: number; storageKeyId: string }[];
   recoveryPubkey: string;
   signedRecoveryPubkey?: string;
   sealedBlobBucket?: string;
@@ -82,7 +86,9 @@ export class TenantContextFactory {
       identity.processedBucket ?? '',
       this.deps.processedOutputsBucket,
     );
-    const keyring = this.buildKeyring(this.resolveStorageKeyId(identity));
+    const sealedContentKeyrings = this.buildSealedContentKeyrings(identity);
+    const keyring = sealedContentKeyrings.keyrings.get(sealedContentKeyrings.activeVersion);
+    if (!keyring) throw new Error('sealed content keyring configuration is invalid');
     const masterKey = await this.bootMasterKey(identity);
     try {
       const hnsw = await HnswStore.load(this.deps.s3, keyring, processedBucket, identity.tenantId);
@@ -101,6 +107,7 @@ export class TenantContextFactory {
         masterKey,
         hnsw,
         pipeline,
+        sealedContentKeyrings,
         sealedBlobBucket,
         identity.rawPayloadsBucket ?? '',
         processedBucket,
@@ -118,7 +125,7 @@ export class TenantContextFactory {
   ): InferenceModel {
     const cache = new S3LlmCache({
       s3: this.deps.s3,
-      crypto: new EnclaveCrypto(keyring),
+      crypto: new EnclaveCrypto(keyring, singleVersionSealedContentKeyring(keyring)),
       bucket: processedBucket,
       orgId: tenantId,
     });
@@ -135,14 +142,42 @@ export class TenantContextFactory {
   // path. The dedicated box's storage key arrives in the SIGNED boot manifest; the pool box's in
   // the assignment manifest. Either may be absent only if the other is present, and the two must
   // agree — a mismatch or a total absence refuses the boot.
-  private resolveStorageKeyId(identity: TenantIdentity): string {
-    const identityKey = (identity.storageKeyId ?? '').trim();
+  private buildSealedContentKeyrings(identity: TenantIdentity): SealedContentKeyringConfig {
+    const history = identity.storageKeyHistory.map((entry) => ({
+      version: entry.version,
+      storageKeyId: entry.storageKeyId.trim(),
+    }));
+    if (history.some((entry) => entry.storageKeyId === identity.kmsKeyId.trim())) {
+      throw new Error('storage key must differ from the master CMK');
+    }
+    if (
+      history.length === 0 ||
+      history.some(
+        (entry, index) =>
+          !Number.isSafeInteger(entry.version) ||
+          entry.version < 1 ||
+          entry.storageKeyId.length === 0 ||
+          (index > 0 && history[index - 1]!.version >= entry.version),
+      ) ||
+      new Set(history.map((entry) => entry.storageKeyId)).size !== history.length
+    ) {
+      throw new Error('storage key history is invalid');
+    }
+    const active = history.find((entry) => entry.version === identity.activeStorageKeyVersion);
+    if (!active) throw new Error('active storage key version is not configured');
+    const keyrings = new Map(
+      history.map((entry) => [entry.version, this.buildKeyring(entry.storageKeyId)] as const),
+    );
+    this.assertSignedStorageKey(identity, active.storageKeyId);
+    return { activeVersion: identity.activeStorageKeyVersion, keyrings };
+  }
+
+  private assertSignedStorageKey(identity: TenantIdentity, activeStorageKeyId: string): void {
     const signedKey = this.deps.signedStorageKeyArn?.()?.trim() ?? '';
-    if (identityKey && signedKey && identityKey !== signedKey) {
+    if (signedKey && activeStorageKeyId !== signedKey) {
       throw new Error('refusing boot: storage key disagrees with the signed boot manifest');
     }
-    const chosen = signedKey || identityKey;
-    if (!chosen) {
+    if (!activeStorageKeyId) {
       throw new Error(
         'refusing boot: no storage key configured (content keyring must never fall back to the master CMK)',
       );
@@ -150,10 +185,9 @@ export class TenantContextFactory {
     // Last line: even if a producer or schema regression let an equal key through, never build the
     // content keyring on the master key — its Decrypt is attestation-gated, so content would seal
     // write-only and be unrecoverable.
-    if (chosen === identity.kmsKeyId.trim()) {
+    if (activeStorageKeyId === identity.kmsKeyId.trim()) {
       throw new Error('refusing boot: storage key must differ from the master CMK');
     }
-    return chosen;
   }
 
   private buildKeyring(kmsKeyId: string): KmsKeyringNode {

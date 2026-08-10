@@ -3,21 +3,23 @@ import type {
   AssignmentApplyResult,
   SignedAssignmentManifest,
   TenantAssignment,
+  VersionedTenantAssignment,
 } from '@folklore/contracts';
 import type { TenantContext } from './tenant-context.js';
 import type { TenantIdentity } from './TenantContextFactory.js';
 import type { TenantRegistry } from './tenant-registry.js';
 import type { QueueAssignment } from './QueueSetDrainer.js';
+import { toInitialStorageKeyVersion } from './tenant-assignments.js';
 import {
   isVerifiedAssignmentManifest,
   type VerifiedAssignmentManifest,
 } from './VerifiedAssignmentManifest.js';
 
 export type BuildTenantContext = (identity: TenantIdentity) => Promise<TenantContext>;
+const TENANT_TEARDOWN_TIMEOUT_MS = 10_000;
 
-// Called after a dropped tenant's context is zeroized so co-resident subsystems holding that org's
-// key material outside the registry (e.g. the synthesis consumer's resident theme index + LLM-cache
-// RAM front) can drop it too (§2.2 pt 5). Content-free (tenant id only); best-effort, never throws.
+// Called for every replaced or dropped context before it is zeroized so co-resident subsystems can
+// synchronously detach independently-held key material. Content-free: tenant id only.
 export type OnTenantTornDown = (tenantId: string) => void | Promise<void>;
 
 // Rebuilds the live TenantRegistry to match a delivered assignment manifest (design §4.3/§5): builds
@@ -25,7 +27,7 @@ export type OnTenantTornDown = (tenantId: string) => void | Promise<void>;
 // one (§2.2 point 5). Idempotent — re-applying the same set is a no-op. Also the source of truth for
 // the drain set, so a queue is added/removed in lock-step with its tenant's context.
 export class TenantAssignmentApplier {
-  private readonly assigned = new Map<string, TenantAssignment>();
+  private readonly assigned = new Map<string, VersionedTenantAssignment>();
   private applying = false;
   private lastAcceptedGeneration = 0;
 
@@ -34,6 +36,7 @@ export class TenantAssignmentApplier {
     private readonly build: BuildTenantContext,
     private readonly logger: Logger,
     private readonly onTornDown?: OnTenantTornDown,
+    private readonly teardownTimeoutMs: number = TENANT_TEARDOWN_TIMEOUT_MS,
   ) {}
 
   queueAssignments(): QueueAssignment[] {
@@ -63,8 +66,7 @@ export class TenantAssignmentApplier {
     if (manifest.generation <= this.lastAcceptedGeneration) {
       return { applied: false, reason: 'stale' };
     }
-    this.assertExistingAssignmentsUnchanged(manifest.assignments);
-    if (!(await this.applyAssignments(manifest.assignments, true))) {
+    if (!(await this.applyVersioned(manifest.assignments, true))) {
       throw new Error('assignment_manifest_apply_failed');
     }
     if (!this.matchesAssignments(manifest.assignments)) {
@@ -75,11 +77,11 @@ export class TenantAssignmentApplier {
   }
 
   async apply(assignments: TenantAssignment[]): Promise<boolean> {
-    return this.applyAssignments(assignments, false);
+    return this.applyVersioned(assignments.map(toInitialStorageKeyVersion), false);
   }
 
-  private async applyAssignments(
-    assignments: TenantAssignment[],
+  private async applyVersioned(
+    assignments: VersionedTenantAssignment[],
     hasSignedRecoveryEvidence: boolean,
   ): Promise<boolean> {
     // A refresh that overlaps an in-flight apply is dropped, not queued: apply is idempotent and the
@@ -88,54 +90,37 @@ export class TenantAssignmentApplier {
     this.applying = true;
     try {
       const desired = new Map(assignments.map((a) => [a.tenantId, a] as const));
-      await this.tearDownDropped(desired);
-      return await this.buildAdded(desired, hasSignedRecoveryEvidence);
+      this.assertAssignmentTransitions(desired);
+      const staged = await this.buildReplacements(desired, hasSignedRecoveryEvidence);
+      if (!staged) return false;
+      await this.commit(desired, staged);
+      return true;
     } finally {
       this.applying = false;
     }
   }
 
-  private async tearDownDropped(desired: Map<string, TenantAssignment>): Promise<void> {
-    for (const tenantId of [...this.assigned.keys()]) {
-      if (desired.has(tenantId)) continue;
-      this.assigned.delete(tenantId);
-      this.registry.remove(tenantId)?.zeroize();
-      if (this.onTornDown) {
-        try {
-          await this.onTornDown(tenantId);
-        } catch {
-          // Best-effort hygiene — never let an eviction slip strand the rest of the rebuild.
-          this.logger.error('tenant teardown hook failed', { tenant_id: tenantId });
-        }
-      }
-    }
-  }
-
-  private async buildAdded(
-    desired: Map<string, TenantAssignment>,
+  private async buildReplacements(
+    desired: Map<string, VersionedTenantAssignment>,
     hasSignedRecoveryEvidence: boolean,
-  ): Promise<boolean> {
-    let allBuilt = true;
+  ): Promise<Map<string, TenantContext> | null> {
+    const staged = new Map<string, TenantContext>();
     for (const assignment of desired.values()) {
-      // ponytail: presence-only idempotency — an already-assigned id is skipped, so ANY in-place edit
-      // of a live tenant's fields (kmsKeyId/queueUrl/recoveryPubkey) is ignored, not just the CMK.
-      // Safe today because a tenant's routing identifiers are immutable once assigned (reassignment
-      // adds/removes whole tenants). If these ever become mutable, diff the stored assignment and
-      // drop-then-add the changed tenant.
-      if (this.assigned.has(assignment.tenantId)) continue;
+      const current = this.assigned.get(assignment.tenantId);
+      if (current && this.assignmentsMatch(current, assignment)) continue;
       try {
         const context = await this.build({
           tenantId: assignment.tenantId,
           kmsKeyId: assignment.kmsKeyId,
-          storageKeyId: assignment.storageKeyId,
+          activeStorageKeyVersion: assignment.activeStorageKeyVersion,
+          storageKeyHistory: assignment.storageKeyHistory,
           recoveryPubkey: assignment.recoveryPubkey,
           ...(hasSignedRecoveryEvidence ? { signedRecoveryPubkey: assignment.recoveryPubkey } : {}),
           sealedBlobBucket: assignment.sealedBlobBucket,
           rawPayloadsBucket: assignment.rawPayloadsBucket,
           processedBucket: assignment.processedBucket,
         });
-        this.registry.register(context);
-        this.assigned.set(assignment.tenantId, assignment);
+        staged.set(assignment.tenantId, context);
       } catch (err) {
         // One tenant's boot failure (KMS/S3) must not starve its co-tenants; the next refresh retries
         // it. Log the error NAME only, never the raw error, and the content-free id.
@@ -143,22 +128,132 @@ export class TenantAssignmentApplier {
           tenant_id: assignment.tenantId,
           error: err instanceof Error ? err.name : 'unknown',
         });
-        allBuilt = false;
+        for (const context of staged.values()) context.zeroize();
+        return null;
       }
     }
-    return allBuilt;
+    return staged;
   }
 
-  private assertExistingAssignmentsUnchanged(assignments: TenantAssignment[]): void {
-    for (const assignment of assignments) {
+  private async commit(
+    desired: Map<string, VersionedTenantAssignment>,
+    staged: Map<string, TenantContext>,
+  ): Promise<void> {
+    const retired: Array<{ tenantId: string; context: TenantContext }> = [];
+    for (const [tenantId, context] of staged) {
+      if (this.registry.has(tenantId)) {
+        retired.push({ tenantId, context: this.registry.get(tenantId) });
+      }
+      this.registry.register(context);
+    }
+    for (const tenantId of this.assigned.keys()) {
+      if (desired.has(tenantId)) continue;
+      const context = this.registry.remove(tenantId);
+      if (context) retired.push({ tenantId, context });
+    }
+    this.assigned.clear();
+    for (const [tenantId, assignment] of desired) this.assigned.set(tenantId, assignment);
+
+    const teardownResults = await Promise.allSettled(
+      retired.map(({ tenantId }) => this.runTornDown(tenantId)),
+    );
+    let didFail = false;
+    for (const [index, result] of teardownResults.entries()) {
+      if (result.status === 'fulfilled') continue;
+      didFail = true;
+      this.logger.error('tenant teardown hook failed', {
+        tenant_id: retired[index]?.tenantId ?? 'unknown',
+      });
+    }
+    for (const { tenantId, context } of retired) {
+      try {
+        context.zeroize();
+      } catch {
+        didFail = true;
+        this.logger.error('tenant context zeroize failed', { tenant_id: tenantId });
+      }
+    }
+    if (didFail) throw new Error('assignment_manifest_teardown_failed');
+  }
+
+  private async runTornDown(tenantId: string): Promise<void> {
+    if (!this.onTornDown) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<void>((_resolve, reject) => {
+      timer = setTimeout(
+        () => reject(new Error('tenant_teardown_timeout')),
+        this.teardownTimeoutMs,
+      );
+    });
+    try {
+      await Promise.race([this.onTornDown(tenantId), timedOut]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private assertAssignmentTransitions(assignments: Map<string, VersionedTenantAssignment>): void {
+    for (const assignment of assignments.values()) {
       const current = this.assigned.get(assignment.tenantId);
-      if (current && !this.assignmentsMatch(current, assignment)) {
-        throw new Error('assignment_manifest_assignment_changed');
+      if (current) {
+        if (!this.immutableAssignmentsMatch(current, assignment)) {
+          throw new Error('assignment_manifest_assignment_changed');
+        }
+        this.assertStorageKeyTransition(current, assignment);
       }
+      this.assertActiveStorageKey(assignment);
     }
   }
 
-  private matchesAssignments(assignments: TenantAssignment[]): boolean {
+  private assertActiveStorageKey(assignment: VersionedTenantAssignment): void {
+    const active = assignment.storageKeyHistory.at(-1);
+    if (
+      !active ||
+      active.version !== assignment.activeStorageKeyVersion ||
+      active.storageKeyId !== assignment.storageKeyId
+    ) {
+      throw new Error('assignment_storage_key_active_invalid');
+    }
+  }
+
+  private assertStorageKeyTransition(
+    current: VersionedTenantAssignment,
+    next: VersionedTenantAssignment,
+  ): void {
+    if (next.storageKeyHistory.length < current.storageKeyHistory.length) {
+      throw new Error('assignment_storage_key_history_dropped');
+    }
+    for (const [index, entry] of current.storageKeyHistory.entries()) {
+      const retained = next.storageKeyHistory[index];
+      if (
+        !retained ||
+        retained.version !== entry.version ||
+        retained.storageKeyId !== entry.storageKeyId
+      ) {
+        throw new Error('assignment_storage_key_history_relabelled');
+      }
+    }
+    if (next.activeStorageKeyVersion < current.activeStorageKeyVersion) {
+      throw new Error('assignment_storage_key_rollback_rejected');
+    }
+  }
+
+  private immutableAssignmentsMatch(
+    left: VersionedTenantAssignment,
+    right: VersionedTenantAssignment,
+  ): boolean {
+    return (
+      left.tenantId === right.tenantId &&
+      left.kmsKeyId === right.kmsKeyId &&
+      left.queueUrl === right.queueUrl &&
+      left.sealedBlobBucket === right.sealedBlobBucket &&
+      left.rawPayloadsBucket === right.rawPayloadsBucket &&
+      left.processedBucket === right.processedBucket &&
+      left.recoveryPubkey === right.recoveryPubkey
+    );
+  }
+
+  private matchesAssignments(assignments: VersionedTenantAssignment[]): boolean {
     if (this.assigned.size !== assignments.length) return false;
     return assignments.every((assignment) => {
       const current = this.assigned.get(assignment.tenantId);
@@ -166,11 +261,16 @@ export class TenantAssignmentApplier {
     });
   }
 
-  private assignmentsMatch(left: TenantAssignment, right: TenantAssignment): boolean {
+  private assignmentsMatch(
+    left: VersionedTenantAssignment,
+    right: VersionedTenantAssignment,
+  ): boolean {
     return (
       left.tenantId === right.tenantId &&
       left.kmsKeyId === right.kmsKeyId &&
       left.storageKeyId === right.storageKeyId &&
+      left.activeStorageKeyVersion === right.activeStorageKeyVersion &&
+      JSON.stringify(left.storageKeyHistory) === JSON.stringify(right.storageKeyHistory) &&
       left.queueUrl === right.queueUrl &&
       left.sealedBlobBucket === right.sealedBlobBucket &&
       left.rawPayloadsBucket === right.rawPayloadsBucket &&

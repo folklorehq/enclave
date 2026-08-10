@@ -1,6 +1,6 @@
 import type { KeyObject } from 'node:crypto';
 import type { KmsKeyringNode } from '@aws-crypto/client-node';
-import { EnclaveCrypto } from '../crypto/esdk.js';
+import { EnclaveCrypto, type SealedContentKeyringConfig } from '../crypto/esdk.js';
 import type { HnswStore } from '../hnsw/index.js';
 import type { Pipeline } from '../pipeline/index.js';
 import { deriveIngestKeypair } from '../sealing/keygen.js';
@@ -32,6 +32,7 @@ export class TenantContext {
     readonly masterKey: Buffer,
     hnsw: HnswStore,
     pipeline: Pipeline,
+    sealedContentKeyrings: SealedContentKeyringConfig,
     readonly sealedBlobBucket = '',
     readonly rawPayloadsBucket = '',
     readonly processedOutputsBucket = '',
@@ -39,7 +40,7 @@ export class TenantContext {
     this.keyringOrNull = keyring;
     this.hnswOrNull = hnsw;
     this.pipelineOrNull = pipeline;
-    this.cryptoOrNull = new EnclaveCrypto(keyring);
+    this.cryptoOrNull = new EnclaveCrypto(keyring, sealedContentKeyrings);
     this.ingestKeyOrNull = deriveIngestKeypair(masterKey).privateKey;
   }
 
@@ -85,11 +86,12 @@ export class TenantContext {
   // all that is possible); the raw master secret is the one plaintext buffer we own, and it is filled.
   zeroize(): void {
     this.masterKey.fill(0);
-    this.hnswOrNull?.free();
+    const hnsw = this.hnswOrNull;
     this.cryptoOrNull = null;
     this.ingestKeyOrNull = null;
     this.keyringOrNull = null;
     this.hnswOrNull = null;
     this.pipelineOrNull = null;
+    hnsw?.free();
   }
 }

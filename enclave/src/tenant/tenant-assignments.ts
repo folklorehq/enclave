@@ -2,15 +2,28 @@ import {
   type AssignmentManifest,
   type SignedAssignmentManifest,
   type TenantAssignment,
+  type VersionedTenantAssignment,
   parseAssignmentManifest as parseContractManifest,
   parseVersionedAssignmentManifest as parseContractVersionedManifest,
   tenantAssignmentSchema,
+  versionedTenantAssignmentSchema,
 } from '@folklore/contracts';
 
 // The assignment shape is defined ONCE in @folklore/contracts (design §4.3) so the control-plane
 // producer and this consumer cannot drift. Env parsing is the bootstrap/dedicated fallback (§6.1);
 // `parseAssignmentManifest` is the runtime path for a manifest delivered on the check-in channel.
 export type { TenantAssignment, AssignmentManifest };
+
+/** Explicit bootstrap compatibility boundary for unsigned legacy assignment sources. */
+export function toInitialStorageKeyVersion(
+  assignment: TenantAssignment,
+): VersionedTenantAssignment {
+  return versionedTenantAssignmentSchema.parse({
+    ...assignment,
+    activeStorageKeyVersion: 1,
+    storageKeyHistory: [{ version: 1, storageKeyId: assignment.storageKeyId }],
+  });
+}
 
 // Storage key is REQUIRED so a manifest/env without one fails closed — the ESDK content keyring
 // must never fall back to the master key (its Decrypt is attestation-gated).

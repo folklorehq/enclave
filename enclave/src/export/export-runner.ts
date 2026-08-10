@@ -13,7 +13,11 @@ import {
   type ExportThemeOwner,
   type StoredBlock,
 } from '@folklore/wiki';
-import type { EncryptedBlockBody, WikiBlockContentRef, WikiContentDecryptor } from '@folklore/api';
+import {
+  isEncryptedBlockBody,
+  type WikiBlockContentRef,
+  type WikiContentDecryptor,
+} from '@folklore/api';
 import { buildExportClient } from './build-export-client.js';
 
 export interface ExportTargetRecord {
@@ -63,15 +67,6 @@ export interface ExportRunnerDeps {
   decryptor: WikiContentDecryptor;
   tokenProvider: ExportTokenProvider;
   buildClient?: (kind: WikiExportTargetKind, token: string) => WikiExportTarget;
-}
-
-function isEncryptedBody(body: unknown): body is EncryptedBlockBody {
-  return (
-    typeof body === 'object' &&
-    body !== null &&
-    (body as { format?: unknown }).format === 'esdk-v1' &&
-    typeof (body as { ciphertext?: unknown }).ciphertext === 'string'
-  );
 }
 
 /** Runs one content-free `export-due` signal end to end, in-enclave. Null = nothing written. */
@@ -142,7 +137,7 @@ async function decryptStoredBlock(
   audienceId: string | null,
   block: StoredBlock,
 ): Promise<unknown | null> {
-  if (!isEncryptedBody(block.body)) return block.body;
+  if (!isEncryptedBlockBody(block.body)) return block.body;
   const ref: WikiBlockContentRef = { orgId, themeId, audienceId, blockType: block.type };
   return decryptor.decryptBlockBody(ref, block.body);
 }

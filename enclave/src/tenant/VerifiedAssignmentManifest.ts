@@ -1,5 +1,6 @@
 import { createHash, createPublicKey, verify } from 'node:crypto';
 import {
+  assignmentManifestDigestPayload,
   assignmentManifestSignaturePayload,
   type SignedAssignmentManifest,
 } from '@folklore/contracts';
@@ -46,7 +47,11 @@ export function verifyAssignmentManifest(
   assignmentManifestPublicKeySpki: string,
 ): VerifiedAssignmentManifest {
   const { digest, signature, ...unsigned } = manifest;
-  const expectedDigest = createHash('sha256').update(JSON.stringify(unsigned)).digest('hex');
+  // Canonical, order-independent digest (contracts sorts assignments + key history) so a manifest
+  // re-serialized with a different field order still verifies.
+  const expectedDigest = createHash('sha256')
+    .update(assignmentManifestDigestPayload(unsigned))
+    .digest('hex');
   if (expectedDigest !== digest) throw new Error('assignment_manifest_digest_invalid');
   let publicKey;
   try {
