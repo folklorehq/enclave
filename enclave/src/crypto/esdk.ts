@@ -20,6 +20,8 @@ const WIKI_FEEDBACK_PURPOSE = 'wiki-feedback';
 const LLM_CACHE_PURPOSE = 'llm-cache';
 const OAUTH_CREDENTIAL_PURPOSE = 'oauth-credential';
 const PULL_CURSOR_PURPOSE = 'pull-cursor';
+const CODEBASE_SELECTION_PURPOSE = 'codebase-selection';
+const JIRA_WEBHOOK_REPLAY_PURPOSE = 'jira-webhook-replay';
 
 export const WIKI_PUBLICATION_ENVELOPE_FORMAT = 'esdk-wiki-publication-v1';
 
@@ -64,6 +66,15 @@ export interface LlmCacheRef {
 export interface PullCursorRef {
   orgId: string;
   sourceId: string;
+}
+
+export interface CodebaseSelectionRef {
+  orgId: string;
+  deploymentId: string;
+}
+
+export interface JiraWebhookReplayRef {
+  orgId: string;
 }
 
 export interface OAuthCredentialRef {
@@ -426,6 +437,34 @@ export class EnclaveCrypto {
     return this.open(ciphertext, PULL_CURSOR_PURPOSE, {
       orgId: expected.orgId,
       sourceId: expected.sourceId,
+    });
+  }
+
+  encryptCodebaseSelection(plaintext: Buffer, ref: CodebaseSelectionRef): Promise<Buffer> {
+    return this.seal(plaintext, {
+      orgId: ref.orgId,
+      deploymentId: ref.deploymentId,
+      purpose: CODEBASE_SELECTION_PURPOSE,
+    });
+  }
+
+  decryptCodebaseSelection(ciphertext: Buffer, expected: CodebaseSelectionRef): Promise<Buffer> {
+    return this.open(ciphertext, CODEBASE_SELECTION_PURPOSE, {
+      orgId: expected.orgId,
+      deploymentId: expected.deploymentId,
+    });
+  }
+
+  encryptJiraWebhookReplay(plaintext: Buffer, ref: JiraWebhookReplayRef): Promise<Buffer> {
+    return this.seal(plaintext, {
+      orgId: ref.orgId,
+      purpose: JIRA_WEBHOOK_REPLAY_PURPOSE,
+    });
+  }
+
+  decryptJiraWebhookReplay(ciphertext: Buffer, expected: JiraWebhookReplayRef): Promise<Buffer> {
+    return this.open(ciphertext, JIRA_WEBHOOK_REPLAY_PURPOSE, {
+      orgId: expected.orgId,
     });
   }
 

@@ -5,6 +5,7 @@ import type { S3Client } from '@aws-sdk/client-s3';
 import type { Logger } from '@folklore/core';
 import {
   code,
+  type CodebaseRepositorySelection,
   type Connector,
   createPullConnector,
   type PullConnectorDeps,
@@ -19,16 +20,41 @@ import {
 } from '@folklore/contracts/enclave';
 import { externalHttpsProxyAgent } from '../egress/proxy.js';
 import { ProviderRejectedError } from '../egress/provider-token-fetch.js';
+import { deriveSourceId } from '@folklore/utils';
 import { logger } from '../logger.js';
 import type { Pipeline, ProcessedFact } from '../pipeline/index.js';
 import type { EnclaveCrypto } from '../crypto/esdk.js';
+import { GitHubCodebaseConnectionResolver } from '../codebase/GitHubCodebaseConnectionResolver.js';
+import type { CodebaseSelectionStore } from '../codebase/CodebaseSelectionStore.js';
 import {
   getDecryptedConnectionForKind,
   type DecryptedSourceConnection,
 } from './source-connections-client.js';
+import type { JiraWebhookLifecycleService } from './JiraWebhookLifecycleService.js';
 import { S3PullCursorStore } from './S3PullCursorStore.js';
 
 export type { PullDueMessage };
+
+export type PullConnectionMetadata = Pick<
+  DecryptedSourceConnection,
+  | 'externalTenantId'
+  | 'webhookRouteId'
+  | 'webhookRevision'
+  | 'webhookRegistrationIds'
+  | 'webhookExpiresAt'
+  | 'webhookStatus'
+  | 'webhookLastOperation'
+  | 'webhookLastAttemptedAt'
+  | 'webhookLastSucceededAt'
+  | 'webhookLastDeliveryAt'
+  | 'webhookProtocolCapture'
+  | 'webhookProtocolCaptureExpiresAt'
+  | 'webhookFailureCode'
+  | 'webhookCleanupRouteId'
+  | 'webhookCleanupExternalTenantId'
+  | 'webhookCleanupRegistrationIds'
+  | 'webhookCleanupExpiresAt'
+>;
 
 // Content-free completion signal the worker uses to advance sync health; the
 // enclave has no DB access, so this is how last_successful_sync_at gets written worker-side.
@@ -38,18 +64,44 @@ export interface PullCompleteSignal {
   sourceKind: string;
   sourceId: string;
   completedAt: string;
+  backfillLeaseToken?: string;
+}
+
+export interface PullFailedSignal {
+  type: 'pull-failed';
+  orgId: string;
+  sourceKind: string;
+  sourceId: string;
+  failedAt: string;
+  backfillLeaseToken?: string;
 }
 
 export function buildPullCompleteSignal(
   message: PullDueMessage,
   completedAt: Date = new Date(),
 ): PullCompleteSignal {
+  const backfillLeaseToken =
+    'backfillLeaseToken' in message ? message.backfillLeaseToken : undefined;
   return {
     type: 'pull-complete',
     orgId: message.tenant_id,
     sourceKind: message.kind,
     sourceId: message.sourceId,
     completedAt: completedAt.toISOString(),
+    ...(backfillLeaseToken ? { backfillLeaseToken } : {}),
+  };
+}
+
+export function buildPullFailedSignal(message: PullDueMessage, failedAt: Date): PullFailedSignal {
+  const backfillLeaseToken =
+    'backfillLeaseToken' in message ? message.backfillLeaseToken : undefined;
+  return {
+    type: 'pull-failed',
+    orgId: message.tenant_id,
+    sourceKind: message.kind,
+    sourceId: message.sourceId,
+    failedAt: failedAt.toISOString(),
+    ...(backfillLeaseToken ? { backfillLeaseToken } : {}),
   };
 }
 
@@ -81,14 +133,46 @@ export interface PullRunnerDeps {
   orgId: string;
   controlPlaneUrl: string;
   controlPlaneFetch: typeof globalThis.fetch;
+  runtimeDeploymentId?: string;
   deploymentId: string;
   agentToken: string;
   pipeline: Pipeline;
   refreshOAuthCredential?: (input: OAuthRefreshCommand) => Promise<OAuthRefreshMetadataUpdate>;
+  jiraWebhookLifecycle?: Pick<JiraWebhookLifecycleService, 'reconcile'>;
   mintGitHubInstallationToken?: (input: {
     installationId: string;
   }) => Promise<{ accessToken: string; expiresAt: string }>;
+  codebaseSelectionStore?: Pick<CodebaseSelectionStore, 'read'>;
 }
+
+export type PullRunResult =
+  | {
+      outcome: 'processed';
+      facts: ProcessedFact[];
+      cursor: string | null;
+      sourceId: string;
+      sourceKind: string;
+      persistCursor(): Promise<void>;
+    }
+  | {
+      outcome: 'not_processed';
+      reason:
+        | 'connection_missing'
+        | 'token_missing'
+        | 'connector_missing'
+        | 'routing_invalid'
+        | 'connection_fetch_failed'
+        | 'connection_response_invalid'
+        | 'connection_integrity_failed'
+        | 'connection_decrypt_failed';
+      sourceId: string;
+      sourceKind: string;
+    }
+  | {
+      outcome: 'superseded';
+      sourceId: string;
+      sourceKind: string;
+    };
 
 const consoleLogger: Logger = logger;
 
@@ -114,9 +198,18 @@ async function loadCursor(
       new GetParameterCommand({ Name: cursorSsmPath(tenantId, sourceId) }),
     );
     return resp.Parameter?.Value ?? null;
-  } catch {
-    return null;
+  } catch (error) {
+    if (isParameterNotFound(error)) return null;
+    throw error;
   }
+}
+
+function isParameterNotFound(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { name?: unknown }).name === 'ParameterNotFound'
+  );
 }
 
 async function saveCursor(
@@ -172,17 +265,52 @@ export function advanceCodeCursorTick(cursorValue: string | null): string {
 }
 
 const MINT_TOKEN_TTL_MS = 50 * 60 * 1000;
+const MINT_TOKEN_CACHE_MAX_ENTRIES = 128;
 
 interface MintedInstallationToken {
-  accessToken: string;
+  accessToken: Buffer;
   mintedAt: number;
 }
 
 const mintedTokenCache = new Map<string, MintedInstallationToken>();
+const mintedTokenEpochByOrg = new Map<string, number>();
+
+function deleteMintedToken(cacheKey: string): void {
+  const token = mintedTokenCache.get(cacheKey);
+  if (!token) return;
+  token.accessToken.fill(0);
+  mintedTokenCache.delete(cacheKey);
+}
+
+function sweepExpiredMintedTokens(now: number): void {
+  for (const [cacheKey, token] of mintedTokenCache) {
+    if (now - token.mintedAt >= MINT_TOKEN_TTL_MS) deleteMintedToken(cacheKey);
+  }
+}
+
+function cacheMintedToken(cacheKey: string, accessToken: string, mintedAt: number): void {
+  deleteMintedToken(cacheKey);
+  while (mintedTokenCache.size >= MINT_TOKEN_CACHE_MAX_ENTRIES) {
+    const oldestKey = mintedTokenCache.keys().next().value as string | undefined;
+    if (!oldestKey) break;
+    deleteMintedToken(oldestKey);
+  }
+  mintedTokenCache.set(cacheKey, { accessToken: Buffer.from(accessToken, 'utf8'), mintedAt });
+}
 
 /** Test seam: the mint cache is enclave-process-lifetime by design (module-level). */
 export function resetMintedTokenCache(): void {
-  mintedTokenCache.clear();
+  for (const cacheKey of [...mintedTokenCache.keys()]) deleteMintedToken(cacheKey);
+  mintedTokenEpochByOrg.clear();
+}
+
+/** Drops all org-bound minted GitHub tokens and overwrites their in-memory buffers. */
+export function evictMintedTokensForOrg(orgId: string): void {
+  mintedTokenEpochByOrg.set(orgId, (mintedTokenEpochByOrg.get(orgId) ?? 0) + 1);
+  const prefix = `github-installation:${orgId}:`;
+  for (const cacheKey of mintedTokenCache.keys()) {
+    if (cacheKey.startsWith(prefix)) deleteMintedToken(cacheKey);
+  }
 }
 
 function isRateLimitedMintStatus(status: number): boolean {
@@ -200,21 +328,29 @@ export type GitHubMintOutcome =
 async function mintGitHubInstallationTokenForPull(
   installationId: string | undefined,
   mint: PullRunnerDeps['mintGitHubInstallationToken'],
+  scope: { orgId: string; connectionId: string; connectionGeneration: string },
   options: { bypassCache?: boolean } = {},
 ): Promise<GitHubMintOutcome> {
   if (!mint) throw new Error('github_installation_token_minting_unavailable');
   if (!installationId) throw new Error('github_installation_id_missing');
-  const cacheKey = `github-installation:${installationId}`;
+  const cacheKey = `github-installation:${scope.orgId}:${scope.connectionId}:${installationId}:${scope.connectionGeneration}`;
+  const now = Date.now();
+  const mintEpoch = mintedTokenEpochByOrg.get(scope.orgId) ?? 0;
+  sweepExpiredMintedTokens(now);
   if (!options.bypassCache) {
     const cached = mintedTokenCache.get(cacheKey);
-    if (cached && Date.now() - cached.mintedAt < MINT_TOKEN_TTL_MS) {
-      return { outcome: 'token', accessToken: cached.accessToken };
+    if (cached) {
+      mintedTokenCache.delete(cacheKey);
+      mintedTokenCache.set(cacheKey, cached);
+      return { outcome: 'token', accessToken: cached.accessToken.toString('utf8') };
     }
   }
   try {
     const minted = await mint({ installationId });
     if (!minted.accessToken) throw new Error('github_mint_failed');
-    mintedTokenCache.set(cacheKey, { accessToken: minted.accessToken, mintedAt: Date.now() });
+    if ((mintedTokenEpochByOrg.get(scope.orgId) ?? 0) === mintEpoch) {
+      cacheMintedToken(cacheKey, minted.accessToken, Date.now());
+    }
     return { outcome: 'token', accessToken: minted.accessToken };
   } catch (err) {
     if (err instanceof ProviderRejectedError && isRateLimitedMintStatus(err.status)) {
@@ -226,13 +362,28 @@ async function mintGitHubInstallationTokenForPull(
 
 export async function resolveSourceToken(
   kind: string,
-  connection: Pick<DecryptedSourceConnection, 'accessToken' | 'kind' | 'installationId'>,
+  connection: Pick<DecryptedSourceConnection, 'accessToken' | 'kind' | 'installationId'> &
+    Partial<
+      Pick<
+        DecryptedSourceConnection,
+        'connectionId' | 'activationGeneration' | 'attestationGeneration'
+      >
+    >,
   mintGitHubInstallationToken?: PullRunnerDeps['mintGitHubInstallationToken'],
+  scope: { orgId: string } = { orgId: 'unscoped' },
 ): Promise<string | null> {
   if (kind !== 'github' && kind !== 'code') return connection.accessToken;
+  if (!connection.connectionId || !connection.activationGeneration) {
+    throw new Error('github_connection_binding_missing');
+  }
   const minted = await mintGitHubInstallationTokenForPull(
     connection.installationId,
     mintGitHubInstallationToken,
+    {
+      orgId: scope.orgId,
+      connectionId: connection.connectionId,
+      connectionGeneration: connection.activationGeneration,
+    },
   );
   if (minted.outcome === 'rate_limited') {
     // github stays loud (DLQ alarm); a `code` mint-403 is a non-throwing early return the
@@ -246,13 +397,22 @@ export async function resolveSourceToken(
 // Every client here MUST egress via the proxy — either the global undici dispatcher
 // (fetch-based SDKs) or an explicit agent (axios/node:http SDKs like Slack), else its
 // pull dials the internet directly and fails closed on real hardware.
-export function buildConnector(kind: string, token: string): Connector | null {
+export function buildConnector(
+  kind: string,
+  token: string,
+  connectionMetadata?: PullConnectionMetadata,
+  codebaseSelection?: CodebaseRepositorySelection,
+): Connector | null {
   const deps: PullConnectorDeps = {
     logger: consoleLogger,
     token,
+    ...(connectionMetadata?.externalTenantId
+      ? { externalTenantId: connectionMetadata.externalTenantId }
+      : {}),
     httpsProxyAgent: externalHttpsProxyAgent(),
     gmailLabelAllowlist: parseAllowlist(process.env['EMAIL_GMAIL_LABEL_ALLOWLIST']),
     m365FolderAllowlist: parseAllowlist(process.env['EMAIL_M365_FOLDER_ALLOWLIST']),
+    ...(codebaseSelection ? { codebaseSelection } : {}),
   };
   return createPullConnector(kind, deps);
 }
@@ -261,20 +421,47 @@ export function buildConnector(kind: string, token: string): Connector | null {
 export async function runPull(
   message: PullDueMessage,
   deps: PullRunnerDeps,
-  connectorBuilder: (kind: string, token: string) => Connector | null = buildConnector,
-): Promise<ProcessedFact[]> {
-  const connection = await getDecryptedConnectionForKind(
-    deps.controlPlaneUrl,
-    deps.deploymentId,
-    deps.agentToken,
-    message.kind,
-    deps.orgId,
-    deps.crypto,
-    deps.controlPlaneFetch,
-  );
-  if (!connection) {
-    console.warn('pull-due: no source connection for kind', message.kind);
-    return [];
+  connectorBuilder: (
+    kind: string,
+    token: string,
+    connectionMetadata: PullConnectionMetadata,
+    codebaseSelection?: CodebaseRepositorySelection,
+  ) => Connector | null = buildConnector,
+): Promise<PullRunResult> {
+  if (
+    message.tenant_id !== deps.orgId ||
+    message.sourceId !== deriveSourceId(deps.orgId, message.kind)
+  ) {
+    return notProcessed(message, 'routing_invalid');
+  }
+  const resolved =
+    message.kind === 'code'
+      ? await resolveCodebaseConnection(deps)
+      : await getDecryptedConnectionForKind(
+          deps.controlPlaneUrl,
+          deps.runtimeDeploymentId ?? deps.deploymentId,
+          deps.deploymentId,
+          deps.agentToken,
+          message.kind,
+          deps.orgId,
+          deps.crypto,
+          deps.controlPlaneFetch,
+        );
+  if (resolved.outcome === 'not_ready') return superseded(message);
+  if (resolved.outcome === 'not_processed') {
+    return notProcessed(message, resolved.reason);
+  }
+  if (resolved.outcome === 'missing') {
+    if (message.trigger === 'activation') return superseded(message);
+    return notProcessed(message, 'connection_missing');
+  }
+  const connection = resolved.connection;
+  const activationGeneration =
+    resolved.outcome === 'ready' ? resolved.capabilityGeneration : connection.activationGeneration;
+  const codebaseSelection =
+    resolved.outcome === 'ready' ? selectionForCodeConnector(resolved.selection) : undefined;
+  if (message.trigger === 'activation' && message.activationGeneration !== activationGeneration) {
+    return superseded(message);
   }
 
   const isCode = message.kind === 'code';
@@ -285,19 +472,20 @@ export async function runPull(
     message.kind,
     connection,
     deps.mintGitHubInstallationToken,
+    { orgId: deps.orgId },
   );
   if (!token) {
-    if (isCode) {
-      await saveCodeCursor(deps, message, advanceCodeCursorTick(storedCursor));
-    } else {
-      console.warn('pull-due: no usable source token for kind', message.kind);
-    }
-    return [];
+    return notProcessed(message, 'token_missing');
   }
-  const connector = connectorBuilder(message.kind, token);
+  const connector = buildPullConnector(
+    connectorBuilder,
+    message.kind,
+    token,
+    connectionMetadata(connection),
+    codebaseSelection,
+  );
   if (!connector) {
-    console.warn('pull-due: no connector implementation for kind', message.kind);
-    return [];
+    return notProcessed(message, 'connector_missing');
   }
 
   const window = resolvePullWindow(
@@ -311,19 +499,83 @@ export async function runPull(
     connector,
     window,
     connectorBuilder,
+    codebaseSelection,
   );
 
-  if (isCode) {
-    await saveCodeCursor(
-      deps,
-      message,
-      result.earlyReturn ? advanceCodeCursorTick(result.cursor.value) : result.cursor.value,
-    );
-  } else {
-    await saveCursor(deps.ssm, message.tenant_id, message.sourceId, result.cursor.value);
-  }
+  const cursor = result.earlyReturn
+    ? advanceCodeCursorTick(result.cursor.value)
+    : result.cursor.value;
+  await reconcileJiraWebhook(message, deps, result.connection);
+  const facts = await deps.pipeline.handlePulled(result.facts, result.containers, message.kind);
+  return {
+    outcome: 'processed',
+    facts,
+    cursor,
+    sourceId: message.sourceId,
+    sourceKind: message.kind,
+    persistCursor: async () => {
+      if (isCode) {
+        await saveCodeCursor(deps, message, cursor);
+        return;
+      }
+      await saveCursor(deps.ssm, message.tenant_id, message.sourceId, cursor);
+    },
+  };
+}
 
-  return deps.pipeline.handlePulled(result.facts, result.containers, message.kind);
+async function resolveCodebaseConnection(deps: PullRunnerDeps) {
+  if (!deps.codebaseSelectionStore) {
+    return { outcome: 'not_ready' as const, reason: 'codebase_selection_missing' as const };
+  }
+  return new GitHubCodebaseConnectionResolver({
+    controlPlaneUrl: deps.controlPlaneUrl,
+    runtimeDeploymentId: deps.runtimeDeploymentId ?? deps.deploymentId,
+    tenantDeploymentId: deps.deploymentId,
+    agentToken: deps.agentToken,
+    orgId: deps.orgId,
+    crypto: deps.crypto,
+    fetchImpl: deps.controlPlaneFetch,
+    selectionStore: deps.codebaseSelectionStore,
+  }).resolveScheduled();
+}
+
+function selectionForCodeConnector(
+  selection: Awaited<ReturnType<CodebaseSelectionStore['read']>>,
+): CodebaseRepositorySelection {
+  if (selection.mode === 'all') return { mode: 'all' };
+  return {
+    mode: 'selected',
+    repositoryIds: selection.repositories.map((repository) => repository.id),
+  };
+}
+
+function buildPullConnector(
+  connectorBuilder: (
+    kind: string,
+    token: string,
+    connectionMetadata: PullConnectionMetadata,
+    codebaseSelection?: CodebaseRepositorySelection,
+  ) => Connector | null,
+  kind: string,
+  token: string,
+  connectionMetadata: PullConnectionMetadata,
+  codebaseSelection?: CodebaseRepositorySelection,
+): Connector | null {
+  if (codebaseSelection) {
+    return connectorBuilder(kind, token, connectionMetadata, codebaseSelection);
+  }
+  return connectorBuilder(kind, token, connectionMetadata);
+}
+
+function superseded(message: PullDueMessage): PullRunResult {
+  return { outcome: 'superseded', sourceId: message.sourceId, sourceKind: message.kind };
+}
+
+function notProcessed(
+  message: PullDueMessage,
+  reason: Extract<PullRunResult, { outcome: 'not_processed' }>['reason'],
+): PullRunResult {
+  return { outcome: 'not_processed', reason, sourceId: message.sourceId, sourceKind: message.kind };
 }
 
 export async function pullWithRefresh(
@@ -332,14 +584,31 @@ export async function pullWithRefresh(
   connection: DecryptedSourceConnection,
   connector: Connector,
   window: PullWindow,
-  connectorBuilder: (kind: string, token: string) => Connector | null = buildConnector,
+  connectorBuilder: (
+    kind: string,
+    token: string,
+    connectionMetadata: PullConnectionMetadata,
+    codebaseSelection?: CodebaseRepositorySelection,
+  ) => Connector | null = buildConnector,
+  codebaseSelection?: CodebaseRepositorySelection,
 ) {
   try {
-    return await connector.pull(window.cursor, window.options);
+    return {
+      ...(await connector.pull(window.cursor, window.options)),
+      connection,
+    };
   } catch (error) {
     if (!isUnauthorized(error)) throw error;
     if (connection.kind === 'github' || connection.kind === 'code') {
-      return retryPullWithFreshGitHubToken(deps, connection, window, connectorBuilder, error);
+      return retryPullWithFreshGitHubToken(
+        deps,
+        message.kind,
+        connection,
+        window,
+        connectorBuilder,
+        error,
+        codebaseSelection,
+      );
     }
     if (!deps.refreshOAuthCredential) throw error;
     if (!connection.encryptedRefreshToken || !connection.refreshCiphertextSha256) throw error;
@@ -349,6 +618,7 @@ export async function pullWithRefresh(
       deploymentId: deps.deploymentId,
       sourceKind: message.kind,
       connectionId: connection.connectionId,
+      activationGeneration: connection.activationGeneration,
       attestationGeneration: connection.attestationGeneration,
       attemptId: randomBytes(32).toString('hex'),
       expectedRefreshCiphertextSha256: connection.refreshCiphertextSha256,
@@ -359,8 +629,9 @@ export async function pullWithRefresh(
     } catch {
       throw error;
     }
-    const refreshed = await getDecryptedConnectionForKind(
+    const refreshedResolution = await getDecryptedConnectionForKind(
       deps.controlPlaneUrl,
+      deps.runtimeDeploymentId ?? deps.deploymentId,
       deps.deploymentId,
       deps.agentToken,
       message.kind,
@@ -368,12 +639,25 @@ export async function pullWithRefresh(
       deps.crypto,
       deps.controlPlaneFetch,
     );
-    if (!refreshed) throw error;
-    const refreshedToken = await resolveSourceToken(message.kind, refreshed);
+    if (refreshedResolution.outcome !== 'connected') throw error;
+    const refreshed = refreshedResolution.connection;
+    if (refreshed.activationGeneration !== connection.activationGeneration) throw error;
+    const refreshedToken = await resolveSourceToken(message.kind, refreshed, undefined, {
+      orgId: deps.orgId,
+    });
     if (!refreshedToken) throw error;
-    const refreshedConnector = connectorBuilder(message.kind, refreshedToken);
+    const refreshedConnector = buildPullConnector(
+      connectorBuilder,
+      message.kind,
+      refreshedToken,
+      connectionMetadata(refreshed),
+      codebaseSelection,
+    );
     if (!refreshedConnector) throw error;
-    return refreshedConnector.pull(window.cursor, window.options);
+    return {
+      ...(await refreshedConnector.pull(window.cursor, window.options)),
+      connection: refreshed,
+    };
   }
 }
 
@@ -381,32 +665,108 @@ export async function pullWithRefresh(
 // The retry mint bypasses the TTL cache — recovery is always a fresh mint.
 async function retryPullWithFreshGitHubToken(
   deps: PullRunnerDeps,
+  sourceKind: string,
   connection: DecryptedSourceConnection,
   window: PullWindow,
-  connectorBuilder: (kind: string, token: string) => Connector | null,
+  connectorBuilder: (
+    kind: string,
+    token: string,
+    connectionMetadata: PullConnectionMetadata,
+    codebaseSelection?: CodebaseRepositorySelection,
+  ) => Connector | null,
   originalError: unknown,
+  codebaseSelection?: CodebaseRepositorySelection,
 ) {
   if (!deps.mintGitHubInstallationToken || !connection.installationId) throw originalError;
   const minted = await mintGitHubInstallationTokenForPull(
     connection.installationId,
     deps.mintGitHubInstallationToken,
+    {
+      orgId: deps.orgId,
+      connectionId: connection.connectionId,
+      connectionGeneration: connection.activationGeneration,
+    },
     { bypassCache: true },
   );
   if (minted.outcome === 'rate_limited') {
-    if (connection.kind === 'code') {
+    if (sourceKind === 'code') {
       return {
         facts: [],
         containers: [],
         cursor: window.cursor,
         hasMore: false,
         earlyReturn: true,
+        connection,
       };
     }
     throw new Error('github_mint_rate_limited');
   }
-  const connector = connectorBuilder(connection.kind, minted.accessToken);
+  const connector = buildPullConnector(
+    connectorBuilder,
+    sourceKind,
+    minted.accessToken,
+    connectionMetadata(connection),
+    codebaseSelection,
+  );
   if (!connector) throw originalError;
-  return connector.pull(window.cursor, window.options);
+  return {
+    ...(await connector.pull(window.cursor, window.options)),
+    connection,
+  };
+}
+
+async function reconcileJiraWebhook(
+  message: PullDueMessage,
+  deps: PullRunnerDeps,
+  connection: DecryptedSourceConnection,
+): Promise<void> {
+  if (message.kind !== 'jira' || !deps.jiraWebhookLifecycle) return;
+  if (!connection.externalTenantId || !connection.webhookRouteId) return;
+  try {
+    await deps.jiraWebhookLifecycle.reconcile({
+      runtimeDeploymentId: deps.runtimeDeploymentId ?? deps.deploymentId,
+      tenantDeploymentId: deps.deploymentId,
+      orgId: deps.orgId,
+      connectionId: connection.connectionId,
+      sourceKind: connection.kind,
+      attestationGeneration: connection.attestationGeneration,
+      externalTenantId: connection.externalTenantId,
+      accessToken: connection.accessToken,
+      webhookRouteId: connection.webhookRouteId,
+      webhookRevision: connection.webhookRevision,
+      webhookRegistrationIds: connection.webhookRegistrationIds,
+      webhookExpiresAt: connection.webhookExpiresAt,
+      webhookStatus: connection.webhookStatus,
+      webhookLastAttemptedAt: connection.webhookLastAttemptedAt,
+      webhookCleanupRouteId: connection.webhookCleanupRouteId,
+      webhookCleanupExternalTenantId: connection.webhookCleanupExternalTenantId,
+      webhookCleanupRegistrationIds: connection.webhookCleanupRegistrationIds,
+    });
+  } catch {
+    console.warn('pull-due: jira webhook reconciliation degraded');
+  }
+}
+
+function connectionMetadata(connection: DecryptedSourceConnection): PullConnectionMetadata {
+  return {
+    externalTenantId: connection.externalTenantId,
+    webhookRouteId: connection.webhookRouteId,
+    webhookRevision: connection.webhookRevision,
+    webhookRegistrationIds: connection.webhookRegistrationIds,
+    webhookExpiresAt: connection.webhookExpiresAt,
+    webhookStatus: connection.webhookStatus,
+    webhookLastOperation: connection.webhookLastOperation,
+    webhookLastAttemptedAt: connection.webhookLastAttemptedAt,
+    webhookLastSucceededAt: connection.webhookLastSucceededAt,
+    webhookLastDeliveryAt: connection.webhookLastDeliveryAt,
+    webhookProtocolCapture: connection.webhookProtocolCapture,
+    webhookProtocolCaptureExpiresAt: connection.webhookProtocolCaptureExpiresAt,
+    webhookFailureCode: connection.webhookFailureCode,
+    webhookCleanupRouteId: connection.webhookCleanupRouteId,
+    webhookCleanupExternalTenantId: connection.webhookCleanupExternalTenantId,
+    webhookCleanupRegistrationIds: connection.webhookCleanupRegistrationIds,
+    webhookCleanupExpiresAt: connection.webhookCleanupExpiresAt,
+  };
 }
 
 function isUnauthorized(error: unknown, seen = new Set<object>()): boolean {

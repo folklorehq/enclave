@@ -5,6 +5,20 @@ import {
 import {
   oauthRefreshMetadataUpdateSchema,
   sealedOAuthCredentialPersistenceSchema,
+  webhookLifecycleClaimSchema,
+  webhookLifecycleRenewSchema,
+  webhookLifecycleCleanupClearSchema,
+  webhookLifecycleDeliverySchema,
+  webhookLifecycleFinalizeSchema,
+  retiredOAuthCredentialLookupSchema,
+  retiredOAuthCredentialSchema,
+  type WebhookLifecycleClaim,
+  type WebhookLifecycleRenew,
+  type WebhookLifecycleCleanupClear,
+  type WebhookLifecycleDelivery,
+  type WebhookLifecycleFinalize,
+  type RetiredOAuthCredential,
+  type RetiredOAuthCredentialLookup,
 } from '@folklore/contracts/enclave';
 import { z, type ZodType } from 'zod';
 import type { RefreshCredentialPersistence } from './EnclaveOAuthRefreshService.js';
@@ -13,7 +27,7 @@ import type { GitHubInstallationCredentialPersistence } from './EnclaveGitHubIns
 import type { MemberIdentityLinkPersistencePort } from './EnclaveOAuthAuthorizationService.js';
 
 export interface OAuthCredentialPersistenceTransport {
-  post(path: string, body: unknown): Promise<{ status: number }>;
+  post(path: string, body: unknown): Promise<{ status: number; body?: unknown }>;
 }
 
 export type CompareAndSwapResult =
@@ -21,6 +35,28 @@ export type CompareAndSwapResult =
   | 'stale'
   | 'attestation_unavailable'
   | 'persist_failed';
+
+export interface WebhookLifecyclePersistence {
+  claimWebhookLifecycle(
+    input: WebhookLifecycleClaim,
+  ): Promise<{ claimId: string; revision: number } | 'busy' | 'stale' | 'invalid_submission'>;
+  renewWebhookLifecycleClaim(
+    input: WebhookLifecycleRenew,
+  ): Promise<'renewed' | 'stale' | 'invalid_submission' | 'attestation_unavailable'>;
+  finalizeWebhookLifecycle(
+    input: WebhookLifecycleFinalize,
+  ): Promise<'updated' | 'stale' | 'invalid_submission'>;
+  clearWebhookCleanupTombstone(
+    input: WebhookLifecycleCleanupClear,
+  ): Promise<'updated' | 'stale' | 'invalid_submission'>;
+  recordWebhookDelivery(
+    input: WebhookLifecycleDelivery,
+  ): Promise<'updated' | 'stale' | 'invalid_submission'>;
+}
+
+export interface RetiredOAuthCredentialPersistence {
+  getRetiredCredential(input: RetiredOAuthCredentialLookup): Promise<RetiredOAuthCredential | null>;
+}
 
 const refreshPersistenceSchema = z
   .object({
@@ -39,7 +75,9 @@ export class HttpOAuthCredentialPersistence
     SealedCredentialPersistence,
     GitHubInstallationCredentialPersistence,
     RefreshCredentialPersistence,
-    MemberIdentityLinkPersistencePort
+    MemberIdentityLinkPersistencePort,
+    WebhookLifecyclePersistence,
+    RetiredOAuthCredentialPersistence
 {
   constructor(private readonly transport: OAuthCredentialPersistenceTransport) {}
 
@@ -107,12 +145,101 @@ export class HttpOAuthCredentialPersistence
     await this.post('/member-identity-link', input, memberIdentityLinkPersistenceSchema);
   }
 
+  async claimWebhookLifecycle(
+    input: WebhookLifecycleClaim,
+  ): Promise<{ claimId: string; revision: number } | 'busy' | 'stale' | 'invalid_submission'> {
+    const response = await this.post(
+      '/source-connection/webhook-lifecycle/claim',
+      input,
+      webhookLifecycleClaimSchema,
+      true,
+    );
+    if (response.status === 200) {
+      const parsed = z
+        .object({ claimId: z.string().uuid(), revision: z.number().int().nonnegative() })
+        .strict()
+        .safeParse(response.body);
+      return parsed.success ? parsed.data : 'invalid_submission';
+    }
+    return this.lifecycleError(response.status, response.body, true);
+  }
+
+  async renewWebhookLifecycleClaim(
+    input: WebhookLifecycleRenew,
+  ): Promise<'renewed' | 'stale' | 'invalid_submission' | 'attestation_unavailable'> {
+    const response = await this.post(
+      '/source-connection/webhook-lifecycle/renew',
+      input,
+      webhookLifecycleRenewSchema,
+      true,
+    );
+    return response.status === 200
+      ? 'renewed'
+      : this.lifecycleError(response.status, response.body);
+  }
+
+  async finalizeWebhookLifecycle(
+    input: WebhookLifecycleFinalize,
+  ): Promise<'updated' | 'stale' | 'invalid_submission'> {
+    const response = await this.post(
+      '/source-connection/webhook-lifecycle/finalize',
+      input,
+      webhookLifecycleFinalizeSchema,
+      true,
+    );
+    return response.status === 202
+      ? 'updated'
+      : this.lifecycleError(response.status, response.body);
+  }
+
+  async clearWebhookCleanupTombstone(
+    input: WebhookLifecycleCleanupClear,
+  ): Promise<'updated' | 'stale' | 'invalid_submission'> {
+    const response = await this.post(
+      '/source-connection/webhook-lifecycle/cleanup-clear',
+      input,
+      webhookLifecycleCleanupClearSchema,
+      true,
+    );
+    return response.status === 202
+      ? 'updated'
+      : this.lifecycleError(response.status, response.body);
+  }
+
+  async recordWebhookDelivery(
+    input: WebhookLifecycleDelivery,
+  ): Promise<'updated' | 'stale' | 'invalid_submission'> {
+    const response = await this.post(
+      '/source-connection/webhook-lifecycle/delivery',
+      input,
+      webhookLifecycleDeliverySchema,
+      true,
+    );
+    return response.status === 202
+      ? 'updated'
+      : this.lifecycleError(response.status, response.body);
+  }
+
+  async getRetiredCredential(
+    input: RetiredOAuthCredentialLookup,
+  ): Promise<RetiredOAuthCredential | null> {
+    const response = await this.post(
+      '/source-connection/retired-credential',
+      input,
+      retiredOAuthCredentialLookupSchema,
+      true,
+    );
+    if (response.status !== 200) return null;
+    const parsed = retiredOAuthCredentialSchema.safeParse(response.body);
+    return parsed.success ? parsed.data : null;
+  }
+
   private async post(
     path: string,
     body: unknown,
     schema: ZodType = sealedOAuthCredentialPersistenceSchema,
     allowNon2xx = false,
-  ): Promise<{ status: number }> {
+  ): Promise<{ status: number; body?: unknown }> {
     const parsed = schema.safeParse(body);
     if (!parsed.success) throw new Error('oauth_persistence_payload_invalid');
     const response = await this.transport.post(path, parsed.data);
@@ -120,5 +247,28 @@ export class HttpOAuthCredentialPersistence
       throw new Error('oauth_persistence_failed');
     }
     return response;
+  }
+
+  private lifecycleError(
+    status: number,
+    body: unknown,
+    allowBusy: true,
+  ): 'busy' | 'stale' | 'invalid_submission';
+  private lifecycleError(
+    status: number,
+    body: unknown,
+    allowBusy?: false,
+  ): 'stale' | 'invalid_submission';
+  private lifecycleError(
+    status: number,
+    body: unknown,
+    allowBusy = false,
+  ): 'busy' | 'stale' | 'invalid_submission' {
+    if (status === 400) return 'invalid_submission';
+    if (status !== 409) throw new Error('oauth_persistence_retryable');
+    if (typeof body !== 'object' || body === null) return 'invalid_submission';
+    const error = (body as { error?: unknown }).error;
+    if (error === 'stale' || (allowBusy && error === 'busy')) return error;
+    return 'invalid_submission';
   }
 }

@@ -11,7 +11,7 @@ export class HttpOAuthPersistenceTransport implements OAuthCredentialPersistence
     assertControlPlaneOrigin(controlPlaneUrl);
   }
 
-  async post(path: string, body: unknown): Promise<{ status: number }> {
+  async post(path: string, body: unknown): Promise<{ status: number; body?: unknown }> {
     const token = this.agentToken();
     if (!token) throw new Error('oauth_persistence_auth_unavailable');
     const response = await this.fetchImpl(
@@ -27,6 +27,12 @@ export class HttpOAuthPersistenceTransport implements OAuthCredentialPersistence
         signal: AbortSignal.timeout(10_000),
       },
     );
-    return { status: response.status };
+    let responseBody: unknown;
+    try {
+      responseBody = await response.json();
+    } catch {
+      responseBody = undefined;
+    }
+    return { status: response.status, body: responseBody };
   }
 }

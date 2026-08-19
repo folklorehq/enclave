@@ -6,7 +6,7 @@ import type { CredentialSealer, OAuthStateGuard } from './EnclaveOAuthAuthorizat
 import type { ProviderTokenClient } from './ProviderTokenClient.js';
 import type { VerifiedProviderConfig } from '../egress/provider-token-fetch.js';
 
-export type GitHubInstallationSourceKind = 'github' | 'code';
+export type GitHubInstallationSourceKind = 'github';
 
 export interface GitHubInstallationMetadata {
   orgId: string;
@@ -17,6 +17,7 @@ export interface GitHubInstallationMetadata {
   installationId: string;
   stateBindingId: string;
   generation: string;
+  activationGeneration: string;
 }
 
 export interface GitHubInstallationCredentialPersistence {
@@ -79,6 +80,7 @@ export class EnclaveGitHubInstallationTokenService {
         deploymentId: input.deploymentId,
         connectionId: input.connectionId,
         sourceKind: input.sourceKind,
+        activationGeneration: input.activationGeneration,
         attestationGeneration: input.generation,
         sourceUserId: null,
         externalTenantId: input.installationId,

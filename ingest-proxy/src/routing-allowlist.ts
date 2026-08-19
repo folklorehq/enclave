@@ -8,6 +8,9 @@ export interface RoutingAllowlistEntry {
   mode: RoutingMode;
   hmac?: string;
   previousHmac?: string;
+  routeId?: string;
+  routeHmac?: string;
+  attestationGeneration?: string;
   expiresAt?: string;
 }
 
@@ -34,10 +37,29 @@ export function normalizeRoutingAllowlist(value: unknown): readonly RoutingAllow
       mode: item['mode'],
       ...(typeof item['hmac'] === 'string' ? { hmac: item['hmac'] } : {}),
       ...(typeof item['previousHmac'] === 'string' ? { previousHmac: item['previousHmac'] } : {}),
+      ...(typeof item['routeId'] === 'string' ? { routeId: item['routeId'] } : {}),
+      ...(typeof item['routeHmac'] === 'string' ? { routeHmac: item['routeHmac'] } : {}),
+      ...(typeof item['attestationGeneration'] === 'string'
+        ? { attestationGeneration: item['attestationGeneration'] }
+        : {}),
       ...(typeof item['expiresAt'] === 'string' ? { expiresAt: item['expiresAt'] } : {}),
     });
   }
   return entries;
+}
+
+export function oauthRouteHmacMessage(tenantId: string, source: string, routeId: string): string {
+  return `${tenantId}:${source}:url:${routeId}`;
+}
+
+export function timingSafeStringEqual(provided: string, expected: string): boolean {
+  const left = Buffer.from(provided, 'utf8');
+  const right = Buffer.from(expected, 'utf8');
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
+export function verifyOAuthRouteHmac(provided: string, expected: string): boolean {
+  return timingSafeStringEqual(provided, expected);
 }
 
 export function findRoutingAllowlistEntry(

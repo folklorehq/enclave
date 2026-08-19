@@ -32,14 +32,23 @@ export async function sealMasterKey(
   kmsKeyId: string,
   tenantId?: string,
 ): Promise<Buffer> {
+  return sealKmsPayload(masterKey, kmsKeyId, masterKeyContext(tenantId));
+}
+
+export async function sealKmsPayload(
+  plaintext: Buffer,
+  kmsKeyId: string,
+  encryptionContext: Record<string, string>,
+): Promise<Buffer> {
   const response = await kmsClient().send(
     new EncryptCommand({
       KeyId: kmsKeyId,
-      Plaintext: masterKey,
-      EncryptionContext: masterKeyContext(tenantId),
+      Plaintext: plaintext,
+      EncryptionContext: encryptionContext,
     }),
   );
-  return Buffer.from(response.CiphertextBlob!);
+  if (!response.CiphertextBlob) throw new Error('recipient_kms_output_invalid');
+  return Buffer.from(response.CiphertextBlob);
 }
 
 // KMS raises this only when the ciphertext/AAD don't match — i.e. a blob sealed before

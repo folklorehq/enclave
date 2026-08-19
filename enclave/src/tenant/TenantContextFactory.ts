@@ -19,7 +19,7 @@ import {
   singleVersionSealedContentKeyring,
   type SealedContentKeyringConfig,
 } from '../crypto/esdk.js';
-import { CRITIQUE_MODEL, EMBED_MODEL, GENERATE_MODEL, phalaInference } from '../inference/phala.js';
+import { inferenceModel, phalaInference } from '../inference/phala.js';
 import {
   CachedInference,
   LLM_CACHE_PROMPT_VERSION,
@@ -30,6 +30,8 @@ import { TenantContext } from './tenant-context.js';
 
 export interface TenantIdentity {
   tenantId: string;
+  deploymentId?: string;
+  tenantDeploymentId?: string;
   /** Master CMK — seals/unseals the master blob only, never content. */
   kmsKeyId: string;
   activeStorageKeyVersion: number;
@@ -111,6 +113,8 @@ export class TenantContextFactory {
         sealedBlobBucket,
         identity.rawPayloadsBucket ?? '',
         processedBucket,
+        identity.deploymentId ?? '',
+        identity.tenantDeploymentId,
       );
     } catch (error) {
       masterKey.fill(0);
@@ -130,9 +134,9 @@ export class TenantContextFactory {
       orgId: tenantId,
     });
     return new CachedInference(phalaInference, cache, {
-      embedModel: EMBED_MODEL,
-      generateModel: GENERATE_MODEL,
-      critiqueModel: CRITIQUE_MODEL,
+      embedModel: inferenceModel('embed'),
+      generateModel: inferenceModel('generate'),
+      critiqueModel: inferenceModel('critique'),
       promptVersion: LLM_CACHE_PROMPT_VERSION,
     });
   }

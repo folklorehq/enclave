@@ -1,33 +1,58 @@
 import {
   AciReceiptVerifier,
-  parseModelAllowlist,
+  OpenAICompatBackend,
   TeeEndpointBackend,
   type InferenceResponseVerifier,
-  type ReceiptVerificationPolicy,
   type ToolSpec,
 } from '@folklore/inference';
+import {
+  inferenceTrustPolicyV1Schema,
+  type InferenceModelRole,
+  type InferenceTrustPolicyV1,
+} from '@folklore/contracts';
 import { createTelemetryClient, type TelemetryClient } from '@folklore/telemetry';
+import {
+  inferenceAttestationConfigSchema,
+  type InferenceAttestationConfig,
+} from '@folklore/contracts/enclave-attestation';
 import { CRITIQUE_TEMPERATURE, type SynthesisInference } from './CachedInference.js';
 import { recordTokenUsage } from './TokenUsageScope.js';
+import { createPinnedInferenceFetch } from '../egress/inference.js';
 
 const PROXY_PORT = process.env['VSOCK_INFERENCE_PROXY_PORT'] ?? '';
-export const EMBED_MODEL = process.env['EMBED_MODEL'] ?? 'qwen/qwen3-embedding-8b';
-export const GENERATE_MODEL = process.env['GENERATE_MODEL'] ?? 'z-ai/glm-5.2';
-// The relevance/citation judge — a smaller allowlisted model, off the drafter's family (enforced below).
-const JUDGE_MODEL = process.env['JUDGE_MODEL'] ?? 'qwen/qwen3-32b';
+const DEFAULT_EMBED_DIM = 4096;
+const DEFAULT_GENERATE_MAX_TOKENS = 8192;
+export let EMBED_MODEL = '';
+export let GENERATE_MODEL = '';
+let JUDGE_MODEL = '';
 const JUDGE_MAX_TOKENS = Number(process.env['JUDGE_MAX_TOKENS'] ?? '4096');
 
-// A model reviewing its own draft is blind to its own defects, and that blindness barely transfers
-// across providers, so this may never resolve to GENERATE_MODEL's provider (enforced below).
-export const CRITIQUE_MODEL = process.env['CRITIQUE_MODEL'] ?? 'qwen/qwen3-32b';
-
-// Fail-closed guard: only these live-verified TEE-confidential models may receive decrypted
-// content. inference.phala.com serves unverified models on the same endpoint.
-const MODEL_ALLOWLIST = parseModelAllowlist(process.env['INFERENCE_MODEL_ALLOWLIST']);
+export let CRITIQUE_MODEL = '';
+let MODEL_ALLOWLIST: readonly string[] = [];
 
 const PROVIDER_SEPARATOR = '/';
 
-// Normalized before comparing: "Z-AI/glm-4" and "z-ai/glm-5.2" are one family, not two.
+export const RECEIPT_POLICY = 'per-call' as const;
+
+export interface SyntheticPhalaPayloadV1 {
+  payloadKind: 'synthetic-commissioning' | 'customer-content';
+  body: Uint8Array;
+}
+
+export class SyntheticPhalaInferenceError extends Error {
+  readonly code = 'provider_not_synthetic' as const;
+
+  constructor() {
+    super('provider_not_synthetic');
+    this.name = 'SyntheticPhalaInferenceError';
+  }
+}
+
+// UNWIRED: synthetic-only commissioning guard has no live provider caller until Gate B admission.
+export function assertSyntheticPhalaPayload(input: SyntheticPhalaPayloadV1): void {
+  if (input.payloadKind !== 'synthetic-commissioning') throw new SyntheticPhalaInferenceError();
+}
+
 export function familyOf(model: string): string {
   const normalized = model.trim().toLowerCase();
   const separator = normalized.indexOf(PROVIDER_SEPARATOR);
@@ -40,87 +65,211 @@ export function assertCrossFamily(role: string, model: string, generateModel: st
   const drafter = familyOf(generateModel);
   if (drafter === familyOf(model)) {
     throw new Error(
-      `${role} must be a different provider family than GENERATE_MODEL; both are "${drafter}"`,
+      `${role} must be a different provider family than the generate role; both are "${drafter}"`,
     );
   }
 }
 
-function assertAllowlisted(role: string, model: string): void {
-  if (!MODEL_ALLOWLIST.includes(model)) {
+function assertAllowlisted(role: string, model: string, allowlist: readonly string[]): void {
+  if (!allowlist.includes(model)) {
     throw new Error(`${role} "${model}" is not on the verified-model allowlist`);
   }
 }
 
-// At module init, not at first call: a misrouted judge must stop the boot, not surface as a
-// silently unreviewed page mid-synthesis.
-assertCrossFamily('CRITIQUE_MODEL', CRITIQUE_MODEL, GENERATE_MODEL);
-assertAllowlisted('CRITIQUE_MODEL', CRITIQUE_MODEL);
-assertCrossFamily('JUDGE_MODEL', JUDGE_MODEL, GENERATE_MODEL);
-assertAllowlisted('JUDGE_MODEL', JUDGE_MODEL);
-
-// ACI receipt verification (attestation pin + per-response upstream.verified) is POLICY, not
-// configuration: TEE_ENDPOINT_URL comes from the parent, so a flag the parent could omit was an
-// off-switch for the only check that inference runs in a TEE at all. Only a dev run may opt out,
-// and entrypoint.sh pins NODE_ENV=production so the parent cannot claim to be one. This closes the
-// omitted-flag path and not the redirect itself: aci-verifier fetches the pin from that same
-// parent-chosen endpoint (audit F1), so a redirected host can still serve a pin it made up.
-const DEV_OR_TEST = process.env['NODE_ENV'] === 'development' || process.env['NODE_ENV'] === 'test';
-const VERIFY_RECEIPTS = DEV_OR_TEST ? process.env['INFERENCE_ACI_VERIFY'] === '1' : true;
-// Strengthening-only: absent means off, so a parent can turn this ON but never off.
-const ENFORCE_RECEIPT_SIGNATURE = process.env['INFERENCE_ACI_ENFORCE_SIGNATURE'] === '1';
-
-// Enclave synthesis is async (not user-latency-critical), so verify every receipt — this catches a
-// gateway that reroutes a mid-session call to an unverified upstream. Constant, not configurable:
-// the only other value is weaker, and every env knob here is one the parent writes.
-export const RECEIPT_POLICY: ReceiptVerificationPolicy = 'per-call';
-
-// z-ai/glm-5.2 is a reasoning model: reasoning tokens count against max_tokens, so a
-// tight cap returns empty content (the budget is spent thinking). Keep it generous for
-// long-form synthesis; configurable per deployment.
-const GENERATE_MAX_TOKENS = Number(process.env['GENERATE_MAX_TOKENS'] ?? '8192');
-
-// A bad override must fail loudly at boot rather than silently poison every dimension-derived size.
-function readEmbedDim(): number {
-  const parsed = Number(process.env['EMBED_DIM'] || '4096');
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    throw new Error(
-      `EMBED_DIM must be a positive integer, got ${JSON.stringify(process.env['EMBED_DIM'])}`,
-    );
-  }
-  return parsed;
+function assertPolicyRoleModels(policy: InferenceTrustPolicyV1): void {
+  assertCrossFamily(
+    'critique role',
+    policy.roleModels.critique.model,
+    policy.roleModels.generate.model,
+  );
+  assertCrossFamily('judge role', policy.roleModels.judge.model, policy.roleModels.generate.model);
 }
 
-// qwen/qwen3-embedding-8b returns 4096-dim vectors natively and rejects the OpenAI
-// `dimensions` truncation param, so we never request a dimension — we validate the
-// native length. EMBED_DIM sizes the HNSW index, the offline fallback, and this guard.
-export const EMBED_DIM = readEmbedDim();
+let GENERATE_MAX_TOKENS = DEFAULT_GENERATE_MAX_TOKENS;
+export let EMBED_DIM = DEFAULT_EMBED_DIM;
 
-// The key is read lazily (not at module load) because boot fetches it from SSM into
-// the environment before the first inference call — see loadInferenceKey in index.ts.
 function apiKey(): string | undefined {
   return process.env['TEE_API_KEY'];
 }
 
-// no hardcoded provider host as a functional default — a dead default URL
-// soft-fails to empty wikis. TEE_ENDPOINT_URL wins; in-enclave the vsock proxy
-// port is the fallback.
-export function resolveBaseUrl(): string {
-  const url = process.env['TEE_ENDPOINT_URL'];
-  if (url) return url;
-  if (PROXY_PORT) return `https://localhost:${PROXY_PORT}`;
-  throw new Error(
-    'inference endpoint not configured: set TEE_ENDPOINT_URL or VSOCK_INFERENCE_PROXY_PORT',
+type InferenceAttestationInput = Omit<InferenceAttestationConfig, 'modelAllowlist'> & {
+  readonly modelAllowlist: readonly string[];
+};
+type SignedInferenceAttestation = Readonly<InferenceAttestationInput>;
+
+let _backend: TeeEndpointBackend | OpenAICompatBackend | null = null;
+let _telemetry: TelemetryClient | null = null;
+let _verifiedReceiptSink: ((sessionId: string) => void | Promise<void>) | undefined;
+let _inferenceTrustPolicy: InferenceTrustPolicyV1 | undefined;
+let _inferenceFetch: typeof fetch | null = null;
+let _inferencePolicy: SignedInferenceAttestation | null = null;
+let _isLocalPolicy = false;
+
+const TEST_ROLE_MODELS: Record<InferenceModelRole, { model: string; revision: string }> = {
+  embed: { model: 'qwen/qwen3-embedding-8b', revision: 'test' },
+  generate: { model: 'z-ai/glm-5.2', revision: 'test' },
+  judge: { model: 'qwen/qwen3-32b', revision: 'test' },
+  critique: { model: 'qwen/qwen3-32b', revision: 'test' },
+};
+
+export function inferenceModel(role: InferenceModelRole): string {
+  return inferenceRoleModel(role).model;
+}
+
+export function inferenceModelRevision(role: InferenceModelRole): string {
+  return inferenceRoleModel(role).revision;
+}
+
+export function setInferenceTelemetry(client: TelemetryClient): void {
+  _telemetry = client;
+}
+
+export function setVerifiedInferenceReceiptSink(
+  sink: (sessionId: string) => void | Promise<void>,
+): void {
+  _verifiedReceiptSink = sink;
+}
+
+export function setInferenceTrustPolicy(policy: unknown): void {
+  if (policy === undefined) {
+    _inferenceTrustPolicy = undefined;
+    _backend = null;
+    _inferenceFetch = null;
+    return;
+  }
+  const parsed = inferenceTrustPolicyV1Schema.parse(policy);
+  if (_inferenceTrustPolicy) {
+    if (JSON.stringify(_inferenceTrustPolicy) !== JSON.stringify(parsed)) {
+      throw new Error('signed inference trust policy changed');
+    }
+    return;
+  }
+  _inferenceTrustPolicy = parsed;
+  if (_inferenceTrustPolicy) assertPolicyRoleModels(_inferenceTrustPolicy);
+  _backend = null;
+  _inferenceFetch = null;
+}
+
+export function configureInferenceAttestation(input: InferenceAttestationInput): void {
+  const parsed = inferenceAttestationConfigSchema.parse(input);
+  if (_inferencePolicy) {
+    if (!sameInferenceAttestation(_inferencePolicy, parsed)) {
+      throw new Error('signed inference attestation changed');
+    }
+    return;
+  }
+  assertCrossFamily('CRITIQUE_MODEL', parsed.critiqueModel, parsed.generateModel);
+  assertAllowlisted('CRITIQUE_MODEL', parsed.critiqueModel, parsed.modelAllowlist);
+  assertCrossFamily('JUDGE_MODEL', parsed.judgeModel, parsed.generateModel);
+  assertAllowlisted('JUDGE_MODEL', parsed.judgeModel, parsed.modelAllowlist);
+  installInferencePolicy(parsed, false);
+}
+
+export function configureLocalInferencePolicy(env: NodeJS.ProcessEnv = process.env): void {
+  if (env['NODE_ENV'] !== 'development' && env['NODE_ENV'] !== 'test') {
+    throw new Error('local inference policy forbidden in production');
+  }
+  if (_inferencePolicy) return;
+  const { endpoint, expectedHost } = localEndpoint(env);
+  const embedModel = env['EMBED_MODEL']?.trim() || 'nomic-embed-text';
+  const generateModel = env['GENERATE_MODEL']?.trim() || 'llama3.1:8b';
+  const critiqueModel = env['CRITIQUE_MODEL']?.trim() || generateModel;
+  const judgeModel = env['JUDGE_MODEL']?.trim() || generateModel;
+  const models = [embedModel, generateModel, critiqueModel, judgeModel];
+  const modelAllowlist = localModelAllowlist(env, models);
+  for (const model of models) {
+    if (!modelAllowlist.includes(model)) {
+      throw new Error(`local inference model "${model}" is not allowlisted`);
+    }
+  }
+  installInferencePolicy(
+    {
+      endpoint,
+      expectedHost,
+      workloadId: 'local-development',
+      keysetDigest: `sha256:${'0'.repeat(64)}`,
+      embedModel,
+      generateModel,
+      critiqueModel,
+      judgeModel,
+      embedDim: localPositiveInteger(env['EMBED_DIM'], DEFAULT_EMBED_DIM, 'embed dimension'),
+      generateMaxTokens: localPositiveInteger(
+        env['GENERATE_MAX_TOKENS'],
+        DEFAULT_GENERATE_MAX_TOKENS,
+        'generation token limit',
+      ),
+      modelAllowlist,
+    },
+    true,
   );
 }
 
-let _backend: TeeEndpointBackend | null = null;
-let _telemetry: TelemetryClient | null = null;
+export function configureInferenceAttestationForTest(input: InferenceAttestationInput): void {
+  if (process.env['NODE_ENV'] !== 'development' && process.env['NODE_ENV'] !== 'test') {
+    throw new Error('test inference attestation forbidden in production');
+  }
+  configureInferenceAttestation(input);
+}
 
-// In-enclave there is no PostHog egress, so boot injects a sink that buffers ops events
-// onto the check-in. Absent an injection (dev/local) this falls back to the
-// env-resolved client, which is a Noop without POSTHOG_API_KEY.
-export function setInferenceTelemetry(client: TelemetryClient): void {
-  _telemetry = client;
+export function assertInferenceAttestationEcho(input: InferenceAttestationInput | undefined): void {
+  if (input === undefined) return;
+  const parsed = inferenceAttestationConfigSchema.parse(input);
+  if (!sameInferenceAttestation(signedInferenceAttestation(), parsed)) {
+    throw new Error('assignment inference policy disagrees with signed boot manifest');
+  }
+}
+
+function sameInferenceAttestation(
+  current: SignedInferenceAttestation,
+  candidate: InferenceAttestationInput,
+): boolean {
+  return JSON.stringify(current) === JSON.stringify(candidate);
+}
+
+function signedInferenceAttestation(): SignedInferenceAttestation {
+  if (_inferencePolicy) return _inferencePolicy;
+  throw new Error('signed inference attestation unavailable');
+}
+
+function localEndpoint(env: NodeJS.ProcessEnv): { endpoint: string; expectedHost: string } {
+  const endpoint = env['TEE_ENDPOINT_URL']?.trim() || 'http://localhost:11434/v1';
+  const url = new URL(endpoint);
+  const isLoopbackHttp =
+    url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+  if (url.protocol !== 'https:' && !isLoopbackHttp) {
+    throw new Error('local inference endpoint must use HTTPS or HTTP loopback');
+  }
+  return { endpoint, expectedHost: url.hostname };
+}
+
+function localModelAllowlist(env: NodeJS.ProcessEnv, models: readonly string[]): string[] {
+  const configured = env['INFERENCE_MODEL_ALLOWLIST']
+    ?.split(',')
+    .map((model) => model.trim())
+    .filter((model) => model.length > 0);
+  return configured?.length ? configured : [...new Set(models)];
+}
+
+function localPositiveInteger(raw: string | undefined, fallback: number, name: string): number {
+  const value = Number(raw ?? fallback);
+  if (!Number.isSafeInteger(value) || value < 1) throw new Error(`local ${name} invalid`);
+  return value;
+}
+
+function installInferencePolicy(input: InferenceAttestationInput, isLocal: boolean): void {
+  const policy = Object.freeze({
+    ...input,
+    modelAllowlist: Object.freeze([...input.modelAllowlist]),
+  });
+  _inferencePolicy = policy;
+  _isLocalPolicy = isLocal;
+  EMBED_MODEL = policy.embedModel;
+  GENERATE_MODEL = policy.generateModel;
+  CRITIQUE_MODEL = policy.critiqueModel;
+  JUDGE_MODEL = policy.judgeModel;
+  EMBED_DIM = policy.embedDim;
+  GENERATE_MAX_TOKENS = policy.generateMaxTokens;
+  MODEL_ALLOWLIST = policy.modelAllowlist;
 }
 
 function telemetry(): TelemetryClient {
@@ -129,42 +278,188 @@ function telemetry(): TelemetryClient {
 
 export function buildReceiptVerifier(
   telemetryClient: TelemetryClient = telemetry(),
-): InferenceResponseVerifier | undefined {
-  if (!VERIFY_RECEIPTS) return undefined;
-  return new AciReceiptVerifier({
-    baseUrl: resolveBaseUrl(),
-    apiKey: apiKey(),
-    policy: RECEIPT_POLICY,
-    enforceReceiptSignature: ENFORCE_RECEIPT_SIGNATURE,
-    telemetry: telemetryClient,
-  });
+  fetchImpl?: typeof fetch,
+): InferenceResponseVerifier {
+  if (_inferenceTrustPolicy) {
+    const trustPolicy = _inferenceTrustPolicy;
+    const transport = fetchImpl ?? pinnedInferenceFetch(trustPolicy);
+    return new AciReceiptVerifier({
+      baseUrl: resolveBaseUrl(),
+      trustPolicy,
+      apiKey: apiKey(),
+      policy: RECEIPT_POLICY,
+      telemetry: telemetryClient,
+      verifiedReceiptSink: _verifiedReceiptSink,
+      fetchImpl: transport,
+    });
+  }
+  if (isTestOnlyUnverifiedInference() && !_inferencePolicy) {
+    return {
+      ensureAttested: async () => undefined,
+      verifyReceipt: async () => undefined,
+    };
+  }
+  if (_inferencePolicy && isNonProductionEnvironment()) {
+    return {
+      ensureAttested: async () => undefined,
+      verifyReceipt: async () => undefined,
+    };
+  }
+  throw new Error('inference commissioning prerequisite unmet: signed trust policy unavailable');
 }
 
-function getBackend(): TeeEndpointBackend {
-  if (!_backend) {
-    _backend = new TeeEndpointBackend({
+function getBackend(): TeeEndpointBackend | OpenAICompatBackend {
+  if (_backend) return _backend;
+
+  if (_isLocalPolicy) {
+    _backend = new OpenAICompatBackend({
       baseUrl: resolveBaseUrl(),
       apiKey: apiKey(),
       embedModel: EMBED_MODEL,
       generateModel: GENERATE_MODEL,
       modelAllowlist: MODEL_ALLOWLIST,
-      responseVerifier: buildReceiptVerifier(),
       usageSink: recordTokenUsage,
       telemetry: telemetry(),
     });
+    return _backend;
   }
+
+  if (_inferenceTrustPolicy) {
+    const trustPolicy = currentInferenceTrustPolicy();
+    const fetchImpl = pinnedInferenceFetch(trustPolicy);
+    _backend = new TeeEndpointBackend({
+      baseUrl: resolveBaseUrl(),
+      apiKey: apiKey(),
+      trustPolicy,
+      responseVerifier: buildReceiptVerifier(undefined, fetchImpl),
+      usageSink: recordTokenUsage,
+      telemetry: telemetry(),
+      fetchImpl,
+    });
+    return _backend;
+  }
+
+  if (!_inferencePolicy || !isNonProductionEnvironment()) {
+    throw new Error('inference commissioning prerequisite unmet: signed trust policy unavailable');
+  }
+
+  _backend = new OpenAICompatBackend({
+    baseUrl: resolveBaseUrl(),
+    apiKey: apiKey(),
+    embedModel: EMBED_MODEL,
+    generateModel: GENERATE_MODEL,
+    modelAllowlist: MODEL_ALLOWLIST,
+    responseVerifier: buildReceiptVerifier(),
+    usageSink: recordTokenUsage,
+    telemetry: telemetry(),
+  });
   return _backend;
 }
 
-// a missing endpoint/key must fail loudly — a silent zero-vector / empty-string
-// fallback would poison the HNSW index and persist empty wikis as if synthesis worked.
+function pinnedInferenceFetch(policy: InferenceTrustPolicyV1): typeof fetch {
+  return (_inferenceFetch ??= createPinnedInferenceFetch(policy));
+}
+
+export function resolveBaseUrl(): string {
+  if (_inferenceTrustPolicy) {
+    return `${_inferenceTrustPolicy.origin}${_inferenceTrustPolicy.route}`;
+  }
+  if (_inferencePolicy) return _inferencePolicy.endpoint;
+  if (isTestOnlyUnverifiedInference()) return testEndpoint();
+  throw new Error('signed inference attestation unavailable');
+}
+
 export function assertInferenceConfigured(): void {
-  // Credentials only — the endpoint is resolveBaseUrl's to reject, and after A4 Lane D the knob it
-  // names is TEE_ENDPOINT_URL, which neither variable below would fix.
+  if (_isLocalPolicy) {
+    resolveBaseUrl();
+    return;
+  }
+
+  if (!_inferenceTrustPolicy && !(_inferencePolicy && isNonProductionEnvironment())) {
+    currentInferenceTrustPolicy();
+  }
   if (!PROXY_PORT && !apiKey()) {
     throw new Error('inference not configured: set VSOCK_INFERENCE_PROXY_PORT or TEE_API_KEY');
   }
   resolveBaseUrl();
+  if (_inferenceTrustPolicy) currentInferenceTrustPolicy();
+}
+
+function currentInferenceTrustPolicy(): InferenceTrustPolicyV1 {
+  if (_inferenceTrustPolicy) return _inferenceTrustPolicy;
+  if (isTestOnlyUnverifiedInference()) return testOnlyTrustPolicy();
+  return requireInferenceTrustPolicy();
+}
+
+function requireInferenceTrustPolicy(): InferenceTrustPolicyV1 {
+  if (!_inferenceTrustPolicy) {
+    throw new Error('inference commissioning prerequisite unmet: signed trust policy unavailable');
+  }
+  return _inferenceTrustPolicy;
+}
+
+function inferenceRoleModel(role: InferenceModelRole): { model: string; revision: string } {
+  if (_inferenceTrustPolicy) return _inferenceTrustPolicy.roleModels[role];
+  if (_inferencePolicy) return { model: roleModelName(role), revision: 'unversioned' };
+  if (process.env['NODE_ENV'] === 'test') return TEST_ROLE_MODELS[role];
+  return requireInferenceTrustPolicy().roleModels[role];
+}
+
+function roleModelName(role: InferenceModelRole): string {
+  if (!_inferencePolicy) throw new Error('signed inference attestation unavailable');
+  return {
+    embed: _inferencePolicy.embedModel,
+    generate: _inferencePolicy.generateModel,
+    judge: _inferencePolicy.judgeModel,
+    critique: _inferencePolicy.critiqueModel,
+  }[role];
+}
+
+function isNonProductionEnvironment(): boolean {
+  return process.env['NODE_ENV'] !== 'production';
+}
+
+function isTestOnlyUnverifiedInference(): boolean {
+  return (
+    process.env['NODE_ENV'] === 'test' && process.env['INFERENCE_TEST_ALLOW_UNVERIFIED'] === '1'
+  );
+}
+
+function testEndpoint(): string {
+  const configured = process.env['TEE_ENDPOINT_URL']?.trim();
+  if (configured) return configured;
+  if (PROXY_PORT) return `https://localhost:${PROXY_PORT}`;
+  return 'https://localhost';
+}
+
+function testOnlyTrustPolicy(): InferenceTrustPolicyV1 {
+  const endpoint = new URL(testEndpoint());
+  const roleModels = TEST_ROLE_MODELS;
+  return inferenceTrustPolicyV1Schema.parse({
+    version: 1,
+    generation: 1,
+    origin: endpoint.origin,
+    route: endpoint.pathname || '/',
+    redirectOrigins: [],
+    tlsSpkiSha256: ['0'.repeat(64)],
+    workloadId: 'test-workload',
+    quoteRootDigests: ['0'.repeat(64)],
+    workloadMeasurements: ['0'.repeat(96)],
+    attestationKeys: [
+      { keyId: 'test-attestation', algorithm: 'Ed25519', publicKey: `${'A'.repeat(43)}=` },
+    ],
+    receiptKeys: [{ keyId: 'test-receipt', algorithm: 'Ed25519', publicKey: `${'B'.repeat(43)}=` }],
+    permittedModels: [
+      ...new Map(
+        Object.values(TEST_ROLE_MODELS).map((model) => [`${model.model} ${model.revision}`, model]),
+      ).values(),
+    ].sort((left, right) => {
+      const leftKey = `${left.model} ${left.revision}`;
+      const rightKey = `${right.model} ${right.revision}`;
+      return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+    }),
+    roleModels,
+  });
 }
 
 export async function embedText(text: string): Promise<number[]> {
@@ -176,9 +471,6 @@ export async function embedText(text: string): Promise<number[]> {
   return vector;
 }
 
-// Default temperature 0 (greedy) so classification/judge/labeling/synthesis is deterministic unless
-// a caller overrides (determinism #2). Honest ceiling: temp 0 removes sampling variance but a
-// TEE-batched LLM still isn't bit-identical run-to-run — the LLM cache is what makes replay exact.
 export async function generate(
   prompt: string,
   systemPrompt?: string,
@@ -197,6 +489,7 @@ export async function generateCritique(prompt: string, systemPrompt?: string): P
   return getBackend().generate(prompt, {
     systemPrompt,
     model: CRITIQUE_MODEL,
+    modelRole: 'critique',
     maxTokens: JUDGE_MAX_TOKENS,
     temperature: CRITIQUE_TEMPERATURE,
   });
@@ -216,13 +509,12 @@ export async function generateStructured(
     tool,
     systemPrompt,
     model: JUDGE_MODEL,
+    modelRole: 'judge',
     maxTokens: JUDGE_MAX_TOKENS,
     temperature: 0,
   });
 }
 
-// The uncached phala-backed model; the CachedInference layer wraps this per-org where a keyring + S3
-// exist (Pipeline, synthesis workers). Arrow wrappers so a partial test mock of this module is safe.
 export const phalaInference: SynthesisInference = {
   embed: (text) => embedText(text),
   generate: (prompt, systemPrompt, temperature) => generate(prompt, systemPrompt, temperature),

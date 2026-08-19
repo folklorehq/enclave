@@ -1,11 +1,14 @@
 import type { Logger } from '@folklore/core';
+import type { S3Client } from '@aws-sdk/client-s3';
 import {
+  bootManifestSchema,
   controlPlaneIdentitySchema,
-  signedBootManifestSchema,
+  parseBootManifestWire,
   signedBootManifestKeysetSchema,
   type BootManifest,
+  type BootManifestWireName,
+  type RuntimeDatabaseCredentialReceipt,
   type SignedBootManifestKeyset,
-  type SignedBootManifest,
 } from '@folklore/contracts/enclave-attestation';
 import { ConfigurationError } from '@folklore/errors';
 import { AttestationBootComposer } from './AttestationBootComposer.js';
@@ -15,7 +18,7 @@ import { BootManifestCoordinator } from './BootManifestCoordinator.js';
 import type { BootManifestSecretLoaderPort } from './BootManifestCoordinator.js';
 import { BootManifestVerifier } from './BootManifestVerifier.js';
 import type { BootManifestRuntimeIdentity, VerifiedBootManifest } from './BootManifestVerifier.js';
-import { InMemoryAttestationBootCheckpointStore } from './InMemoryAttestationBootCheckpointStore.js';
+import { KmsSealedAttestationBootCheckpointStore } from './KmsSealedAttestationBootCheckpointStore.js';
 import { NodeRuntimeAttestationListener } from './NodeRuntimeAttestationListener.js';
 import { RuntimeAttestationService } from './RuntimeAttestationService.js';
 import type {
@@ -28,11 +31,15 @@ import type {
 } from './RuntimeAttestationServer.js';
 import type { NsmAttestationPort } from '../sealing/nsm.js';
 import { verifySignedBootManifestKeyset } from '@folklore/nitro-attestation';
-import {
-  BOOT_MANIFEST_ROOT_KEY_ID,
-  BOOT_MANIFEST_ROOT_PUBLIC_KEY_PEM,
-  assertApprovedBootManifestRoot,
-} from './boot-manifest-root.js';
+import type { RecoveryRootInstallationReportV1 } from '@folklore/nitro-attestation';
+import type { GatewayEvidenceComposition } from '../inference/GatewayEvidenceComposition.js';
+
+import type { TrustedTimeBindingV1 } from '@folklore/contracts';
+import { GenerationHighWaterTrustedTimeRecordProducer } from '../gate-a/GenerationHighWaterTrustedTimeRecordProducer.js';
+import type {
+  GenerationHighWaterTrustedTimeSamplePort,
+  GenerationHighWaterTrustedTimeSignerPort,
+} from '../gate-a/GenerationHighWaterTrustedTimeRecordProducer.js';
 
 export const DEFAULT_ENCLAVE_ATTESTATION_PORT = 8101;
 
@@ -42,6 +49,17 @@ interface CloseableRuntimeAttestationListener extends RuntimeAttestationListener
   close?(): Promise<void>;
 }
 
+export interface RuntimeAttestationEvidenceDeps {
+  enabled: boolean;
+  composition: GatewayEvidenceComposition;
+}
+
+export interface GenerationHighWaterTrustedTimeWiringDeps {
+  binding: TrustedTimeBindingV1;
+  sampler: GenerationHighWaterTrustedTimeSamplePort;
+  signer: GenerationHighWaterTrustedTimeSignerPort;
+}
+
 export interface RuntimeAttestationCompositionDeps {
   env: RuntimeAttestationEnv;
   secretLoader: BootManifestSecretLoaderPort;
@@ -49,16 +67,21 @@ export interface RuntimeAttestationCompositionDeps {
   isTenantAssigned(): boolean;
   isTenantApiReady(): boolean;
   getIngestPublicKey?(): Uint8Array | Promise<Uint8Array>;
+  getRuntimeDatabaseReceipt?(): RuntimeDatabaseCredentialReceipt | undefined;
   listener?: CloseableRuntimeAttestationListener;
+  s3?: S3Client;
   checkpointStore?: AttestationBootCheckpointStore;
   logger?: Pick<Logger, 'info' | 'warn'>;
   serverOptions?: RuntimeAttestationServerOptions;
+  evidence?: RuntimeAttestationEvidenceDeps;
+  /** PR6 enclave trusted-time record wiring for the Gate A vsock control channel. */
+  trustedTime?: GenerationHighWaterTrustedTimeWiringDeps;
 }
 
 export type RuntimeAttestationLifecycleLogger = Pick<Logger, 'error'>;
 
 interface RuntimeAttestationConfig {
-  signedManifest: SignedBootManifest;
+  signedManifest: { wire: BootManifestWireName; manifest: BootManifest; raw: unknown };
   runtimeIdentity: BootManifestRuntimeIdentity;
   pinnedKeys: { signedKeyset: SignedBootManifestKeyset };
   port: number;
@@ -66,23 +89,79 @@ interface RuntimeAttestationConfig {
 
 export class RuntimeAttestationComposition {
   constructor(
-    private readonly signedManifest: SignedBootManifest,
+    private readonly signedManifest: {
+      wire: BootManifestWireName;
+      manifest: BootManifest;
+      raw: unknown;
+    },
     private readonly runtimeIdentity: BootManifestRuntimeIdentity,
     private readonly bootState: AttestationBootState,
     private readonly composer: AttestationBootComposer,
     private readonly listener: CloseableRuntimeAttestationListener,
+    private readonly verifier: BootManifestVerifier,
     private readonly logger?: Pick<Logger, 'info'>,
-  ) {}
+    evidence?: RuntimeAttestationEvidenceDeps,
+    trustedTime?: GenerationHighWaterTrustedTimeWiringDeps,
+  ) {
+    this.#evidenceComposition =
+      evidence?.enabled && evidence.composition ? evidence.composition : undefined;
+    this.#trustedTimeWiring = trustedTime;
+  }
 
   #verifiedManifest: VerifiedBootManifest | undefined;
+  readonly #evidenceComposition: GatewayEvidenceComposition | undefined;
+  readonly #trustedTimeWiring: GenerationHighWaterTrustedTimeWiringDeps | undefined;
 
   async prepare(): Promise<void> {
-    this.#verifiedManifest = await this.composer.prepare(this.signedManifest, this.runtimeIdentity);
+    this.#verifiedManifest = await this.composer.prepare(
+      this.signedManifest.raw,
+      this.runtimeIdentity,
+    );
   }
 
   verifiedManifest(): VerifiedBootManifest {
     if (!this.#verifiedManifest) throw new Error('runtime_attestation_not_prepared');
     return this.#verifiedManifest;
+  }
+
+  /** The installed recovery-root digest the composition reports (PR2). */
+  installedRecoveryRootDigest(): string {
+    return this.verifier.installedRecoveryRootDigest();
+  }
+
+  recoveryInstallationReport(): RecoveryRootInstallationReportV1 {
+    return this.verifier.recoveryInstallationReport();
+  }
+
+  /** The evidence recorder factory, exposed only after a verified boot (PR5). */
+  gatewayEvidenceComposition(): GatewayEvidenceComposition {
+    if (!this.#evidenceComposition) throw new Error('evidence_unavailable');
+    if (!this.#verifiedManifest) throw new Error('runtime_attestation_not_prepared');
+    return this.#evidenceComposition;
+  }
+
+  /** Returns the trusted-time record producer; available only after verified boot with injected wiring. */
+  gateATrustedTimeRecordProducer(): GenerationHighWaterTrustedTimeRecordProducer {
+    if (!this.#verifiedManifest) throw new Error('runtime_attestation_not_prepared');
+    if (!this.#trustedTimeWiring) throw new Error('trusted_time_wiring_unavailable');
+    return new GenerationHighWaterTrustedTimeRecordProducer({
+      binding: this.#trustedTimeWiring.binding,
+      sampler: this.#trustedTimeWiring.sampler,
+      signer: this.#trustedTimeWiring.signer,
+    });
+  }
+
+  /** Content-free boot session identity for the evidence seam (PR5). */
+  bootSessionState(): { sessionId: string; bootEpoch: number } {
+    return this.verifier.bootSessionState();
+  }
+
+  bootWire(): BootManifestWireName {
+    return this.signedManifest.wire;
+  }
+
+  secretValue(id: string): string {
+    return this.bootState.secretValue(id);
   }
 
   async markKmsUnsealed(unseal: () => Promise<void>): Promise<void> {
@@ -104,6 +183,10 @@ export class RuntimeAttestationComposition {
 
   signAssignmentAck(payload: Uint8Array): { publicKey: Uint8Array; signature: Uint8Array } {
     return this.composer.sign(payload);
+  }
+
+  sessionPublicKey(): Uint8Array {
+    return this.composer.sessionPublicKey();
   }
 
   async close(): Promise<void> {
@@ -192,9 +275,10 @@ export function createRuntimeAttestationComposition(
   const config = readRuntimeAttestationConfig(deps.env, deps.logger);
   if (!config) return undefined;
 
+  const verifier = new BootManifestVerifier(config.pinnedKeys);
   const bootState = new AttestationBootState(
-    new BootManifestCoordinator(new BootManifestVerifier(config.pinnedKeys), deps.secretLoader),
-    deps.checkpointStore ?? new InMemoryAttestationBootCheckpointStore(),
+    new BootManifestCoordinator(verifier, deps.secretLoader),
+    deps.checkpointStore ?? createPersistentCheckpointStore(config, deps.s3),
   );
   const readiness = new CompositionReadiness(
     bootState,
@@ -202,6 +286,7 @@ export function createRuntimeAttestationComposition(
     deps.isTenantAssigned,
     deps.isTenantApiReady,
     deps.getIngestPublicKey,
+    deps.getRuntimeDatabaseReceipt,
   );
   const service = new RuntimeAttestationService(readiness, deps.nsm, {
     now: () => new Date(),
@@ -213,8 +298,25 @@ export function createRuntimeAttestationComposition(
     bootState,
     new AttestationBootComposer(bootState, service, deps.serverOptions),
     listener,
+    verifier,
     deps.logger,
+    deps.evidence,
+    deps.trustedTime,
   );
+}
+
+function createPersistentCheckpointStore(
+  config: RuntimeAttestationConfig,
+  s3: S3Client | undefined,
+): AttestationBootCheckpointStore {
+  if (!s3) throw invalidConfig();
+  return new KmsSealedAttestationBootCheckpointStore({
+    s3,
+    checkpointPrefix: config.runtimeIdentity.resourcePrefixes.sealedBlobsS3,
+    kmsKeyId: config.runtimeIdentity.kmsKeyArn,
+    orgId: config.runtimeIdentity.orgId,
+    deploymentId: config.runtimeIdentity.deploymentId,
+  });
 }
 
 function readRuntimeAttestationConfig(
@@ -275,10 +377,23 @@ function requiredConfigNames(env: RuntimeAttestationEnv): string[] {
   return [...names];
 }
 
-function readSignedManifest(raw: string | undefined): SignedBootManifest {
-  const parsed = signedBootManifestSchema.safeParse(readJson(raw));
-  if (!parsed.success) throw invalidConfig();
-  return parsed.data;
+function readSignedManifest(raw: string | undefined): {
+  wire: BootManifestWireName;
+  manifest: BootManifest;
+  raw: unknown;
+} {
+  const parsed = readJson(raw);
+  let wire: BootManifestWireName;
+  try {
+    const result = parseBootManifestWire(parsed);
+    wire = result.wire;
+  } catch {
+    throw invalidConfig();
+  }
+  const manifest = (parsed as { manifest?: unknown }).manifest;
+  const bootManifest = bootManifestSchema.safeParse(manifest);
+  if (!bootManifest.success) throw invalidConfig();
+  return { wire, manifest: bootManifest.data, raw: parsed };
 }
 
 function readRuntimeIdentity(env: RuntimeAttestationEnv): BootManifestRuntimeIdentity {
@@ -328,13 +443,7 @@ function readPinnedKeys(env: RuntimeAttestationEnv): { signedKeyset: SignedBootM
   const parsed = readJson(env['ENCLAVE_ATTESTATION_BOOT_KEYSET']);
   if (isRecord(parsed) && 'keyset' in parsed) {
     try {
-      assertApprovedBootManifestRoot();
-      verifySignedBootManifestKeyset(
-        parsed,
-        BOOT_MANIFEST_ROOT_KEY_ID,
-        BOOT_MANIFEST_ROOT_PUBLIC_KEY_PEM,
-        readMinimumKeysetGeneration(env),
-      );
+      verifySignedBootManifestKeyset(parsed);
       const signedKeyset = signedBootManifestKeysetSchema.parse(parsed);
       return Object.freeze({ signedKeyset });
     } catch {
@@ -342,14 +451,6 @@ function readPinnedKeys(env: RuntimeAttestationEnv): { signedKeyset: SignedBootM
     }
   }
   throw invalidConfig();
-}
-
-function readMinimumKeysetGeneration(env: RuntimeAttestationEnv): number {
-  const raw = env['ENCLAVE_ATTESTATION_MIN_KEYSET_GENERATION'];
-  if (!raw) return 1;
-  const generation = Number.parseInt(raw, 10);
-  if (!Number.isSafeInteger(generation) || generation < 1) throw invalidConfig();
-  return generation;
 }
 
 function readConfigurationGeneration(env: RuntimeAttestationEnv): number {
@@ -400,6 +501,7 @@ class CompositionReadiness implements RuntimeAttestationReadiness {
     private readonly isTenantAssigned: () => boolean,
     private readonly isTenantApiReady: () => boolean,
     private readonly ingestPublicKey?: () => Uint8Array | Promise<Uint8Array>,
+    private readonly runtimeDatabaseReceipt?: () => RuntimeDatabaseCredentialReceipt | undefined,
   ) {}
 
   getIngestPublicKey(): Uint8Array | Promise<Uint8Array> {
@@ -409,12 +511,14 @@ class CompositionReadiness implements RuntimeAttestationReadiness {
 
   async getReadiness(): Promise<RuntimeAttestationReadinessSnapshot> {
     const bootReadiness = await this.bootState.getReadiness();
+    const runtimeDatabase = this.runtimeDatabaseReceipt?.();
     return {
       manifest: this.manifest,
       tenantAssigned: this.isTenantAssigned(),
       bootManifestVerified: bootReadiness.bootManifestVerified,
       kmsUnsealed: bootReadiness.kmsUnsealed,
       tenantApiReady: this.isTenantApiReady(),
+      ...(runtimeDatabase ? { runtimeDatabase } : {}),
     };
   }
 }

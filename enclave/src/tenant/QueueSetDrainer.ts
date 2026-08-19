@@ -7,25 +7,52 @@ import {
   type SQSClient,
 } from '@aws-sdk/client-sqs';
 import type { Logger } from '@folklore/core';
+import { createHash, randomBytes } from 'node:crypto';
+import {
+  enclaveOutputBindingForPayload,
+  type EnclaveOutputAuthenticator,
+} from '@folklore/contracts/enclave-output';
+import {
+  processedFactSchema,
+  pullCompleteSignalSchema,
+  pullFailedSignalSchema,
+} from '@folklore/contracts/enclave';
 import type { ProcessedFact } from '../pipeline/index.js';
-import type { PullCompleteSignal } from '../pull/pull-runner.js';
+import {
+  buildPullFailedSignal,
+  type PullCompleteSignal,
+  type PullDueMessage,
+  type PullFailedSignal,
+} from '../pull/pull-runner.js';
 import { HALT_POLL_INTERVAL_MS, type HaltGate } from '../control/HaltGate.js';
 import { DurableAckBatch } from '../ingest/DurableAckBatch.js';
-import type { RoutableMessage, TenantMessageRouter } from './tenant-message-router.js';
+import {
+  parseRoutableMessage,
+  type RoutableMessage,
+  type TenantMessageRouter,
+} from './tenant-message-router.js';
 
 // SQS long-poll budget shared across the assigned queues so a full sweep of N queues costs roughly
 // one poll cycle (≈20s), preserving single-tenant timing at N=1.
 const MAX_LONG_POLL_SECONDS = 20;
 const RECEIVE_BATCH = 10;
 const BATCH_TARGET = 50;
+const PULL_FAILURE_RETRY_THRESHOLD = 3;
 // An empty pool has no queue long-poll to pace the loop, so wait before re-checking for an assignment.
 const EMPTY_POOL_POLL_INTERVAL_MS = 5_000;
 
 export interface QueueAssignment {
   tenantId: string;
   queueUrl: string;
+  assignmentGeneration?: number;
   rawPayloadsBucket?: string;
   processedBucket?: string;
+}
+
+interface PullFailureState {
+  attempts: number;
+  firstFailedAt: Date;
+  emitted: boolean;
 }
 
 export interface QueueSetDrainerDeps {
@@ -38,6 +65,11 @@ export interface QueueSetDrainerDeps {
   processedQueueUrl: string;
   processedOutputsBucket?: string;
   rawPayloadsBucket?: string;
+  outputAuthenticator: EnclaveOutputAuthenticator;
+  outputIdentity: (assignmentGeneration?: number) => {
+    deploymentId: string;
+    assignmentGeneration: number;
+  };
   poolHalt: HaltGate;
   haltGateFor: (tenantId: string) => HaltGate;
   writeIdle: (idle: boolean) => Promise<void>;
@@ -57,6 +89,10 @@ export interface QueueSetDrainerDeps {
 // and one tenant's persist/ack failure never acks or blocks another's (batch groups by tenant).
 export class QueueSetDrainer {
   private idlePolls = 0;
+  private readonly pullFailures = new Map<string, PullFailureState>();
+  private activeDrains = 0;
+  private readonly drainIdleWaiters: Array<() => void> = [];
+  private readonly evictingTenants = new Set<string>();
   // Tracks the last value actually written, not merely the in-process idle transition: a freshly
   // booted process has no prior write, so its first non-idle sweep must write `false` unconditionally
   // — otherwise a stale `"1"` written before a prior self-stop survives the stop/start cycle and the
@@ -79,19 +115,37 @@ export class QueueSetDrainer {
   }
 
   async drainOnce(): Promise<void> {
-    const assignments = this.deps.assignments();
-    if (assignments.length === 0) {
-      // An empty pool (assigned nothing yet, or drained to zero) waits for a manifest rather than
-      // busy-spinning, and reports idle so the parent host can self-stop.
-      await this.sleep(EMPTY_POOL_POLL_INTERVAL_MS);
-      await this.updateIdle(false);
-      return;
+    this.activeDrains += 1;
+    try {
+      const assignments = this.deps.assignments();
+      if (assignments.length === 0) {
+        // An empty pool (assigned nothing yet, or drained to zero) waits for a manifest rather than
+        // busy-spinning, and reports idle so the parent host can self-stop.
+        await this.sleep(EMPTY_POOL_POLL_INTERVAL_MS);
+        await this.updateIdle(false);
+        return;
+      }
+      const ackBatch = new DurableAckBatch(this.deps.logger);
+      const received = await this.drainAllQueues(assignments, ackBatch);
+      await ackBatch.commit();
+      await this.updateIdle(received);
+      await this.deps.onDrainComplete?.();
+    } finally {
+      this.activeDrains -= 1;
+      if (this.activeDrains === 0) {
+        for (const resolve of this.drainIdleWaiters.splice(0)) resolve();
+      }
     }
-    const ackBatch = new DurableAckBatch(this.deps.logger);
-    const received = await this.drainAllQueues(assignments, ackBatch);
-    await ackBatch.commit();
-    await this.updateIdle(received);
-    await this.deps.onDrainComplete?.();
+  }
+
+  async evictTenant(tenantId: string): Promise<void> {
+    this.evictingTenants.add(tenantId);
+    if (this.activeDrains === 0) return;
+    await new Promise<void>((resolve) => this.drainIdleWaiters.push(resolve));
+  }
+
+  finishTenantEviction(tenantId: string): void {
+    this.evictingTenants.delete(tenantId);
   }
 
   private async drainAllQueues(
@@ -100,6 +154,7 @@ export class QueueSetDrainer {
   ): Promise<boolean> {
     let received = false;
     for (const assignment of assignments) {
+      if (this.evictingTenants.has(assignment.tenantId)) continue;
       if (await this.deps.haltGateFor(assignment.tenantId).isHalted()) continue;
       const count = await this.drainQueue(assignment, assignments.length, ackBatch);
       if (count > 0) received = true;
@@ -124,7 +179,10 @@ export class QueueSetDrainer {
       );
       const messages = resp.Messages ?? [];
       if (messages.length === 0) break;
-      for (const msg of messages) await this.handleMessage(assignment, msg, ackBatch);
+      for (const msg of messages) {
+        if (this.evictingTenants.has(assignment.tenantId)) break;
+        await this.handleMessage(assignment, msg, ackBatch);
+      }
       total += messages.length;
       isFirstPoll = false;
     }
@@ -136,39 +194,82 @@ export class QueueSetDrainer {
     msg: Message,
     ackBatch: DurableAckBatch,
   ): Promise<void> {
-    this.archive(
-      assignment.tenantId,
-      msg,
-      assignment.rawPayloadsBucket ?? this.deps.rawPayloadsBucket ?? '',
-    );
+    let releaseReplay: (() => Promise<void>) | undefined;
     try {
-      const raw = JSON.parse(msg.Body!) as RoutableMessage;
-      const { context, facts, pullComplete } = await this.deps.router.route(
-        raw,
-        assignment.tenantId,
+      const parsed: unknown = JSON.parse(msg.Body!);
+      const raw = parseRoutableMessage(parsed);
+      const routed = await this.deps.router.route(raw, assignment.tenantId);
+      releaseReplay = routed.releaseReplay;
+      const {
+        context,
+        facts,
+        pullComplete,
+        afterDurablePersistence,
+        requiresDurablePersistence = true,
+        shouldAcknowledge,
+        commitReplay,
+      } = routed;
+      this.archive(
+        context.tenantId,
+        msg,
+        assignment.rawPayloadsBucket ?? this.deps.rawPayloadsBucket ?? '',
       );
-      await this.emitFacts(facts);
-      if (pullComplete) await this.emitPullComplete(pullComplete);
+      await this.emitFacts(facts, assignment.assignmentGeneration);
+      if (!shouldAcknowledge) {
+        await this.releaseReplay(releaseReplay);
+        releaseReplay = undefined;
+        const failure = this.pullFailureAfterRetry(raw, assignment.assignmentGeneration);
+        if (failure) {
+          await this.emitPullFailed(failure.signal, assignment.assignmentGeneration);
+          const state = this.pullFailures.get(failure.key);
+          if (state) state.emitted = true;
+        }
+        return;
+      }
       // #196: defer the delete — the message is acked only after this tenant's index is durably
       // persisted (batch commit), never before, so a crash redelivers instead of dropping an insert.
       ackBatch.add({
         tenantId: context.tenantId,
-        hasUnsavedInserts: () => context.hnsw.hasUnsavedInserts(),
-        persist: () =>
-          context.hnsw.save(
+        hasUnsavedInserts: () => requiresDurablePersistence && context.hnsw.hasUnsavedInserts(),
+        persist: async () => {
+          if (!requiresDurablePersistence) return;
+          await context.hnsw.save(
             this.deps.s3,
             context.keyring,
             assignment.processedBucket || this.deps.processedOutputsBucket || '',
             context.tenantId,
-          ),
-        ack: () => this.ackMessage(assignment.queueUrl, msg.ReceiptHandle!),
+          );
+        },
+        afterDurablePersistence: async () => {
+          await afterDurablePersistence?.();
+          if (pullComplete) {
+            await this.emitPullComplete(pullComplete, assignment.assignmentGeneration);
+            this.pullFailures.delete(
+              this.pullFailureKey(pullComplete, assignment.assignmentGeneration),
+            );
+          }
+        },
+        afterPersist: commitReplay,
+        release: routed.releaseReplay,
+        ack: () => this.ackCurrentAssignment(assignment, msg.ReceiptHandle!),
       });
+      releaseReplay = undefined;
     } catch {
+      await this.releaseReplay(releaseReplay);
       // Content-free SQS id only — err could carry a decrypted-content snippet. An
       // unassigned or cross-tenant message is never acked here, so it stays in queue (then DLQ).
       // A tenant torn down mid-sweep (reassignment §4.3 zeroizes its context) lands here too — its
       // ingest key throws — so the message is left unacked and redelivered once reassigned; fail-closed.
       this.deps.logger.error('failed to process message', { id: msg.MessageId });
+    }
+  }
+
+  private async releaseReplay(release: (() => Promise<void>) | undefined): Promise<void> {
+    if (!release) return;
+    try {
+      await release();
+    } catch {
+      this.deps.logger.error('replay release failed — message left in queue for retry');
     }
   }
 
@@ -178,26 +279,128 @@ export class QueueSetDrainer {
     );
   }
 
-  private async emitFacts(facts: ProcessedFact[]): Promise<void> {
+  private async ackCurrentAssignment(
+    assignment: QueueAssignment,
+    receiptHandle: string,
+  ): Promise<void> {
+    const current = this.deps
+      .assignments()
+      .find((candidate) => candidate.tenantId === assignment.tenantId);
+    if (
+      !current ||
+      current.queueUrl !== assignment.queueUrl ||
+      (assignment.assignmentGeneration !== undefined &&
+        current.assignmentGeneration !== assignment.assignmentGeneration)
+    ) {
+      throw new Error('assignment_changed_before_ack');
+    }
+    await this.ackMessage(assignment.queueUrl, receiptHandle);
+  }
+
+  private async emitFacts(facts: ProcessedFact[], assignmentGeneration?: number): Promise<void> {
+    const identity = this.deps.outputIdentity(assignmentGeneration);
     for (const fact of facts) {
+      const output = this.authenticatedOutput(fact, undefined, assignmentGeneration);
       await this.deps.sqs.send(
         new SendMessageCommand({
           QueueUrl: this.deps.processedQueueUrl,
-          MessageBody: JSON.stringify(fact),
-          MessageGroupId: fact.orgId,
-          MessageDeduplicationId: fact.factId,
+          MessageBody: JSON.stringify(output),
+          MessageGroupId: `processed-${fact.orgId}`,
+          MessageDeduplicationId: `processed-${fact.orgId}-${fact.factId}-${identity.assignmentGeneration}`,
         }),
       );
     }
   }
 
-  private async emitPullComplete(signal: PullCompleteSignal): Promise<void> {
+  private async emitPullComplete(
+    signal: PullCompleteSignal,
+    assignmentGeneration?: number,
+  ): Promise<void> {
+    const identity = this.deps.outputIdentity(assignmentGeneration);
+    const output = this.authenticatedOutput(signal, undefined, assignmentGeneration);
     await this.deps.sqs.send(
       new SendMessageCommand({
         QueueUrl: this.deps.processedQueueUrl,
-        MessageBody: JSON.stringify(signal),
-        MessageGroupId: signal.orgId,
-        MessageDeduplicationId: `pull-complete-${signal.sourceId}-${signal.completedAt}`,
+        MessageBody: JSON.stringify(output),
+        MessageGroupId: `processed-${signal.orgId}`,
+        MessageDeduplicationId: `pull-complete-${signal.orgId}-${signal.sourceId}-${signal.completedAt}-${identity.assignmentGeneration}`,
+      }),
+    );
+  }
+
+  private async emitPullFailed(
+    signal: PullFailedSignal,
+    assignmentGeneration?: number,
+  ): Promise<void> {
+    const identity = this.deps.outputIdentity(assignmentGeneration);
+    const output = this.authenticatedOutput(
+      signal,
+      this.pullFailureNonce(signal, assignmentGeneration),
+      assignmentGeneration,
+    );
+    await this.deps.sqs.send(
+      new SendMessageCommand({
+        QueueUrl: this.deps.processedQueueUrl,
+        MessageBody: JSON.stringify(output),
+        MessageGroupId: `processed-${signal.orgId}`,
+        MessageDeduplicationId: `pull-failed-${signal.orgId}-${signal.sourceId}-${signal.failedAt}-${identity.assignmentGeneration}`,
+      }),
+    );
+  }
+
+  private pullFailureAfterRetry(
+    raw: RoutableMessage,
+    assignmentGeneration?: number,
+  ): { key: string; signal: PullFailedSignal } | undefined {
+    if (!this.isPullDue(raw)) return undefined;
+    const key = this.pullFailureKey(raw, assignmentGeneration);
+    const state = this.pullFailures.get(key) ?? {
+      attempts: 0,
+      firstFailedAt: new Date(),
+      emitted: false,
+    };
+    state.attempts += 1;
+    this.pullFailures.set(key, state);
+    if (state.emitted || state.attempts < PULL_FAILURE_RETRY_THRESHOLD) return undefined;
+    return { key, signal: buildPullFailedSignal(raw, state.firstFailedAt) };
+  }
+
+  private pullFailureKey(
+    input: PullDueMessage | PullCompleteSignal,
+    assignmentGeneration?: number,
+  ): string {
+    const identity = this.deps.outputIdentity(assignmentGeneration);
+    return `${identity.deploymentId}:${identity.assignmentGeneration}:${'tenant_id' in input ? input.tenant_id : input.orgId}:${'kind' in input ? input.kind : input.sourceKind}:${input.sourceId}`;
+  }
+
+  private pullFailureNonce(signal: PullFailedSignal, assignmentGeneration?: number): string {
+    const identity = this.deps.outputIdentity(assignmentGeneration);
+    return createHash('sha256')
+      .update(
+        `folklore.pull-failed.v1\0${identity.deploymentId}\0${identity.assignmentGeneration}\0${signal.orgId}\0${signal.sourceKind}\0${signal.sourceId}\0${signal.failedAt}`,
+      )
+      .digest('hex');
+  }
+
+  private isPullDue(raw: RoutableMessage): raw is PullDueMessage {
+    return raw.type === 'pull-due';
+  }
+
+  private authenticatedOutput(
+    payload: ProcessedFact | PullCompleteSignal | PullFailedSignal,
+    nonce = randomBytes(32).toString('hex'),
+    assignmentGeneration?: number,
+  ): unknown {
+    const validated =
+      'type' in payload && payload.type === 'pull-complete'
+        ? pullCompleteSignalSchema.parse(payload)
+        : 'type' in payload && payload.type === 'pull-failed'
+          ? pullFailedSignalSchema.parse(payload)
+          : processedFactSchema.parse(payload);
+    return this.deps.outputAuthenticator.sign(
+      enclaveOutputBindingForPayload(validated, {
+        ...this.deps.outputIdentity(assignmentGeneration),
+        nonce,
       }),
     );
   }

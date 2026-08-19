@@ -82,6 +82,13 @@ export class AttestationBootComposer {
     return this.collector.sign(payload);
   }
 
+  sessionPublicKey(): Uint8Array {
+    if (this.enabledGeneration === undefined || this.collector.sessionPublicKey === undefined) {
+      throw new Error(attestationBootComposerErrors.notReady);
+    }
+    return this.collector.sessionPublicKey();
+  }
+
   handleRequest(request: Request): Promise<Response> {
     return this.server.handleRequest(request);
   }

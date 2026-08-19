@@ -1,9 +1,13 @@
 import {
   type AssignmentManifest,
+  type LegacyAssignmentKeyRecordV1,
+  type LegacyAssignmentReadFloorV1,
+  type NormalizedAssignmentManifestV1,
   type SignedAssignmentManifest,
   type TenantAssignment,
   type VersionedTenantAssignment,
   parseAssignmentManifest as parseContractManifest,
+  parseAssignmentManifestWire as parseContractAssignmentManifestWire,
   parseVersionedAssignmentManifest as parseContractVersionedManifest,
   tenantAssignmentSchema,
   versionedTenantAssignmentSchema,
@@ -17,9 +21,11 @@ export type { TenantAssignment, AssignmentManifest };
 /** Explicit bootstrap compatibility boundary for unsigned legacy assignment sources. */
 export function toInitialStorageKeyVersion(
   assignment: TenantAssignment,
+  defaultDeploymentId = '',
 ): VersionedTenantAssignment {
   return versionedTenantAssignmentSchema.parse({
     ...assignment,
+    deploymentId: assignment.deploymentId ?? (defaultDeploymentId || assignment.tenantId),
     activeStorageKeyVersion: 1,
     storageKeyHistory: [{ version: 1, storageKeyId: assignment.storageKeyId }],
   });
@@ -79,6 +85,23 @@ export function parseVersionedAssignmentManifest(
   return parsed;
 }
 
+/** PR2 discriminated dual-read assignment parser: parses the same union as every other reader. */
+export function parseAssignmentManifestWire(
+  manifest: unknown,
+  expectedPoolId: string,
+  lastGeneration: number,
+  floor?: LegacyAssignmentReadFloorV1 | null,
+  keyRecord?: LegacyAssignmentKeyRecordV1 | null,
+): NormalizedAssignmentManifestV1 {
+  const parsed = parseContractAssignmentManifestWire(manifest, expectedPoolId, {
+    lastGeneration,
+    floor,
+    keyRecord,
+  });
+  assertNoDuplicates(parsed.assignments);
+  return parsed;
+}
+
 function parseManifest(manifest: string): TenantAssignment[] {
   let parsed: unknown;
   try {
@@ -97,6 +120,7 @@ function parseSingleTenant(env: NodeJS.ProcessEnv): TenantAssignment[] {
     toAssignment(
       {
         tenantId,
+        tenantDeploymentId: env['DEPLOYMENT_ID'],
         kmsKeyId: env['KMS_KEY_ID'],
         storageKeyId: env['STORAGE_KEY_ARN'],
         queueUrl: env['QUEUE_URL'],
@@ -126,6 +150,10 @@ function toAssignment(entry: unknown, index: number): TenantAssignment {
   }
   return tenantAssignmentSchema.parse({
     tenantId: (record['tenantId'] as string).trim(),
+    ...(typeof record['tenantDeploymentId'] === 'string' &&
+    record['tenantDeploymentId'].trim() !== ''
+      ? { tenantDeploymentId: record['tenantDeploymentId'].trim() }
+      : {}),
     kmsKeyId: (record['kmsKeyId'] as string).trim(),
     storageKeyId: (record['storageKeyId'] as string).trim(),
     queueUrl: (record['queueUrl'] as string).trim(),
@@ -136,7 +164,7 @@ function toAssignment(entry: unknown, index: number): TenantAssignment {
   });
 }
 
-function assertNoDuplicates(assignments: TenantAssignment[]): void {
+function assertNoDuplicates(assignments: readonly { tenantId: string }[]): void {
   const seen = new Set<string>();
   for (const assignment of assignments) {
     if (seen.has(assignment.tenantId)) {

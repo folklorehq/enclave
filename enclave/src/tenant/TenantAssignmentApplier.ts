@@ -1,7 +1,7 @@
 import type { Logger } from '@folklore/core';
 import type {
   AssignmentApplyResult,
-  SignedAssignmentManifest,
+  NormalizedAssignmentManifestV1,
   TenantAssignment,
   VersionedTenantAssignment,
 } from '@folklore/contracts';
@@ -21,6 +21,18 @@ const TENANT_TEARDOWN_TIMEOUT_MS = 10_000;
 // Called for every replaced or dropped context before it is zeroized so co-resident subsystems can
 // synchronously detach independently-held key material. Content-free: tenant id only.
 export type OnTenantTornDown = (tenantId: string) => void | Promise<void>;
+export type OnTenantActivated = (tenantId: string) => void;
+export type OnTenantGenerationChanged = (tenantId: string) => void | Promise<void>;
+export type OnTenantGenerationCommitted = (tenantId: string) => void;
+export type OnTenantQuiescenceFailure = (
+  tenantId: string,
+  phase: 'generation' | 'teardown',
+) => void;
+
+interface TeardownHookResult {
+  completed: boolean;
+  settled: Promise<void>;
+}
 
 // Rebuilds the live TenantRegistry to match a delivered assignment manifest (design §4.3/§5): builds
 // a context for each newly assigned tenant, and tears down + ZEROES the key material of every dropped
@@ -37,22 +49,32 @@ export class TenantAssignmentApplier {
     private readonly logger: Logger,
     private readonly onTornDown?: OnTenantTornDown,
     private readonly teardownTimeoutMs: number = TENANT_TEARDOWN_TIMEOUT_MS,
+    private readonly defaultDeploymentId = '',
+    private readonly onActivated?: OnTenantActivated,
+    private readonly onGenerationChanged?: OnTenantGenerationChanged,
+    private readonly onGenerationCommitted?: OnTenantGenerationCommitted,
+    private readonly onQuiescenceFailure?: OnTenantQuiescenceFailure,
   ) {}
 
   queueAssignments(): QueueAssignment[] {
-    return [...this.assigned.values()].map((a) => ({
-      tenantId: a.tenantId,
-      queueUrl: a.queueUrl,
-      rawPayloadsBucket: a.rawPayloadsBucket,
-      processedBucket: a.processedBucket,
-    }));
+    return [...this.assigned.values()]
+      .filter((a) => this.registry.has(a.tenantId))
+      .map((a) => ({
+        tenantId: a.tenantId,
+        queueUrl: a.queueUrl,
+        ...(this.lastAcceptedGeneration > 0
+          ? { assignmentGeneration: this.lastAcceptedGeneration }
+          : {}),
+        rawPayloadsBucket: a.rawPayloadsBucket,
+        processedBucket: a.processedBucket,
+      }));
   }
 
   generation(): number {
     return this.lastAcceptedGeneration;
   }
 
-  matchesCurrentManifest(manifest: SignedAssignmentManifest): boolean {
+  matchesCurrentManifest(manifest: NormalizedAssignmentManifestV1): boolean {
     return (
       manifest.generation === this.lastAcceptedGeneration &&
       this.matchesAssignments(manifest.assignments)
@@ -66,23 +88,28 @@ export class TenantAssignmentApplier {
     if (manifest.generation <= this.lastAcceptedGeneration) {
       return { applied: false, reason: 'stale' };
     }
-    if (!(await this.applyVersioned(manifest.assignments, true))) {
+    if (!(await this.applyVersioned(manifest.assignments, true, manifest.generation))) {
       throw new Error('assignment_manifest_apply_failed');
     }
     if (!this.matchesAssignments(manifest.assignments)) {
       throw new Error('assignment_manifest_apply_incomplete');
     }
-    this.lastAcceptedGeneration = manifest.generation;
     return { applied: true, generation: manifest.generation };
   }
 
   async apply(assignments: TenantAssignment[]): Promise<boolean> {
-    return this.applyVersioned(assignments.map(toInitialStorageKeyVersion), false);
+    return this.applyVersioned(
+      assignments.map((assignment) =>
+        toInitialStorageKeyVersion(assignment, this.defaultDeploymentId),
+      ),
+      false,
+    );
   }
 
   private async applyVersioned(
-    assignments: VersionedTenantAssignment[],
+    assignments: readonly VersionedTenantAssignment[],
     hasSignedRecoveryEvidence: boolean,
+    generation?: number,
   ): Promise<boolean> {
     // A refresh that overlaps an in-flight apply is dropped, not queued: apply is idempotent and the
     // manifest stays in Redis, so the next refresh reconverges — no torn half-rebuilt registry.
@@ -93,7 +120,12 @@ export class TenantAssignmentApplier {
       this.assertAssignmentTransitions(desired);
       const staged = await this.buildReplacements(desired, hasSignedRecoveryEvidence);
       if (!staged) return false;
-      await this.commit(desired, staged);
+      try {
+        await this.commit(desired, staged, generation);
+      } catch (error) {
+        this.zeroizeStaged(staged);
+        throw error;
+      }
       return true;
     } finally {
       this.applying = false;
@@ -107,10 +139,19 @@ export class TenantAssignmentApplier {
     const staged = new Map<string, TenantContext>();
     for (const assignment of desired.values()) {
       const current = this.assigned.get(assignment.tenantId);
-      if (current && this.assignmentsMatch(current, assignment)) continue;
+      if (
+        current &&
+        this.registry.has(assignment.tenantId) &&
+        this.assignmentsMatch(current, assignment)
+      )
+        continue;
       try {
         const context = await this.build({
           tenantId: assignment.tenantId,
+          deploymentId: assignment.deploymentId,
+          ...(assignment.tenantDeploymentId
+            ? { tenantDeploymentId: assignment.tenantDeploymentId }
+            : {}),
           kmsKeyId: assignment.kmsKeyId,
           activeStorageKeyVersion: assignment.activeStorageKeyVersion,
           storageKeyHistory: assignment.storageKeyHistory,
@@ -138,32 +179,101 @@ export class TenantAssignmentApplier {
   private async commit(
     desired: Map<string, VersionedTenantAssignment>,
     staged: Map<string, TenantContext>,
+    generation?: number,
   ): Promise<void> {
-    const retired: Array<{ tenantId: string; context: TenantContext }> = [];
-    for (const [tenantId, context] of staged) {
-      if (this.registry.has(tenantId)) {
-        retired.push({ tenantId, context: this.registry.get(tenantId) });
-      }
+    const generationChanged = this.generationChangedTenants(desired, staged, generation);
+    await this.quiesceGenerationChanged(generationChanged);
+    const retired = this.retiredContexts(desired, staged);
+    await this.teardownRetired(retired);
+
+    for (const context of staged.values()) {
       this.registry.register(context);
     }
     for (const tenantId of this.assigned.keys()) {
       if (desired.has(tenantId)) continue;
-      const context = this.registry.remove(tenantId);
-      if (context) retired.push({ tenantId, context });
+      this.registry.remove(tenantId);
     }
     this.assigned.clear();
     for (const [tenantId, assignment] of desired) this.assigned.set(tenantId, assignment);
+    if (generation !== undefined) this.lastAcceptedGeneration = generation;
+    for (const tenantId of staged.keys()) this.onActivated?.(tenantId);
+    for (const tenantId of generationChanged) this.onGenerationCommitted?.(tenantId);
+  }
 
+  private generationChangedTenants(
+    desired: Map<string, VersionedTenantAssignment>,
+    staged: Map<string, TenantContext>,
+    generation?: number,
+  ): string[] {
+    if (generation === undefined || generation <= this.lastAcceptedGeneration) return [];
+    return [...this.assigned.entries()]
+      .filter(([tenantId, current]) => {
+        const next = desired.get(tenantId);
+        return next !== undefined && !staged.has(tenantId) && this.assignmentsMatch(current, next);
+      })
+      .map(([tenantId]) => tenantId);
+  }
+
+  private async quiesceGenerationChanged(tenantIds: string[]): Promise<void> {
+    if (!this.onGenerationChanged || tenantIds.length === 0) return;
+    const results = await Promise.allSettled(
+      tenantIds.map((tenantId) => this.runGenerationChanged(tenantId)),
+    );
+    if (results.some((result) => result.status === 'rejected' || !result.value.completed)) {
+      for (const [index, result] of results.entries()) {
+        if (result.status === 'fulfilled' && result.value.completed) continue;
+        this.onQuiescenceFailure?.(tenantIds[index]!, 'generation');
+      }
+      throw new Error('assignment_manifest_generation_quiesce_failed');
+    }
+  }
+
+  private retiredContexts(
+    desired: Map<string, VersionedTenantAssignment>,
+    staged: Map<string, TenantContext>,
+  ): Array<{ tenantId: string; context: TenantContext }> {
+    const retired: Array<{ tenantId: string; context: TenantContext }> = [];
+    for (const tenantId of staged.keys()) {
+      if (this.registry.has(tenantId))
+        retired.push({ tenantId, context: this.registry.get(tenantId) });
+    }
+    for (const tenantId of this.assigned.keys()) {
+      if (desired.has(tenantId)) continue;
+      if (!this.registry.has(tenantId)) continue;
+      const context = this.registry.get(tenantId);
+      retired.push({ tenantId, context });
+    }
+    return retired;
+  }
+
+  private async teardownRetired(
+    retired: Array<{ tenantId: string; context: TenantContext }>,
+  ): Promise<void> {
     const teardownResults = await Promise.allSettled(
       retired.map(({ tenantId }) => this.runTornDown(tenantId)),
     );
     let didFail = false;
     for (const [index, result] of teardownResults.entries()) {
-      if (result.status === 'fulfilled') continue;
+      if (result.status === 'fulfilled' && result.value.completed) continue;
       didFail = true;
       this.logger.error('tenant teardown hook failed', {
         tenant_id: retired[index]?.tenantId ?? 'unknown',
       });
+    }
+    if (didFail) {
+      this.quarantineRetired(
+        retired,
+        teardownResults.map((result) =>
+          result.status === 'fulfilled'
+            ? result.value
+            : { completed: false, settled: Promise.resolve() },
+        ),
+      );
+      for (const [index, result] of teardownResults.entries()) {
+        if (result.status === 'fulfilled' && result.value.completed) continue;
+        this.onQuiescenceFailure?.(retired[index]?.tenantId ?? 'unknown', 'teardown');
+      }
+      throw new Error('assignment_manifest_teardown_failed');
     }
     for (const { tenantId, context } of retired) {
       try {
@@ -176,17 +286,75 @@ export class TenantAssignmentApplier {
     if (didFail) throw new Error('assignment_manifest_teardown_failed');
   }
 
-  private async runTornDown(tenantId: string): Promise<void> {
-    if (!this.onTornDown) return;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timedOut = new Promise<void>((_resolve, reject) => {
-      timer = setTimeout(
-        () => reject(new Error('tenant_teardown_timeout')),
-        this.teardownTimeoutMs,
+  private quarantineRetired(
+    retired: Array<{ tenantId: string; context: TenantContext }>,
+    teardownResults: TeardownHookResult[],
+  ): void {
+    for (const [{ tenantId, context }, result] of retired.map(
+      (retiredContext, index) =>
+        [
+          retiredContext,
+          teardownResults[index] ?? { completed: true, settled: Promise.resolve() },
+        ] as const,
+    )) {
+      this.registry.remove(tenantId);
+      void result.settled.then(() => {
+        try {
+          context.zeroize();
+        } catch {
+          this.logger.error('tenant context quarantine zeroize failed', { tenant_id: tenantId });
+        }
+      });
+    }
+  }
+
+  private zeroizeStaged(staged: Map<string, TenantContext>): void {
+    for (const [tenantId, context] of staged) {
+      try {
+        context.zeroize();
+      } catch {
+        this.logger.error('staged tenant context zeroize failed', { tenant_id: tenantId });
+      }
+    }
+  }
+
+  private async runTornDown(tenantId: string): Promise<TeardownHookResult> {
+    if (!this.onTornDown) return { completed: true, settled: Promise.resolve() };
+    const outcome = Promise.resolve()
+      .then(() => this.onTornDown!(tenantId))
+      .then(
+        () => true,
+        () => false,
       );
+    const settled = outcome.then(() => undefined);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), this.teardownTimeoutMs);
     });
     try {
-      await Promise.race([this.onTornDown(tenantId), timedOut]);
+      const finished = await Promise.race([outcome, timeout]);
+      return { completed: finished, settled };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private async runGenerationChanged(tenantId: string): Promise<TeardownHookResult> {
+    if (!this.onGenerationChanged) return { completed: true, settled: Promise.resolve() };
+    const outcome = Promise.resolve()
+      .then(() => this.onGenerationChanged!(tenantId))
+      .then(
+        () => true,
+        () => false,
+      );
+    const settled = outcome.then(() => undefined);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), this.teardownTimeoutMs);
+    });
+    try {
+      const finished = await Promise.race([outcome, timeout]);
+      return { completed: finished, settled };
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -253,7 +421,7 @@ export class TenantAssignmentApplier {
     );
   }
 
-  private matchesAssignments(assignments: VersionedTenantAssignment[]): boolean {
+  private matchesAssignments(assignments: readonly VersionedTenantAssignment[]): boolean {
     if (this.assigned.size !== assignments.length) return false;
     return assignments.every((assignment) => {
       const current = this.assigned.get(assignment.tenantId);
@@ -267,6 +435,8 @@ export class TenantAssignmentApplier {
   ): boolean {
     return (
       left.tenantId === right.tenantId &&
+      left.deploymentId === right.deploymentId &&
+      left.tenantDeploymentId === right.tenantDeploymentId &&
       left.kmsKeyId === right.kmsKeyId &&
       left.storageKeyId === right.storageKeyId &&
       left.activeStorageKeyVersion === right.activeStorageKeyVersion &&

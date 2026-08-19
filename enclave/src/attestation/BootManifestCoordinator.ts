@@ -1,4 +1,5 @@
 import {
+  type BootManifestSecretLoadInput,
   type LoadedBootManifestSecret,
   type BootManifestSecretLoader,
 } from './BootManifestSecretLoader.js';
@@ -13,9 +14,7 @@ export interface BootManifestVerifierPort {
 }
 
 export interface BootManifestSecretLoaderPort {
-  load(
-    manifest: Pick<VerifiedBootManifest, 'secretReferences'>,
-  ): Promise<readonly LoadedBootManifestSecret[]>;
+  load(manifest: BootManifestSecretLoadInput): Promise<readonly LoadedBootManifestSecret[]>;
 }
 
 export type BootManifestCoordinatorResult = Readonly<{
@@ -34,7 +33,7 @@ export class BootManifestCoordinator {
     runtimeIdentity: BootManifestRuntimeIdentity,
   ): Promise<BootManifestCoordinatorResult> {
     const manifest = this.verifier.verify(input, runtimeIdentity);
-    const secrets = await this.secretLoader.load({ secretReferences: manifest.secretReferences });
+    const secrets = await this.secretLoader.load(manifest);
     return Object.freeze({ manifest, secrets: this.ownedSecrets(secrets) });
   }
 

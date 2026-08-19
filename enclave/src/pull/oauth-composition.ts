@@ -1,4 +1,5 @@
 import { matchesSpkiPin, verifyControlPlaneCertificate } from '@folklore/utils';
+import type { S3Client } from '@aws-sdk/client-s3';
 import { ProxyAgent } from 'undici';
 import { z } from 'zod';
 import type { EnclaveCrypto } from '../crypto/esdk.js';
@@ -16,7 +17,23 @@ import { HttpOAuthStateGuard } from './HttpOAuthStateGuard.js';
 import { HttpProviderTokenClient } from './HttpProviderTokenClient.js';
 import { EnclaveProviderRefreshSecretLoader } from './EnclaveProviderRefreshSecretLoader.js';
 import { EGRESS_PROXY_PORT } from '../egress/proxy.js';
+import {
+  assertStablePublicAddresses,
+  type ProviderTokenFetchOptions,
+} from '../egress/provider-token-fetch.js';
+import { HttpJiraWebhookClient } from './HttpJiraWebhookClient.js';
+import {
+  JiraWebhookLifecycleService,
+  type JiraWebhookMode,
+} from './JiraWebhookLifecycleService.js';
+import { JiraWebhookDisconnectService } from './JiraWebhookDisconnectService.js';
+import {
+  JiraWebhookAuthenticator,
+  type JiraWebhookClaimPolicy,
+} from '../ingest/JiraWebhookAuthenticator.js';
+import { S3JiraWebhookReplayStore } from '../ingest/S3JiraWebhookReplayStore.js';
 import type { OAuthRefreshCommand, OAuthRefreshMetadataUpdate } from '@folklore/contracts/enclave';
+import type { WebhookLifecycleDelivery } from '@folklore/contracts/enclave';
 import type { VerifiedProviderConfig } from '../egress/provider-token-fetch.js';
 import {
   bootManifestOAuthProviderSchema,
@@ -28,8 +45,15 @@ import {
 type ControlPlaneIdentityInput = Omit<ControlPlaneIdentity, 'tlsSpkiSha256'> & {
   readonly tlsSpkiSha256: readonly string[];
 };
-type OAuthManifestProviderInput = Omit<BootManifestOAuthProvider, 'allowedHosts'> & {
+type OAuthManifestProviderInput = Omit<
+  BootManifestOAuthProvider,
+  'allowedHosts' | 'jiraWebhookPilotOrgIds' | 'jiraWebhookClaimPolicy'
+> & {
   readonly allowedHosts: readonly string[];
+  readonly jiraWebhookPilotOrgIds?: readonly string[];
+  readonly jiraWebhookClaimPolicy?: Readonly<
+    NonNullable<BootManifestOAuthProvider['jiraWebhookClaimPolicy']>
+  >;
 };
 
 const providerConfigSchema = z
@@ -68,7 +92,11 @@ export interface OAuthCompositionOptions {
   resolveTenant(orgId: string): TenantContext;
   getSecretValue(input: { secretId: string }): Promise<Uint8Array>;
   kmsKeyId: string;
+  s3?: S3Client;
   fetchImpl?: typeof globalThis.fetch;
+  jiraWebhookMode?: JiraWebhookMode;
+  jiraWebhookPilotOrgIds?: readonly string[];
+  jiraWebhookClaimPolicy?: JiraWebhookClaimPolicy;
 }
 
 export interface OAuthRuntime {
@@ -77,10 +105,20 @@ export interface OAuthRuntime {
   mintGitHubInstallationToken(input: {
     installationId: string;
   }): Promise<{ accessToken: string; expiresAt: string }>;
+  jiraWebhookLifecycle: JiraWebhookLifecycleService;
+  jiraWebhookAuthenticator: JiraWebhookAuthenticator;
+  recordJiraWebhookDelivery(
+    input: WebhookLifecycleDelivery,
+  ): Promise<'updated' | 'stale' | 'invalid_submission'>;
 }
 
 /** Composes the production OAuth path; missing secrets/configuration throws before BoxServer starts. */
 export function createOAuthRuntime(options: OAuthCompositionOptions): OAuthRuntime {
+  const jiraWebhookMode = options.jiraWebhookMode ?? options.jiraWebhookClaimPolicy?.mode ?? 'off';
+  const jiraWebhookEnabledOrgIds = new Set(options.jiraWebhookPilotOrgIds ?? []);
+  if (jiraWebhookMode === 'enabled' && !options.s3) {
+    throw new Error('jira_webhook_replay_store_unavailable');
+  }
   const configs = parseProviderConfigs(
     options.providerConfigJson,
     options.providerConfigs,
@@ -103,16 +141,15 @@ export function createOAuthRuntime(options: OAuthCompositionOptions): OAuthRunti
     identity,
     options.readControlPlaneSpkiSha256,
   );
-  const provider = new HttpProviderTokenClient(
-    new EnclaveProviderRefreshSecretLoader(
-      { getSecretValue: options.getSecretValue },
-      options.kmsKeyId,
-    ),
-    {
-      assertProxyResolution: async () => undefined,
-      ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
-    },
+  const providerFetchOptions: ProviderTokenFetchOptions = {
+    assertProxyResolution: assertStablePublicAddresses,
+    ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+  };
+  const providerSecrets = new EnclaveProviderRefreshSecretLoader(
+    { getSecretValue: options.getSecretValue },
+    options.kmsKeyId,
   );
+  const provider = new HttpProviderTokenClient(providerSecrets, providerFetchOptions);
   const leaseResolver = new HttpOAuthLeaseResolver(
     options.controlPlaneUrl,
     options.deploymentId,
@@ -132,6 +169,41 @@ export function createOAuthRuntime(options: OAuthCompositionOptions): OAuthRunti
     controlPlaneFetch,
   );
   const persistence = new HttpOAuthCredentialPersistence(transport);
+  const jiraWebhookLifecycle = new JiraWebhookLifecycleService(
+    new HttpJiraWebhookClient(providerFetchOptions),
+    persistence,
+    {
+      mode: jiraWebhookMode,
+      isEnabledForOrg: (orgId) => jiraWebhookEnabledOrgIds.has(orgId),
+    },
+  );
+  const jiraWebhookReplayStore = options.s3
+    ? new S3JiraWebhookReplayStore(options.s3, options.resolveTenant)
+    : undefined;
+  const jiraWebhookDisconnect = new JiraWebhookDisconnectService(
+    new HttpJiraWebhookClient(providerFetchOptions),
+    persistence,
+    jiraWebhookReplayStore,
+  );
+  const jiraWebhookAuthenticator = new JiraWebhookAuthenticator({
+    ...options.jiraWebhookClaimPolicy,
+    mode: jiraWebhookMode,
+    loadClientSecret: async () => {
+      const config = configs.get('jira');
+      if (!config) throw new Error('jira_provider_not_configured');
+      return (await providerSecrets.load(config)).clientSecret;
+    },
+    ...(jiraWebhookReplayStore
+      ? {
+          reserveReplay: (input: Parameters<S3JiraWebhookReplayStore['reserve']>[0]) =>
+            jiraWebhookReplayStore.reserve(input),
+          commitReplay: (input: Parameters<S3JiraWebhookReplayStore['commit']>[0]) =>
+            jiraWebhookReplayStore.commit(input),
+          releaseReplay: (input: Parameters<S3JiraWebhookReplayStore['release']>[0]) =>
+            jiraWebhookReplayStore.release(input),
+        }
+      : {}),
+  });
   const sealer = new EnclaveOAuthCredentialSealer((orgId) =>
     cryptoFor(options.resolveTenant(orgId)),
   );
@@ -167,14 +239,16 @@ export function createOAuthRuntime(options: OAuthCompositionOptions): OAuthRunti
         sealer,
         persistence,
         provider,
-        // Boot-manifest provider configs are keyed by OAuth provider; a `code` submission
-        // mints through the github provider config while sealing/persisting as `code`.
-        (kind) => configs.get(kind === 'code' ? 'github' : kind) ?? null,
+        (kind) => configs.get(kind) ?? null,
         stateGuard,
       ).mint({
         ...input,
         generation,
       });
+    },
+    cleanupDisconnect: async (input) => {
+      const tenant = options.resolveTenant(input.orgId);
+      await jiraWebhookDisconnect.cleanup(input, tenant.crypto);
     },
   };
   return {
@@ -200,6 +274,9 @@ export function createOAuthRuntime(options: OAuthCompositionOptions): OAuthRunti
         installationId: input.installationId,
       });
     },
+    jiraWebhookLifecycle,
+    jiraWebhookAuthenticator,
+    recordJiraWebhookDelivery: (input) => persistence.recordWebhookDelivery(input),
   };
 }
 

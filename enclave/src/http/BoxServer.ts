@@ -33,10 +33,11 @@ const REFUSED_UPSTREAM = 'upstream_unreachable';
 
 export class BoxServer {
   private readonly app: Hono;
-  private readonly apiReady: boolean;
+  private api?: FetchHandler;
+  private apiReady: boolean;
   private readonly httpPort: number;
   // Absent when the configured port is unusable: collab degrades, the enclave still boots.
-  private readonly collabPort?: number;
+  private collabPort?: number;
   private server?: Server;
   private activeCollabProxies = 0;
   // Upgraded sockets are detached from the server's connection tracking, so `close()` cannot see
@@ -44,10 +45,8 @@ export class BoxServer {
   private readonly relayedClients = new Set<Socket>();
   private readonly lastRefusalNoticeAt = new Map<string, number>();
 
-  constructor(
-    private readonly api?: FetchHandler,
-    options: BoxServerOptions = {},
-  ) {
+  constructor(api?: FetchHandler, options: BoxServerOptions = {}) {
+    this.api = api;
     this.httpPort = options.httpPort ?? DEFAULT_HTTP_PORT;
     this.collabPort = this.usableCollabPort(options.collabPort ?? COLLAB_DEFAULT_PORT);
     this.apiReady = Boolean(this.api);
@@ -76,16 +75,13 @@ export class BoxServer {
       this.app.all('/oauth-submission/*', (c) => c.json({ error: 'oauth_unavailable' }, 503));
     }
 
-    if (this.api) {
+    // every /api/* request runs in-process over content decrypted only inside this enclave. The
+    // handler is resolved per request so a shared pool can attach its first verified database after
+    // the static shell has already started.
+    this.app.all('/api/*', (c) => {
       const api = this.api;
-      // every /api/* request runs in-process over content decrypted only
-      // inside this enclave — no decrypted body is ever proxied to the parent.
-      this.app.all('/api/*', (c) => api(c.req.raw));
-    } else {
-      // Never let /api/* fall through to the SPA catch-all: callers expect JSON and
-      // a 200 index.html would hide the outage behind a healthy-looking response.
-      this.app.all('/api/*', (c) => c.json({ error: 'api_unavailable' }, 503));
-    }
+      return api ? api(c.req.raw) : c.json({ error: 'api_unavailable' }, 503);
+    });
 
     this.app.use('/*', serveStatic({ root: './dist/box' }));
     this.app.get('/*', serveStatic({ path: './dist/box/index.html' }));
@@ -93,6 +89,12 @@ export class BoxServer {
 
   get fetch(): FetchHandler {
     return this.app.fetch;
+  }
+
+  attachApi(api: FetchHandler, collabPort?: number): void {
+    this.api = api;
+    this.apiReady = true;
+    this.collabPort = this.usableCollabPort(collabPort ?? COLLAB_DEFAULT_PORT);
   }
 
   // Live relayed-collab count: the activity signal the idle/self-stop path needs.

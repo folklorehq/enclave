@@ -1,7 +1,10 @@
 import {
   enclaveRuntimeEvidenceSchema,
+  poolRuntimeAttestationUserDataSchema,
   type BootManifestUserData,
   type EnclaveRuntimeEvidence,
+  type PoolRuntimeAttestationUserData,
+  type RuntimeDatabaseCredentialReceipt,
 } from '@folklore/contracts/enclave-attestation';
 import {
   createHash,
@@ -14,6 +17,8 @@ import {
 
 import {
   encodeAttestationUserData,
+  encodePoolRuntimeAttestationUserData,
+  encodePoolRuntimeHealthSignaturePayload,
   encodeRuntimeHealthSignaturePayload,
   hashNitroDocument,
   hashRuntimeAttestationKeyBundle,
@@ -73,6 +78,39 @@ export type RuntimeAttestationResult =
   | { ok: true; identity: VerifiedRuntimeIdentity }
   | { ok: false; failure: NitroAttestationFailureCode };
 
+export interface PoolRuntimeAttestationExpectations {
+  nonce: Uint8Array;
+  poolDeploymentId: string;
+  assignmentGeneration: number;
+  assignmentDigest: string;
+  pcr0: Uint8Array;
+  parentRoleArn: string;
+  instanceId: string;
+  challengeIssuedAt: Date;
+  challengeExpiresAt: Date;
+  serverTime: Date;
+}
+
+export interface VerifiedPoolRuntimeIdentity {
+  documentTimestamp: number;
+  documentHash: string;
+  pcr0: string;
+  pcr3: string;
+  pcr4: string;
+  poolDeploymentId: string;
+  assignmentGeneration: number;
+  assignmentDigest: string;
+  runtimeDatabase: RuntimeDatabaseCredentialReceipt;
+  parentRoleArn: string;
+  instanceId: string;
+  sessionPublicKeySha256: string;
+  healthObservedAt: string;
+}
+
+export type PoolRuntimeAttestationResult =
+  | { ok: true; identity: VerifiedPoolRuntimeIdentity }
+  | { ok: false; failure: NitroAttestationFailureCode };
+
 export type AwsNitroAttestationDocumentResult =
   | { ok: true }
   | { ok: false; failure: NitroAttestationFailureCode };
@@ -95,6 +133,25 @@ function validateExpectations(expected: RuntimeAttestationExpectations): void {
     !pcr0IsValid ||
     !/^arn:[a-z0-9-]+:iam::\d{12}:role\/[A-Za-z0-9+=,.@_/-]+$/.test(expected.parentRoleArn) ||
     !/^i-[0-9a-f]{8,17}$/.test(expected.instanceId)
+  ) {
+    throw new NitroAttestationError('runtime_binding_mismatch');
+  }
+}
+
+function validatePoolExpectations(expected: PoolRuntimeAttestationExpectations): void {
+  const issuedAt = expected.challengeIssuedAt.getTime();
+  const expiresAt = expected.challengeExpiresAt.getTime();
+  const serverTime = expected.serverTime.getTime();
+  const pcr0IsValid =
+    expected.pcr0.byteLength === PCR_BYTES && expected.pcr0.some((byte) => byte !== 0);
+  if (
+    ![issuedAt, expiresAt, serverTime].every(Number.isFinite) ||
+    issuedAt >= expiresAt ||
+    expected.nonce.byteLength !== CHALLENGE_NONCE_BYTES ||
+    !pcr0IsValid ||
+    !/^arn:[a-z0-9-]+:iam::\d{12}:role\/[A-Za-z0-9+=,.@_/-]+$/.test(expected.parentRoleArn) ||
+    !/^i-[0-9a-f]{8,17}$/.test(expected.instanceId) ||
+    !/^[0-9a-f]{64}$/.test(expected.assignmentDigest)
   ) {
     throw new NitroAttestationError('runtime_binding_mismatch');
   }
@@ -156,7 +213,10 @@ function verifyDocumentBindings(
 
 function verifyTimes(
   payload: NitroDocumentPayload,
-  expected: RuntimeAttestationExpectations,
+  expected: Pick<
+    RuntimeAttestationExpectations,
+    'challengeIssuedAt' | 'challengeExpiresAt' | 'serverTime'
+  >,
 ): void {
   const lower = expected.challengeIssuedAt.getTime() - CLOCK_SKEW_MS;
   const upper =
@@ -244,6 +304,119 @@ function normalizedIdentity(
   };
 }
 
+function poolUserData(
+  evidence: EnclaveRuntimeEvidence,
+  expected: PoolRuntimeAttestationExpectations,
+): PoolRuntimeAttestationUserData {
+  const runtimeDatabase = evidence.signedHealth.record.runtimeDatabase;
+  if (!runtimeDatabase) throw new NitroAttestationError('runtime_binding_mismatch');
+  const sessionPublicKey = Buffer.from(evidence.sessionPublicKey, 'base64');
+  if (sessionPublicKey.byteLength !== 32) {
+    throw new NitroAttestationError('runtime_binding_mismatch');
+  }
+  return poolRuntimeAttestationUserDataSchema.parse({
+    version: 1,
+    poolDeploymentId: expected.poolDeploymentId,
+    assignmentGeneration: expected.assignmentGeneration,
+    assignmentDigest: expected.assignmentDigest,
+    runtimeDatabase,
+    sessionPublicKeySha256: createHash('sha256').update(sessionPublicKey).digest('hex'),
+  });
+}
+
+function verifyPoolDocumentBindings(
+  payload: NitroDocumentPayload,
+  evidence: EnclaveRuntimeEvidence,
+  expected: PoolRuntimeAttestationExpectations,
+  userData: PoolRuntimeAttestationUserData,
+): void {
+  const evidencePublicKey = Buffer.from(evidence.sessionPublicKey, 'base64');
+  const expectedPcrs = [
+    [0, expected.pcr0],
+    [3, derivePcr3FromRoleArn(expected.parentRoleArn)],
+    [4, derivePcr4FromInstanceId(expected.instanceId)],
+  ] as const;
+  if (
+    !bytesEqual(payload.nonce, expected.nonce) ||
+    !bytesEqual(payload.userData, encodePoolRuntimeAttestationUserData(userData)) ||
+    !bytesEqual(payload.publicKey, evidencePublicKey)
+  ) {
+    throw new NitroAttestationError('runtime_binding_mismatch');
+  }
+  for (const [index, expectedPcr] of expectedPcrs) {
+    const actualPcr = payload.pcrs.get(index);
+    if (actualPcr === undefined || !bytesEqual(actualPcr, expectedPcr)) {
+      throw new NitroAttestationError('runtime_binding_mismatch');
+    }
+  }
+}
+
+function verifyPoolHealth(
+  document: Uint8Array,
+  payload: NitroDocumentPayload,
+  evidence: EnclaveRuntimeEvidence,
+  expected: PoolRuntimeAttestationExpectations,
+  userData: PoolRuntimeAttestationUserData,
+): void {
+  const { record } = evidence.signedHealth;
+  const observedAt = Date.parse(record.observedAt);
+  if (
+    observedAt < expected.challengeIssuedAt.getTime() ||
+    observedAt > expected.challengeExpiresAt.getTime() ||
+    observedAt > expected.serverTime.getTime() + CLOCK_SKEW_MS ||
+    record.status !== 'healthy' ||
+    !record.tenantAssigned ||
+    record.bootManifestVerified ||
+    record.runtimeTrust !== 'pool-assignment' ||
+    record.assignmentManifestVerified !== true ||
+    !record.kmsUnsealed ||
+    !record.tenantApiReady ||
+    !record.runtimeDatabase
+  ) {
+    throw new NitroAttestationError('runtime_binding_mismatch');
+  }
+  const signed = encodePoolRuntimeHealthSignaturePayload({
+    nonce: expected.nonce,
+    documentHash: hashNitroDocument(document),
+    userData,
+    record,
+  });
+  if (
+    !verify(
+      null,
+      signed,
+      ed25519PublicKey(payload.publicKey),
+      Buffer.from(evidence.signedHealth.signature, 'base64'),
+    )
+  ) {
+    throw new NitroAttestationError('runtime_binding_mismatch');
+  }
+}
+
+function normalizedPoolIdentity(
+  document: Uint8Array,
+  payload: NitroDocumentPayload,
+  expected: PoolRuntimeAttestationExpectations,
+  evidence: EnclaveRuntimeEvidence,
+  userData: PoolRuntimeAttestationUserData,
+): VerifiedPoolRuntimeIdentity {
+  return {
+    documentTimestamp: payload.timestamp,
+    documentHash: hashNitroDocument(document),
+    pcr0: Buffer.from(payload.pcrs.get(0) ?? []).toString('hex'),
+    pcr3: Buffer.from(payload.pcrs.get(3) ?? []).toString('hex'),
+    pcr4: Buffer.from(payload.pcrs.get(4) ?? []).toString('hex'),
+    poolDeploymentId: userData.poolDeploymentId,
+    assignmentGeneration: userData.assignmentGeneration,
+    assignmentDigest: userData.assignmentDigest,
+    runtimeDatabase: userData.runtimeDatabase,
+    parentRoleArn: expected.parentRoleArn,
+    instanceId: expected.instanceId,
+    sessionPublicKeySha256: userData.sessionPublicKeySha256,
+    healthObservedAt: evidence.signedHealth.record.observedAt,
+  };
+}
+
 export function verifyAwsNitroAttestationDocument(
   document: Uint8Array,
   verificationTime?: Date,
@@ -303,4 +476,46 @@ export function verifyRuntimeAttestation(
 ): RuntimeAttestationResult {
   const trustedRootDer = new X509Certificate(loadAwsNitroRoot()).raw;
   return verifyRuntimeAttestationWithTrustAnchor(evidence, expected, trustedRootDer);
+}
+
+export function verifyPoolRuntimeAttestationWithTrustAnchor(
+  rawEvidence: EnclaveRuntimeEvidence,
+  expected: PoolRuntimeAttestationExpectations,
+  trustedRootDer: Uint8Array,
+): PoolRuntimeAttestationResult {
+  try {
+    validatePoolExpectations(expected);
+    const evidence = enclaveRuntimeEvidenceSchema.parse(rawEvidence);
+    const userData = poolUserData(evidence, expected);
+    const document = Buffer.from(evidence.nitroDocument, 'base64');
+    const cose = parseNitroCoseSign1(document);
+    const payload = parseNitroDocumentPayload(cose.payload);
+    const leafKey = verifyCertificatePath({
+      leafDer: payload.certificate,
+      cabundle: payload.cabundle,
+      trustedRootDer,
+      verificationTime: expected.serverTime,
+    });
+    verifyNitroCoseSignature(cose, leafKey);
+    verifyPoolDocumentBindings(payload, evidence, expected, userData);
+    verifyTimes(payload, expected);
+    verifyPoolHealth(document, payload, evidence, expected, userData);
+    return {
+      ok: true,
+      identity: normalizedPoolIdentity(document, payload, expected, evidence, userData),
+    };
+  } catch (error: unknown) {
+    return {
+      ok: false,
+      failure: error instanceof NitroAttestationError ? error.code : 'malformed_document',
+    };
+  }
+}
+
+export function verifyPoolRuntimeAttestation(
+  evidence: EnclaveRuntimeEvidence,
+  expected: PoolRuntimeAttestationExpectations,
+): PoolRuntimeAttestationResult {
+  const trustedRootDer = new X509Certificate(loadAwsNitroRoot()).raw;
+  return verifyPoolRuntimeAttestationWithTrustAnchor(evidence, expected, trustedRootDer);
 }

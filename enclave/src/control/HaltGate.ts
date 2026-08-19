@@ -10,6 +10,14 @@ export function licenseHaltKey(deploymentId: string): string {
   return `control:license-halt:${deploymentId}`;
 }
 
+export function tenantHaltKey(tenantId: string): string {
+  return `control:halt:tenant:${tenantId}`;
+}
+
+export function poolHaltKey(poolId: string): string {
+  return `control:halt:pool:${poolId}`;
+}
+
 /** Cadence at which a halted loop re-reads the flag before touching the queue. */
 export const HALT_POLL_INTERVAL_MS = 5_000;
 
@@ -26,8 +34,11 @@ export class HaltGate {
     private readonly cache: Pick<Cache, 'get'>,
     deploymentId: string,
     private readonly logger: Logger,
+    additionalKeys: readonly string[] = [],
   ) {
-    this.keys = [haltKey(deploymentId), licenseHaltKey(deploymentId)];
+    this.keys = [
+      ...new Set([haltKey(deploymentId), licenseHaltKey(deploymentId), ...additionalKeys]),
+    ];
   }
 
   async isHalted(): Promise<boolean> {

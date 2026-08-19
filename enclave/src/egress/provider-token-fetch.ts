@@ -4,7 +4,12 @@ import { isIP } from 'node:net';
 import { ProxyAgent } from 'undici';
 import { EGRESS_PROXY_PORT } from './proxy.js';
 
-export type ProviderTokenOperation = 'code' | 'refresh' | 'identity' | 'github_installation';
+export type ProviderTokenOperation =
+  | 'code'
+  | 'refresh'
+  | 'identity'
+  | 'jira_resources'
+  | 'github_installation';
 export type ProviderRefreshCapability = 'supported' | 'unsupported';
 
 export type ProviderTokenRequest =
@@ -23,6 +28,7 @@ export type ProviderTokenRequest =
       refreshToken: string;
     }
   | { operation: 'identity'; accessToken: string }
+  | { operation: 'jira_resources'; accessToken: string }
   | {
       operation: 'github_installation';
       installationId: string;
@@ -58,9 +64,14 @@ const SUPPORTED_PROVIDER_KINDS = new Set([
   'notion',
   'intercom',
   'jira',
+  'google_drive',
+  'gmail',
+  'google_calendar',
 ]);
 const LINEAR_IDENTITY_QUERY = 'query FolkloreOAuthIdentity { viewer { id organization { id } } }';
 const NOTION_API_VERSION = '2026-03-11';
+const JIRA_ACCESSIBLE_RESOURCES_ENDPOINT =
+  'https://api.atlassian.com/oauth/token/accessible-resources';
 
 interface ExecutableProviderRequest {
   endpoint: string;
@@ -224,6 +235,15 @@ function buildProviderRequest(
   }
   if (request.operation === 'identity') {
     return identityRequest(config, request.accessToken);
+  }
+  if (request.operation === 'jira_resources') {
+    if (config.kind !== 'jira') throw new ProviderEgressError();
+    return {
+      endpoint: JIRA_ACCESSIBLE_RESOURCES_ENDPOINT,
+      method: 'GET',
+      headers: { accept: 'application/json', authorization: `Bearer ${request.accessToken}` },
+      allowedContentTypes: ['application/json'],
+    };
   }
   if (request.operation === 'refresh' && refreshCapability(config) === 'unsupported') {
     throw new ProviderEgressError();
@@ -398,6 +418,19 @@ export function normalizeEndpoint(value: string, allowedHosts: readonly string[]
 export async function resolvePublicAddresses(hostname: string): Promise<readonly string[]> {
   const results = await dnsLookup(hostname, { all: true, verbatim: true });
   return [...new Set(results.map((entry) => entry.address))].sort();
+}
+
+export async function assertStablePublicAddresses(
+  hostname: string,
+  addresses: readonly string[],
+): Promise<void> {
+  const current = await resolvePublicAddresses(hostname);
+  if (
+    current.length !== addresses.length ||
+    current.some((address, index) => address !== addresses[index])
+  ) {
+    throw new ProviderEgressError();
+  }
 }
 
 export function assertPublicAddressSet(addresses: readonly string[]): void {

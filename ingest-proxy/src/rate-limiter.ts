@@ -6,11 +6,16 @@ const TABLE = process.env['RATE_LIMIT_TABLE'];
 const LIMIT = Number(process.env['RATE_LIMIT_RPM'] ?? 120);
 const WINDOW_S = 60;
 
-export async function checkRateLimit(tenantId: string, source: string): Promise<boolean> {
+export async function checkRateLimit(
+  tenantId: string,
+  source: string,
+  namespace = 'default',
+  limit = LIMIT,
+): Promise<boolean> {
   if (!TABLE) return true;
 
   const window = Math.floor(Date.now() / (WINDOW_S * 1000));
-  const pk = `${tenantId}/${source}`;
+  const pk = `${namespace}/${tenantId}/${source}`;
   const sk = String(window);
   const ttl = String(window * WINDOW_S + WINDOW_S * 2); // expire 2 windows after creation
 
@@ -26,5 +31,5 @@ export async function checkRateLimit(tenantId: string, source: string): Promise<
   );
 
   const count = Number(result.Attributes?.['count']?.N ?? 1);
-  return count <= LIMIT;
+  return count <= limit;
 }

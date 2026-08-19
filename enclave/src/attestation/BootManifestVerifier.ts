@@ -1,18 +1,30 @@
 import { createHash, createPublicKey, KeyObject, verify } from 'node:crypto';
 import {
-  signedBootManifestSchema,
+  parseBootManifestWire,
   type BootManifest,
   type BootManifestResourcePrefixes,
   type BootManifestKeyset,
   type SignedBootManifestKeyset,
   type ControlPlaneIdentity,
+  type ParsedBootManifestWire,
 } from '@folklore/contracts/enclave-attestation';
-import { encodeBootManifest, verifySignedBootManifestKeyset } from '@folklore/nitro-attestation';
+import { buildSignerPurposeSignatureMessage } from '@folklore/contracts';
 import {
-  BOOT_MANIFEST_ROOT_KEY_ID,
-  BOOT_MANIFEST_ROOT_PUBLIC_KEY_PEM,
-  assertApprovedBootManifestRoot,
-} from './boot-manifest-root.js';
+  encodeBootManifest,
+  encodeBootManifestSubjectV3,
+  digestCanonicalCbor,
+  hashBootManifestKeyset,
+  verifySignedBootManifestKeyset,
+  TRUSTED_SIGNER_RECOVERY_ROOT_DIGEST,
+  recoveryRootInstallationReportV1Schema,
+  type RecoveryRootInstallationReportV1,
+} from '@folklore/nitro-attestation';
+import { DstackEvidenceAdapter, unavailableResult } from './DstackEvidenceAdapter.js';
+import type {
+  DstackNativeVerificationInputV1,
+  DstackNativeVerificationResultV1,
+  DstackNativeVerifierPort,
+} from './DstackNativeVerifier.js';
 
 export type PinnedBootManifestKeyStatus = 'active' | 'verification-only' | 'disabled' | 'revoked';
 
@@ -20,6 +32,10 @@ export interface PinnedBootManifestKey {
   keyId: string;
   status: PinnedBootManifestKeyStatus;
   publicKey: KeyObject;
+}
+
+export interface BootManifestVerifierOptions {
+  dstackVerifier?: DstackNativeVerifierPort;
 }
 
 export interface BootManifestRuntimeIdentity {
@@ -42,20 +58,65 @@ type FrozenControlPlaneIdentity = Omit<ControlPlaneIdentity, 'tlsSpkiSha256'> & 
   readonly tlsSpkiSha256: readonly string[];
 };
 
+type FrozenInferenceTrustPolicy = Omit<
+  NonNullable<BootManifest['inferenceTrustPolicy']>,
+  | 'redirectOrigins'
+  | 'tlsSpkiSha256'
+  | 'quoteRootDigests'
+  | 'workloadMeasurements'
+  | 'attestationKeys'
+  | 'receiptKeys'
+  | 'permittedModels'
+  | 'roleModels'
+> & {
+  readonly redirectOrigins: readonly string[];
+  readonly tlsSpkiSha256: readonly string[];
+  readonly quoteRootDigests: readonly string[];
+  readonly workloadMeasurements: readonly string[];
+  readonly attestationKeys: readonly Readonly<
+    NonNullable<BootManifest['inferenceTrustPolicy']>['attestationKeys'][number]
+  >[];
+  readonly receiptKeys: readonly Readonly<
+    NonNullable<BootManifest['inferenceTrustPolicy']>['receiptKeys'][number]
+  >[];
+  readonly permittedModels: readonly Readonly<
+    NonNullable<BootManifest['inferenceTrustPolicy']>['permittedModels'][number]
+  >[];
+  readonly roleModels: Readonly<NonNullable<BootManifest['inferenceTrustPolicy']>['roleModels']>;
+};
+
 export type VerifiedBootManifest = Readonly<
   Omit<
     BootManifest,
-    'resourcePrefixes' | 'secretReferences' | 'oauthProviders' | 'controlPlaneIdentity'
+    | 'resourcePrefixes'
+    | 'secretReferences'
+    | 'oauthProviders'
+    | 'controlPlaneIdentity'
+    | 'inferenceTrustPolicy'
+    | 'inferenceAttestation'
   >
 > & {
   readonly resourcePrefixes: Readonly<BootManifestResourcePrefixes>;
   readonly secretReferences: readonly Readonly<BootManifest['secretReferences'][number]>[];
   readonly oauthProviders: readonly Readonly<
-    Omit<BootManifest['oauthProviders'][number], 'allowedHosts'> & {
+    Omit<
+      BootManifest['oauthProviders'][number],
+      'allowedHosts' | 'jiraWebhookPilotOrgIds' | 'jiraWebhookClaimPolicy'
+    > & {
       readonly allowedHosts: readonly string[];
+      readonly jiraWebhookPilotOrgIds?: readonly string[];
+      readonly jiraWebhookClaimPolicy?: Readonly<
+        NonNullable<BootManifest['oauthProviders'][number]['jiraWebhookClaimPolicy']>
+      >;
     }
   >[];
   readonly controlPlaneIdentity?: FrozenControlPlaneIdentity;
+  readonly inferenceTrustPolicy?: FrozenInferenceTrustPolicy;
+  readonly inferenceAttestation?: Readonly<
+    Omit<NonNullable<BootManifest['inferenceAttestation']>, 'modelAllowlist'> & {
+      readonly modelAllowlist: readonly string[];
+    }
+  >;
 };
 
 export const bootManifestVerificationErrors = {
@@ -68,55 +129,147 @@ export const bootManifestVerificationErrors = {
 
 export class BootManifestVerifier {
   readonly #keysById: ReadonlyMap<string, PinnedBootManifestKey>;
+  readonly #dstackEvidenceAdapter: DstackEvidenceAdapter | undefined;
+  readonly #keysetGeneration: number;
+  readonly #keysetDigest: string;
 
   constructor(
-    pinnedKeys:
-      | readonly PinnedBootManifestKey[]
-      | { signedKeyset: SignedBootManifestKeyset; rootKeyId?: string; rootPublicKeyPem?: string },
+    pinnedKeys: readonly PinnedBootManifestKey[] | { signedKeyset: SignedBootManifestKeyset },
+    options: BootManifestVerifierOptions = {},
   ) {
     if (Array.isArray(pinnedKeys)) throw new Error(bootManifestVerificationErrors.keySet);
     if (!pinnedKeys || typeof pinnedKeys !== 'object' || !('signedKeyset' in pinnedKeys)) {
       throw new Error(bootManifestVerificationErrors.keySet);
     }
-    const config = pinnedKeys as {
-      signedKeyset: SignedBootManifestKeyset;
-      rootKeyId?: string;
-      rootPublicKeyPem?: string;
-    };
-    assertApprovedBootManifestRoot();
-    this.#keysById = this.createKeySet(
-      this.keysFromSignedKeyset(config.signedKeyset, config.rootKeyId, config.rootPublicKeyPem),
-    );
+    const config = pinnedKeys as { signedKeyset: SignedBootManifestKeyset };
+    const keyset = verifySignedBootManifestKeyset(config.signedKeyset);
+    this.#keysById = this.createKeySet(this.keysFromSignedKeyset(keyset));
+    this.#keysetGeneration = keyset.generation;
+    this.#keysetDigest = hashBootManifestKeyset(keyset);
+    this.#dstackEvidenceAdapter = options.dstackVerifier
+      ? new DstackEvidenceAdapter(options.dstackVerifier)
+      : undefined;
   }
 
   verify(input: unknown, runtimeIdentity: BootManifestRuntimeIdentity): VerifiedBootManifest {
-    const parsed = signedBootManifestSchema.safeParse(input);
-    if (!parsed.success) throw new Error(bootManifestVerificationErrors.invalid);
+    let parsed: ParsedBootManifestWire;
+    try {
+      parsed = parseBootManifestWire(input);
+    } catch {
+      throw new Error(bootManifestVerificationErrors.invalid);
+    }
+    switch (parsed.wire) {
+      case 'LegacySignedBootManifestV2':
+        return this.verifyV2(parsed, runtimeIdentity);
+      case 'SignedBootManifestV3':
+        return this.verifyV3(parsed, runtimeIdentity);
+    }
+  }
 
-    const key = this.#keysById.get(parsed.data.manifest.signerKeyId);
+  private verifyV2(
+    parsed: Extract<ParsedBootManifestWire, { wire: 'LegacySignedBootManifestV2' }>,
+    runtimeIdentity: BootManifestRuntimeIdentity,
+  ): VerifiedBootManifest {
+    const key = this.#keysById.get(parsed.signed.manifest.signerKeyId);
     if (!key || (key.status !== 'active' && key.status !== 'verification-only')) {
       throw new Error(bootManifestVerificationErrors.signer);
     }
-
     const isValid = verify(
       null,
-      encodeBootManifest(parsed.data.manifest),
+      encodeBootManifest(parsed.signed.manifest),
       key.publicKey,
-      Buffer.from(parsed.data.signature, 'base64'),
+      Buffer.from(parsed.signed.signature, 'base64'),
     );
     if (!isValid) throw new Error(bootManifestVerificationErrors.signature);
-    if (!this.matchesRuntimeIdentity(parsed.data.manifest, runtimeIdentity)) {
+    if (!this.matchesRuntimeIdentity(parsed.signed.manifest, runtimeIdentity)) {
       throw new Error(bootManifestVerificationErrors.identity);
     }
-    return this.freezeOwnedManifest(parsed.data.manifest);
+    return this.freezeOwnedManifest(parsed.signed.manifest);
   }
 
-  private keysFromSignedKeyset(
-    signedKeyset: SignedBootManifestKeyset,
-    rootKeyId = BOOT_MANIFEST_ROOT_KEY_ID,
-    rootPublicKeyPem = BOOT_MANIFEST_ROOT_PUBLIC_KEY_PEM,
-  ): readonly PinnedBootManifestKey[] {
-    const keyset = verifySignedBootManifestKeyset(signedKeyset, rootKeyId, rootPublicKeyPem);
+  private verifyV3(
+    parsed: Extract<ParsedBootManifestWire, { wire: 'SignedBootManifestV3' }>,
+    runtimeIdentity: BootManifestRuntimeIdentity,
+  ): VerifiedBootManifest {
+    const envelope = parsed.signed;
+    const key = this.#keysById.get(envelope.manifest.signerKeyId);
+    if (!key || (key.status !== 'active' && key.status !== 'verification-only')) {
+      throw new Error(bootManifestVerificationErrors.signer);
+    }
+    if (envelope.keyId !== key.keyId) throw new Error(bootManifestVerificationErrors.invalid);
+    if (envelope.keysetGeneration !== this.#keysetGeneration) {
+      throw new Error(bootManifestVerificationErrors.keySet);
+    }
+    if (envelope.keysetDigest !== this.#keysetDigest) {
+      throw new Error(bootManifestVerificationErrors.keySet);
+    }
+    if (this.publicKeyFingerprint(key.publicKey) !== envelope.publicKeyFingerprint) {
+      throw new Error(bootManifestVerificationErrors.signer);
+    }
+    const subjectBytes = encodeBootManifestSubjectV3({
+      manifest: envelope.manifest,
+      scope: envelope.scope,
+    });
+    if (digestCanonicalCbor(subjectBytes) !== envelope.subjectDigest) {
+      throw new Error(bootManifestVerificationErrors.signature);
+    }
+    const message = buildSignerPurposeSignatureMessage(
+      'boot-manifest',
+      envelope.domain,
+      Buffer.from(envelope.subjectDigest, 'hex'),
+    );
+    const isValid = verify(null, message, key.publicKey, Buffer.from(envelope.signature, 'base64'));
+    if (!isValid) throw new Error(bootManifestVerificationErrors.signature);
+    if (!this.matchesRuntimeIdentity(envelope.manifest, runtimeIdentity)) {
+      throw new Error(bootManifestVerificationErrors.identity);
+    }
+    return this.freezeOwnedManifest(envelope.manifest);
+  }
+
+  /** The installed recovery-root digest this verifier reports before any future unfreeze (PR2). */
+  installedRecoveryRootDigest(): string {
+    return TRUSTED_SIGNER_RECOVERY_ROOT_DIGEST;
+  }
+
+  /** Content-free boot session identity for the evidence seam (PR5). */
+  bootSessionState(): { sessionId: string; bootEpoch: number } {
+    return {
+      sessionId: createHash('sha256')
+        .update(`${this.#keysetDigest}\u0000${this.#keysetGeneration}`)
+        .digest('hex'),
+      bootEpoch: this.#keysetGeneration,
+    };
+  }
+
+  /** Reader installation report for the recovery-root update gate; requires configured build identity. */
+  recoveryInstallationReport(): RecoveryRootInstallationReportV1 {
+    const buildId = process.env['ENCLAVE_ATTESTATION_BUILD_ID']?.trim();
+    const sourceCommit = process.env['ENCLAVE_ATTESTATION_SOURCE_SHA']?.trim();
+    const artifactDigest = process.env['ENCLAVE_ATTESTATION_ARTIFACT_DIGEST']?.trim();
+    if (!buildId || !sourceCommit || !artifactDigest) {
+      throw new Error('recovery_installation_build_identity_unavailable');
+    }
+    return recoveryRootInstallationReportV1Schema.parse({
+      schema: 'RecoveryRootInstallationReportV1',
+      version: 1,
+      readerId: 'enclave-boot-manifest-verifier',
+      buildId,
+      installedRootEpoch: 1,
+      installedRootDigest: TRUSTED_SIGNER_RECOVERY_ROOT_DIGEST,
+      sourceCommit,
+      artifactDigest,
+    });
+  }
+
+  async verifyDstackEvidence(
+    input: DstackNativeVerificationInputV1,
+  ): Promise<DstackNativeVerificationResultV1> {
+    return this.#dstackEvidenceAdapter
+      ? this.#dstackEvidenceAdapter.verify(input)
+      : unavailableResult();
+  }
+
+  private keysFromSignedKeyset(keyset: BootManifestKeyset): readonly PinnedBootManifestKey[] {
     return keyset.keys.map((key) => ({
       keyId: key.keyId,
       status: key.status,
@@ -210,6 +363,12 @@ export class BootManifestVerifier {
         Object.freeze({
           ...provider,
           allowedHosts: Object.freeze([...provider.allowedHosts]),
+          ...(provider.jiraWebhookPilotOrgIds
+            ? { jiraWebhookPilotOrgIds: Object.freeze([...provider.jiraWebhookPilotOrgIds]) }
+            : {}),
+          ...(provider.jiraWebhookClaimPolicy
+            ? { jiraWebhookClaimPolicy: Object.freeze({ ...provider.jiraWebhookClaimPolicy }) }
+            : {}),
         }),
       ),
     );
@@ -220,12 +379,68 @@ export class BootManifestVerifier {
             tlsSpkiSha256: Object.freeze([...manifest.controlPlaneIdentity.tlsSpkiSha256]),
           })
         : undefined;
+    const inferenceTrustPolicy: FrozenInferenceTrustPolicy | undefined =
+      manifest.inferenceTrustPolicy === undefined
+        ? undefined
+        : Object.freeze({
+            ...manifest.inferenceTrustPolicy,
+            redirectOrigins: Object.freeze([...manifest.inferenceTrustPolicy.redirectOrigins]),
+            tlsSpkiSha256: Object.freeze([...manifest.inferenceTrustPolicy.tlsSpkiSha256]),
+            quoteRootDigests: Object.freeze([...manifest.inferenceTrustPolicy.quoteRootDigests]),
+            workloadMeasurements: Object.freeze([
+              ...manifest.inferenceTrustPolicy.workloadMeasurements,
+            ]),
+            attestationKeys: Object.freeze(
+              manifest.inferenceTrustPolicy.attestationKeys.map((key) => Object.freeze({ ...key })),
+            ),
+            receiptKeys: Object.freeze(
+              manifest.inferenceTrustPolicy.receiptKeys.map((key) => Object.freeze({ ...key })),
+            ),
+            permittedModels: Object.freeze(
+              manifest.inferenceTrustPolicy.permittedModels.map((model) =>
+                Object.freeze({ ...model }),
+              ),
+            ),
+            roleModels: Object.freeze({
+              embed: Object.freeze({ ...manifest.inferenceTrustPolicy.roleModels.embed }),
+              generate: Object.freeze({ ...manifest.inferenceTrustPolicy.roleModels.generate }),
+              judge: Object.freeze({ ...manifest.inferenceTrustPolicy.roleModels.judge }),
+              critique: Object.freeze({ ...manifest.inferenceTrustPolicy.roleModels.critique }),
+            }),
+          });
+    const inferenceAttestation = manifest.inferenceAttestation
+      ? Object.freeze({
+          ...manifest.inferenceAttestation,
+          modelAllowlist: Object.freeze([...manifest.inferenceAttestation.modelAllowlist]),
+        })
+      : undefined;
+    const activePolicyCarrier = manifest.activePolicyCarrier
+      ? Object.freeze({
+          ...manifest.activePolicyCarrier,
+          payload: Object.freeze({
+            ...manifest.activePolicyCarrier.payload,
+            activePolicy: Object.freeze({ ...manifest.activePolicyCarrier.payload.activePolicy }),
+            authorizationEnvelope: Object.freeze({
+              ...manifest.activePolicyCarrier.payload.authorizationEnvelope,
+            }),
+            generationContext: Object.freeze({
+              ...manifest.activePolicyCarrier.payload.generationContext,
+            }),
+            protectedPolicyReference: Object.freeze({
+              ...manifest.activePolicyCarrier.payload.protectedPolicyReference,
+            }),
+          }),
+        })
+      : undefined;
     return Object.freeze({
       ...manifest,
       resourcePrefixes: Object.freeze({ ...manifest.resourcePrefixes }),
       secretReferences: Object.freeze(secretReferences),
       oauthProviders,
       ...(controlPlaneIdentity ? { controlPlaneIdentity } : {}),
+      ...(inferenceTrustPolicy ? { inferenceTrustPolicy } : {}),
+      ...(inferenceAttestation ? { inferenceAttestation } : {}),
+      ...(activePolicyCarrier ? { activePolicyCarrier } : {}),
     });
   }
 

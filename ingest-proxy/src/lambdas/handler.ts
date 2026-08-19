@@ -16,9 +16,16 @@ import {
   timingSafeEqual,
 } from 'crypto';
 import type { APIGatewayProxyHandlerV2 } from 'aws-lambda';
+import {
+  canaryAuthorizationAad,
+  canaryAuthorizationSchema,
+  type CanaryAuthorization,
+} from '@folklore/contracts';
+import { jiraEncryptedWebhookEnvelopeSchema } from '@folklore/contracts/enclave';
 import { checkRateLimit } from '../rate-limiter.js';
 import { fetchDispatcherAuthSecret, computeDispatcherAuthHmac } from '../dispatcher-auth.js';
 import type { RoutingMode } from '../routing-allowlist.js';
+import { SQS_MAX_MESSAGE_BYTES } from '../encrypted-sqs-message-size.js';
 
 const ssm = new SSMClient({});
 const sqs = new SQSClient({});
@@ -92,6 +99,8 @@ const MICROSOFT365_SOURCE = 'microsoft365';
 // Drive push channels have no body signature; validity is the channel token we set at watch() time,
 // and the initial `sync` state is a handshake carrying no change (Google Drive push notifications).
 const DRIVE_SYNC_STATE = 'sync';
+const CANARY_AUTHORIZATION_HEADER = 'x-folklore-canary-authorization';
+const CANARY_AUTHORIZATION_PREFIX = 'ca1.';
 
 // Atlassian Connect authenticates webhooks with a JWT (Authorization: JWT <token>), HS256-signed
 // with the app-install shared secret — not an HMAC body signature. `alg: none` is rejected.
@@ -557,7 +566,7 @@ function providerDeliveryId(
 ): string | null {
   switch (source) {
     case 'github':
-      return headers['x-github-delivery'] ?? null;
+      return null;
     case 'slack': {
       try {
         const id = (JSON.parse(body) as { event_id?: unknown }).event_id;
@@ -627,6 +636,65 @@ function providerDeliveryId(
     }
     default:
       return null;
+  }
+}
+
+type CommissioningMetadata =
+  | { status: 'absent' }
+  | { status: 'invalid' }
+  | { status: 'valid'; canaryRunId: string; requestId: string; bodySha256: string };
+
+function commissioningMetadata(source: string, body: string): CommissioningMetadata {
+  if (source !== 'github') return { status: 'absent' };
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(body) as Record<string, unknown>;
+  } catch {
+    return { status: 'absent' };
+  }
+  if (!Object.hasOwn(parsed, '_folklore_canary')) return { status: 'absent' };
+  const candidate = parsed['_folklore_canary'];
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+    return { status: 'invalid' };
+  }
+  const values = candidate as Record<string, unknown>;
+  const canaryRunId = values['run_id'];
+  const requestId = values['request_id'];
+  if (
+    typeof canaryRunId !== 'string' ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      canaryRunId,
+    ) ||
+    typeof requestId !== 'string' ||
+    !/^[A-Za-z0-9._:-]{1,128}$/.test(requestId)
+  ) {
+    return { status: 'invalid' };
+  }
+  return {
+    status: 'valid',
+    canaryRunId,
+    requestId,
+    bodySha256: createHash('sha256').update(body, 'utf8').digest('hex'),
+  };
+}
+
+type CanaryAuthorizationHeader =
+  | { status: 'absent' }
+  | { status: 'invalid' }
+  | { status: 'valid'; authorization: CanaryAuthorization };
+
+function parseCanaryAuthorizationHeader(value: string | undefined): CanaryAuthorizationHeader {
+  if (value === undefined) return { status: 'absent' };
+  if (!value.startsWith(CANARY_AUTHORIZATION_PREFIX)) return { status: 'invalid' };
+  try {
+    const parsed = canaryAuthorizationSchema.safeParse(
+      JSON.parse(
+        Buffer.from(value.slice(CANARY_AUTHORIZATION_PREFIX.length), 'base64url').toString('utf8'),
+      ),
+    );
+    return parsed.success ? { status: 'valid', authorization: parsed.data } : { status: 'invalid' };
+  } catch {
+    return { status: 'invalid' };
   }
 }
 
@@ -861,6 +929,10 @@ async function sealAndEnqueue(params: {
   eventType: string;
   payloadBody: string;
   dedupId: string;
+  messageType?: 'jira-oauth-envelope';
+  canaryRunId?: string;
+  requestId?: string;
+  canaryAuthorization?: CanaryAuthorization;
 }): Promise<void> {
   const recipientPubBytes = await fetchPublicKey(params.tenantId);
   const recipientPub = createPublicKey({
@@ -878,21 +950,45 @@ async function sealAndEnqueue(params: {
 
   const nonce = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', aesKey, nonce);
+  const aadFields: Record<string, unknown> = {
+    version: 2,
+    tenant_id: params.tenantId,
+    source: params.source,
+    type: params.messageType ?? null,
+    event_type: params.eventType,
+    canary_run_id: params.canaryRunId ?? null,
+    request_id: params.requestId ?? null,
+  };
+  if (params.canaryAuthorization) {
+    aadFields['canary_authorization'] = canaryAuthorizationAad(params.canaryAuthorization);
+  }
+  const aad = Buffer.from(JSON.stringify(aadFields), 'utf8');
+  cipher.setAAD(aad);
   const encrypted = Buffer.concat([cipher.update(params.payloadBody, 'utf8'), cipher.final()]);
   const authTag = cipher.getAuthTag();
   const ciphertextWithTag = Buffer.concat([encrypted, authTag]);
+  const messageBody = JSON.stringify({
+    encryption_version: 2,
+    tenant_id: params.tenantId,
+    source: params.source,
+    ...(params.messageType ? { type: params.messageType } : {}),
+    eventType: params.eventType,
+    ...(params.canaryRunId && params.requestId
+      ? { canary_run_id: params.canaryRunId, request_id: params.requestId }
+      : {}),
+    ...(params.canaryAuthorization ? { canary_authorization: params.canaryAuthorization } : {}),
+    ephemeralPublicKey: ephemeralPubBytes.toString('hex'),
+    nonce: nonce.toString('hex'),
+    ciphertext: ciphertextWithTag.toString('hex'),
+  });
+  if (Buffer.byteLength(messageBody, 'utf8') > SQS_MAX_MESSAGE_BYTES) {
+    throw new Error('sealed_webhook_message_too_large');
+  }
 
   await sqs.send(
     new SendMessageCommand({
       QueueUrl: QUEUE_URL,
-      MessageBody: JSON.stringify({
-        tenant_id: params.tenantId,
-        source: params.source,
-        eventType: params.eventType,
-        ephemeralPublicKey: ephemeralPubBytes.toString('hex'),
-        nonce: nonce.toString('hex'),
-        ciphertext: ciphertextWithTag.toString('hex'),
-      }),
+      MessageBody: messageBody,
       MessageGroupId: params.tenantId,
       MessageDeduplicationId: params.dedupId,
     }),
@@ -908,6 +1004,12 @@ export interface DispatcherEvent {
   eventType: string;
   authHmac: string;
   routingMode?: RoutingMode;
+  authorization?: string;
+  method?: string;
+  rawPath?: string;
+  rawQuery?: string;
+  webhookIdentifier?: string;
+  routeId?: string;
 }
 
 // HMAC-guarded dispatcher invoke: only the dispatcher with the shared secret can invoke.
@@ -928,13 +1030,44 @@ export async function handleDispatcherInvoke(
     return { statusCode: 401 };
   }
 
+  const oauthFields = [
+    event.authorization,
+    event.method,
+    event.rawPath,
+    event.rawQuery,
+    event.webhookIdentifier,
+    event.routeId,
+  ];
+  const hasOAuthFields = oauthFields.some((value) => value !== undefined);
+  const hasCompleteOAuthFields = oauthFields.every((value) => typeof value === 'string');
+  if (hasOAuthFields && (!hasCompleteOAuthFields || event.source !== 'jira')) {
+    return { statusCode: 401 };
+  }
+
   const headers = normalizeHeaders(event.headers);
-  const payloadBody =
-    event.source === GOOGLE_DRIVE_SOURCE
-      ? driveChangePingBody(headers)
-      : event.source === MICROSOFT365_SOURCE
-        ? m365ChangePingBody(event.body)
-        : event.body;
+  let payloadBody: string;
+  let messageType: 'jira-oauth-envelope' | undefined;
+  if (hasCompleteOAuthFields) {
+    const parsedEnvelope = jiraEncryptedWebhookEnvelopeSchema.safeParse({
+      version: 1,
+      rawBody: event.body,
+      authorization: event.authorization,
+      method: event.method,
+      rawPath: event.rawPath,
+      rawQuery: event.rawQuery,
+      webhookIdentifier: event.webhookIdentifier,
+    });
+    if (!parsedEnvelope.success) return { statusCode: 401 };
+    payloadBody = JSON.stringify(parsedEnvelope.data);
+    messageType = 'jira-oauth-envelope';
+  } else {
+    payloadBody =
+      event.source === GOOGLE_DRIVE_SOURCE
+        ? driveChangePingBody(headers)
+        : event.source === MICROSOFT365_SOURCE
+          ? m365ChangePingBody(event.body)
+          : event.body;
+  }
 
   const dedupId = event.deliveryId
     ? createHash('sha256')
@@ -948,6 +1081,7 @@ export async function handleDispatcherInvoke(
     eventType: event.eventType,
     payloadBody,
     dedupId,
+    ...(messageType ? { messageType } : {}),
   });
 
   return { statusCode: 200 };
@@ -1011,6 +1145,37 @@ async function handleUrlRouted(
     return { statusCode: 401 };
   }
 
+  const commissioning = commissioningMetadata(source, body);
+  const canaryAuthorization = parseCanaryAuthorizationHeader(headers[CANARY_AUTHORIZATION_HEADER]);
+  if (
+    commissioning.status === 'invalid' ||
+    (commissioning.status === 'valid' && headers['x-github-delivery'] !== commissioning.requestId)
+  ) {
+    return { statusCode: 400 };
+  }
+  if (canaryAuthorization.status === 'invalid') return { statusCode: 401 };
+  if (commissioning.status === 'valid') {
+    const authorization =
+      canaryAuthorization.status === 'valid' ? canaryAuthorization.authorization : undefined;
+    const issuedAt = authorization ? Date.parse(authorization.issued_at) : Number.NaN;
+    const expiresAt = authorization ? Date.parse(authorization.expires_at) : Number.NaN;
+    if (
+      !authorization ||
+      authorization.org_id !== tenantId ||
+      authorization.canary_run_id !== commissioning.canaryRunId ||
+      authorization.request_id !== commissioning.requestId ||
+      authorization.body_sha256 !== commissioning.bodySha256 ||
+      !Number.isFinite(issuedAt) ||
+      !Number.isFinite(expiresAt) ||
+      issuedAt > Date.now() ||
+      expiresAt <= Date.now()
+    ) {
+      return { statusCode: 401 };
+    }
+  } else if (canaryAuthorization.status === 'valid') {
+    return { statusCode: 401 };
+  }
+
   // The channel-creation handshake carries no change — ack it without enqueuing anything.
   if (source === GOOGLE_DRIVE_SOURCE && headers['x-goog-resource-state'] === DRIVE_SYNC_STATE) {
     return { statusCode: 200 };
@@ -1042,6 +1207,14 @@ async function handleUrlRouted(
     eventType,
     payloadBody,
     dedupId: deduplicationId(tenantId, source, headers, payloadBody),
+    ...(commissioning.status === 'valid'
+      ? {
+          canaryRunId: commissioning.canaryRunId,
+          requestId: commissioning.requestId,
+          canaryAuthorization:
+            canaryAuthorization.status === 'valid' ? canaryAuthorization.authorization : undefined,
+        }
+      : {}),
   });
 
   return { statusCode: 200 };

@@ -36,6 +36,8 @@ export class TenantContext {
     readonly sealedBlobBucket = '',
     readonly rawPayloadsBucket = '',
     readonly processedOutputsBucket = '',
+    readonly deploymentId = '',
+    readonly tenantDeploymentId?: string,
   ) {
     this.keyringOrNull = keyring;
     this.hnswOrNull = hnsw;
@@ -75,6 +77,18 @@ export class TenantContext {
 
   decryptStorageCanary(ciphertext: Buffer, generation: number): Promise<Buffer> {
     return this.crypto.decryptStorageCanary(ciphertext, this.tenantId, generation);
+  }
+
+  codebaseSelectionScope(): {
+    crypto: EnclaveCrypto;
+    bucket: string;
+    deploymentId: string;
+  } {
+    const deploymentId = this.tenantDeploymentId ?? this.deploymentId;
+    if (!this.processedOutputsBucket || !deploymentId) {
+      throw new Error('codebase_selection_context_unavailable');
+    }
+    return { crypto: this.crypto, bucket: this.processedOutputsBucket, deploymentId };
   }
 
   // §2.2 point 5 (crypto-shred boundary): teardown wipes the decrypted master secret from RAM,

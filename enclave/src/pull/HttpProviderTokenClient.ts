@@ -14,6 +14,7 @@ import {
 const TOKEN_MAX_BYTES = 512 * 1024;
 const TOKEN_VALUE_MAX_BYTES = 16 * 1024;
 const ID_MAX_BYTES = 256;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Provider token exchange confined to the enclave's signed endpoint + proxy contract. */
 export class HttpProviderTokenClient implements ProviderTokenClient {
@@ -74,6 +75,12 @@ export class HttpProviderTokenClient implements ProviderTokenClient {
     });
     const parsed = await this.parse(response);
     if (!isRecord(parsed)) throw new Error('provider_identity_response_invalid');
+    if (input.config.kind === 'jira') {
+      return {
+        sourceUserId: this.requireId(parsed['account_id']),
+        externalTenantId: await this.resolveJiraCloudId(input.config, input.accessToken),
+      };
+    }
     return this.identityFrom(input.config, parsed);
   }
 
@@ -147,7 +154,13 @@ export class HttpProviderTokenClient implements ProviderTokenClient {
   ): { sourceUserId: string; externalTenantId?: string } {
     if (config.kind === 'linear') return this.linearIdentity(parsed);
     if (config.kind === 'notion') return { sourceUserId: this.requireId(parsed['id']) };
-    if (config.kind === 'jira') return { sourceUserId: this.requireId(parsed['account_id']) };
+    if (
+      config.kind === 'google_drive' ||
+      config.kind === 'gmail' ||
+      config.kind === 'google_calendar'
+    ) {
+      return { sourceUserId: this.requireId(parsed['sub']) };
+    }
     if (config.kind === 'intercom') {
       const app = parsed['app'];
       if (!isRecord(app)) throw new Error('provider_identity_missing');
@@ -162,6 +175,22 @@ export class HttpProviderTokenClient implements ProviderTokenClient {
       sourceUserId,
       ...(tenant !== undefined ? { externalTenantId: this.requireId(tenant) } : {}),
     };
+  }
+
+  private async resolveJiraCloudId(
+    config: VerifiedProviderConfig,
+    accessToken: string,
+  ): Promise<string> {
+    const response = await this.execute(config, { operation: 'jira_resources', accessToken });
+    const parsed = await this.parse(response);
+    if (!Array.isArray(parsed) || parsed.length !== 1 || !isRecord(parsed[0])) {
+      throw new Error('provider_identity_missing');
+    }
+    const id = parsed[0]['id'];
+    if (typeof id !== 'string' || !UUID_PATTERN.test(id)) {
+      throw new Error('provider_identity_missing');
+    }
+    return id.toLowerCase();
   }
 
   private linearIdentity(parsed: Record<string, unknown>): {

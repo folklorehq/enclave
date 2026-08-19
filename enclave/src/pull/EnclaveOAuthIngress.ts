@@ -3,9 +3,11 @@ import { Hono, type Context } from 'hono';
 import type { ZodType } from 'zod';
 import {
   connectorOAuthMetadataUpdateSchema,
+  oauthDisconnectCleanupCommandSchema,
   sealedAuthorizationCodeSubmissionSchema,
   sealedGitHubInstallationSubmissionSchema,
   type ConnectorOAuthMetadataUpdate,
+  type OAuthDisconnectCleanupCommand,
   type SealedAuthorizationCodeSubmission,
   type SealedGitHubInstallationSubmission,
 } from '@folklore/contracts/enclave';
@@ -31,6 +33,7 @@ export interface EnclaveOAuthIngressHandlers {
     input: SealedGitHubInstallationSubmission,
     generation: string,
   ): Promise<ConnectorOAuthMetadataUpdate>;
+  cleanupDisconnect?(input: OAuthDisconnectCleanupCommand): Promise<void>;
 }
 
 export interface EnclaveOAuthIngressOptions {
@@ -58,6 +61,7 @@ export class EnclaveOAuthIngress {
     this.app.post('/source', (context) => this.handleSource(context));
     this.app.post('/member-identity', (context) => this.handleMemberIdentity(context));
     this.app.post('/github-installation', (context) => this.handleGitHubInstallation(context));
+    this.app.post('/disconnect-cleanup', (context) => this.handleDisconnectCleanup(context));
   }
 
   get fetch(): (request: Request) => Promise<Response> {
@@ -89,6 +93,30 @@ export class EnclaveOAuthIngress {
       connectorOAuthMetadataUpdateSchema,
       (input, generation) => this.handlers.redeemGitHubInstallation(input, generation),
     );
+  }
+
+  private async handleDisconnectCleanup(context: Context): Promise<Response> {
+    if (!this.authorized(context.req.header('authorization'))) {
+      return context.json({ error: 'unauthorized' }, 401);
+    }
+    if (!this.handlers.cleanupDisconnect) return context.json({ error: 'unavailable' }, 503);
+    const body = await this.readBody(context.req.raw);
+    const parsed = oauthDisconnectCleanupCommandSchema.safeParse(body);
+    if (!parsed.success) return context.json({ error: 'invalid_submission' }, 400);
+    const activeGeneration = await this.handlers.resolveGeneration({
+      orgId: parsed.data.orgId,
+      deploymentId: parsed.data.tenantDeploymentId,
+    });
+    if (!activeGeneration) {
+      return context.json({ error: 'attestation_unavailable' }, 409);
+    }
+    // Cleanup keeps the retired generation for credential AAD; the live lease above authorizes the enclave.
+    try {
+      await this.handlers.cleanupDisconnect(parsed.data);
+      return context.json({ completed: true }, 200);
+    } catch {
+      return context.json({ error: 'cleanup_failed' }, 503);
+    }
   }
 
   private async handle<

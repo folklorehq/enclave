@@ -28,7 +28,6 @@ export class HttpOAuthStateGuard implements OAuthStateGuard {
       stateBindingId: string;
     },
   ): Promise<boolean> {
-    if (input.deploymentId !== this.deploymentId) return false;
     const token = this.agentToken();
     if (!token) return false;
     try {
@@ -42,6 +41,7 @@ export class HttpOAuthStateGuard implements OAuthStateGuard {
           },
           body: JSON.stringify({
             orgId: input.orgId,
+            tenantDeploymentId: input.deploymentId,
             sourceKind: input.sourceKind,
             stateBindingId: input.stateBindingId,
           }),

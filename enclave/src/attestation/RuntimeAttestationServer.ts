@@ -9,6 +9,7 @@ export type RuntimeAttestationFetchHandler = (request: Request) => Response | Pr
 export interface RuntimeAttestationEvidenceCollector {
   collect(nonce: Uint8Array): Promise<EnclaveRuntimeEvidence>;
   sign?(payload: Uint8Array): { publicKey: Uint8Array; signature: Uint8Array };
+  sessionPublicKey?(): Uint8Array;
 }
 
 export interface RuntimeAttestationListener {

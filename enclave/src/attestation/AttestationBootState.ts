@@ -7,6 +7,8 @@ export const attestationBootStateErrors = {
   notVerified: 'attestation_boot_not_verified',
   kmsNotReady: 'attestation_boot_kms_not_ready',
   checkpointInvalid: 'attestation_boot_checkpoint_invalid',
+  checkpointSuperseded: 'attestation_boot_checkpoint_superseded',
+  checkpointConflict: 'attestation_boot_checkpoint_conflict',
 } as const;
 
 type AttestationBootStateError =
@@ -27,6 +29,13 @@ export type AttestationBootCheckpoint = Readonly<{
 export interface AttestationBootCheckpointStore {
   read(): Promise<AttestationBootCheckpoint | null>;
   write(checkpoint: AttestationBootCheckpoint): Promise<void>;
+}
+
+export function parseAttestationBootCheckpoint(value: unknown): AttestationBootCheckpoint {
+  if (!isAttestationBootCheckpoint(value)) {
+    throw new Error(attestationBootStateErrors.checkpointInvalid);
+  }
+  return Object.freeze({ ...value });
 }
 
 export interface AttestationBootManifestCoordinatorPort {
@@ -67,7 +76,10 @@ export class AttestationBootState {
     const prepared = this.ownResult(
       await this.coordinator.verifyAndLoad(signedInput, runtimeIdentity),
     );
-    await this.writeCheckpoint(this.checkpoint('manifest_verified', prepared.manifest));
+    const candidateCheckpoint = this.checkpoint('manifest_verified', prepared.manifest);
+    const persisted = await this.readCheckpoint();
+    this.assertCheckpointAcceptsManifest(persisted, candidateCheckpoint);
+    await this.writeCheckpoint(candidateCheckpoint);
     this.#prepared = prepared;
     this.#kmsUnsealed = false;
     return prepared;
@@ -99,13 +111,28 @@ export class AttestationBootState {
 
   async getReadiness(): Promise<AttestationBootReadinessSnapshot> {
     const checkpoint = await this.readCheckpoint();
+    const prepared = this.#prepared;
+    if (prepared !== undefined) {
+      this.assertCheckpointMatchesManifest(
+        checkpoint,
+        this.checkpoint('manifest_verified', prepared.manifest),
+      );
+    }
     return Object.freeze({
-      bootManifestVerified: this.#prepared !== undefined,
+      bootManifestVerified: prepared !== undefined,
       kmsUnsealed: this.#kmsUnsealed,
-      hasInProcessSecrets: this.#prepared !== undefined && this.#prepared.secrets.length > 0,
+      hasInProcessSecrets: prepared !== undefined && prepared.secrets.length > 0,
       inProcessGeneration: this.#inProcessGeneration,
       checkpoint,
     });
+  }
+
+  secretValue(id: string): string {
+    const prepared = this.#prepared;
+    if (prepared === undefined) throw this.failure(attestationBootStateErrors.notVerified);
+    const secret = prepared.secrets.find((candidate) => candidate.id === id);
+    if (!secret) throw this.failure(attestationBootStateErrors.notVerified);
+    return secret.value;
   }
 
   private async readCheckpoint(): Promise<AttestationBootCheckpoint | null> {
@@ -116,10 +143,11 @@ export class AttestationBootState {
       throw this.failure(attestationBootStateErrors.checkpointInvalid);
     }
     if (checkpoint === null) return null;
-    if (!this.isCheckpoint(checkpoint)) {
+    try {
+      return this.ownCheckpoint(parseAttestationBootCheckpoint(checkpoint));
+    } catch {
       throw this.failure(attestationBootStateErrors.checkpointInvalid);
     }
-    return this.ownCheckpoint(checkpoint);
   }
 
   private async writeCheckpoint(checkpoint: AttestationBootCheckpoint): Promise<void> {
@@ -127,6 +155,44 @@ export class AttestationBootState {
       await this.store.write(checkpoint);
     } catch {
       throw this.failure(attestationBootStateErrors.checkpointInvalid);
+    }
+  }
+
+  private assertCheckpointAcceptsManifest(
+    persisted: AttestationBootCheckpoint | null,
+    candidate: AttestationBootCheckpoint,
+  ): void {
+    if (persisted === null) return;
+    if (persisted.orgId !== candidate.orgId || persisted.deploymentId !== candidate.deploymentId) {
+      throw this.failure(attestationBootStateErrors.checkpointInvalid);
+    }
+    if (persisted.configurationGeneration > candidate.configurationGeneration) {
+      throw this.failure(attestationBootStateErrors.checkpointSuperseded);
+    }
+    if (
+      persisted.configurationGeneration === candidate.configurationGeneration &&
+      persisted.manifestHash !== candidate.manifestHash
+    ) {
+      throw this.failure(attestationBootStateErrors.checkpointConflict);
+    }
+  }
+
+  private assertCheckpointMatchesManifest(
+    persisted: AttestationBootCheckpoint | null,
+    candidate: AttestationBootCheckpoint,
+  ): void {
+    if (persisted === null) throw this.failure(attestationBootStateErrors.checkpointInvalid);
+    if (persisted.orgId !== candidate.orgId || persisted.deploymentId !== candidate.deploymentId) {
+      throw this.failure(attestationBootStateErrors.checkpointInvalid);
+    }
+    if (persisted.configurationGeneration > candidate.configurationGeneration) {
+      throw this.failure(attestationBootStateErrors.checkpointSuperseded);
+    }
+    if (persisted.configurationGeneration < candidate.configurationGeneration) {
+      throw this.failure(attestationBootStateErrors.checkpointSuperseded);
+    }
+    if (persisted.manifestHash !== candidate.manifestHash) {
+      throw this.failure(attestationBootStateErrors.checkpointConflict);
     }
   }
 
@@ -180,6 +246,16 @@ export class AttestationBootState {
           ? [reference.store, reference.id, reference.arn, reference.versionId]
           : [reference.store, reference.id, reference.path, reference.version],
       ),
+      manifest.inferenceAttestation ?? null,
+      manifest.inferenceTrustPolicy ?? null,
+      manifest.assignmentManifestPublicKeySpki ?? null,
+      manifest.enclaveOutputKey
+        ? [
+            manifest.enclaveOutputKey.keyId,
+            manifest.enclaveOutputKey.publicKeySpki,
+            manifest.enclaveOutputKey.privateKeySecretReferenceId,
+          ]
+        : null,
       // Two manifests differing only in the recovery key must not checkpoint as the same boot.
       manifest.recoveryPubkey ?? null,
     ];
@@ -196,10 +272,17 @@ export class AttestationBootState {
     const secretReferences: VerifiedBootManifest['secretReferences'] = Object.freeze(
       manifest.secretReferences.map((reference) => Object.freeze({ ...reference })),
     );
+    const inferenceAttestation = manifest.inferenceAttestation
+      ? Object.freeze({
+          ...manifest.inferenceAttestation,
+          modelAllowlist: Object.freeze([...manifest.inferenceAttestation.modelAllowlist]),
+        })
+      : undefined;
     return Object.freeze({
       ...manifest,
       resourcePrefixes: Object.freeze({ ...manifest.resourcePrefixes }),
       secretReferences,
+      ...(inferenceAttestation ? { inferenceAttestation } : {}),
     });
   }
 
@@ -213,25 +296,29 @@ export class AttestationBootState {
     return Object.freeze({ ...checkpoint });
   }
 
-  private isCheckpoint(value: unknown): value is AttestationBootCheckpoint {
-    if (!value || typeof value !== 'object') return false;
-    const checkpoint = value as Partial<Record<keyof AttestationBootCheckpoint, unknown>>;
-    return (
-      checkpoint.version === 1 &&
-      (checkpoint.phase === 'manifest_verified' || checkpoint.phase === 'kms_unsealed') &&
-      typeof checkpoint.orgId === 'string' &&
-      typeof checkpoint.deploymentId === 'string' &&
-      Number.isSafeInteger(checkpoint.configurationGeneration) &&
-      typeof checkpoint.manifestHash === 'string' &&
-      /^[0-9a-f]{64}$/.test(checkpoint.manifestHash) &&
-      typeof checkpoint.recordedAt === 'string' &&
-      Number.isFinite(Date.parse(checkpoint.recordedAt))
-    );
-  }
-
   private failure(code: AttestationBootStateError): Error {
     return new Error(code);
   }
+}
+
+function isAttestationBootCheckpoint(value: unknown): value is AttestationBootCheckpoint {
+  if (!value || typeof value !== 'object') return false;
+  const checkpoint = value as Partial<Record<keyof AttestationBootCheckpoint, unknown>>;
+  return (
+    checkpoint.version === 1 &&
+    (checkpoint.phase === 'manifest_verified' || checkpoint.phase === 'kms_unsealed') &&
+    typeof checkpoint.orgId === 'string' &&
+    checkpoint.orgId.length > 0 &&
+    typeof checkpoint.deploymentId === 'string' &&
+    checkpoint.deploymentId.length > 0 &&
+    typeof checkpoint.configurationGeneration === 'number' &&
+    Number.isSafeInteger(checkpoint.configurationGeneration) &&
+    checkpoint.configurationGeneration > 0 &&
+    typeof checkpoint.manifestHash === 'string' &&
+    /^[0-9a-f]{64}$/.test(checkpoint.manifestHash) &&
+    typeof checkpoint.recordedAt === 'string' &&
+    Number.isFinite(Date.parse(checkpoint.recordedAt))
+  );
 }
 
 const systemClock: AttestationBootClock = {

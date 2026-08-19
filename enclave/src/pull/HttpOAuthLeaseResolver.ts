@@ -16,12 +16,11 @@ export class HttpOAuthLeaseResolver implements OAuthLeaseResolver {
   }
 
   async resolve(input: { orgId: string; deploymentId: string }): Promise<string | null> {
-    if (input.deploymentId !== this.deploymentId) return null;
     const token = this.agentToken();
     if (!token) return null;
     try {
       const response = await this.fetchImpl(
-        `${this.controlPlaneUrl.replace(/\/$/, '')}/v1/deployments/${encodeURIComponent(input.deploymentId)}/oauth-lease`,
+        `${this.controlPlaneUrl.replace(/\/$/, '')}/v1/deployments/${encodeURIComponent(this.deploymentId)}/oauth-lease?orgId=${encodeURIComponent(input.orgId)}&tenantDeploymentId=${encodeURIComponent(input.deploymentId)}`,
         {
           headers: { authorization: `Bearer ${token}` },
           redirect: 'error',

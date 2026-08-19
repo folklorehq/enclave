@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node bundle.mjs",
     "check-types": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run"
@@ -13,7 +13,8 @@
     "@aws-sdk/client-dynamodb": "^3.1077.0",
     "@aws-sdk/client-lambda": "^3.1090.0",
     "@aws-sdk/client-sqs": "^3.0.0",
-    "@aws-sdk/client-ssm": "^3.0.0"
+    "@aws-sdk/client-ssm": "^3.0.0",
+    "@folklore/contracts": "workspace:*"
   },
   "devDependencies": {
     "@folklore/eslint-config": "workspace:*",
@@ -22,6 +23,7 @@
     "@types/node": "^20.0.0",
     "eslint": "^9.13.0",
     "typescript": "^5.6.0",
-    "vitest": "^2.1.4"
+    "vitest": "^2.1.4",
+    "esbuild": "^0.24.0"
   }
 }

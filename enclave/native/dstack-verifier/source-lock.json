@@ -1,0 +1,60 @@
+{
+  "schema": "folklore.dstack-source-lock.v1",
+  "repository": "https://github.com/Dstack-TEE/dstack",
+  "commit": "542d3d41f2051af88f2f0c76ca3c1212a64ac545",
+  "archive": {
+    "url": "https://github.com/Dstack-TEE/dstack/archive/542d3d41f2051af88f2f0c76ca3c1212a64ac545.tar.gz",
+    "sha256": "a91ede99838b4a03a050e58e9ef0cb75ed538362b51186ce51552733175d9c7c"
+  },
+  "license": {
+    "spdx": "Apache-2.0",
+    "licensePath": "LICENSE",
+    "noticePath": null,
+    "noticeResult": "No root NOTICE file exists at the pinned revision; REUSE.toml and LICENSES/Apache-2.0.txt carry the repository notice and license data."
+  },
+  "excludedDependencies": [
+    {
+      "name": "dstack-cloud",
+      "reason": "BUSL-licensed and outside the approved Gate A scope"
+    }
+  ],
+  "toolchain": {
+    "rust": "1.92",
+    "rustToolchain": "1.92.0",
+    "builder": "Debian Bookworm",
+    "target": "x86_64-unknown-linux-musl"
+  },
+  "dependencies": {
+    "dcap-qvl": {
+      "version": "0.5.2",
+      "requirement": "=0.5.2",
+      "source": "https://crates.io/crates/dcap-qvl/0.5.2"
+    },
+    "upstreamVerifier": {
+      "package": "dstack-verifier",
+      "path": "dstack/verifier",
+      "git": "https://github.com/Dstack-TEE/dstack",
+      "rev": "542d3d41f2051af88f2f0c76ca3c1212a64ac545",
+      "target": "cfg(target_os = \"linux\")",
+      "defaultFeatures": false,
+      "runtimePath": "Linux-only pinned request-mapping seam; every current build is fail-closed and only exercises the bounded protocol adapter until offline verification is available",
+      "upstreamCollateralBehavior": "The pinned upstream verifier API requires internally configured collateral clients and may fetch PCCS or OS images; Gate A does not invoke that online path. The native boundary accepts supplied collateral only for bounded decoding and digest binding, maps the exact upstream request fields for compile-time compatibility, and returns dstack_unavailable until an offline upstream API is available."
+    },
+    "raTls": {
+      "package": "ra-tls",
+      "path": "ra-tls",
+      "git": "https://github.com/Dstack-TEE/dstack",
+      "rev": "542d3d41f2051af88f2f0c76ca3c1212a64ac545",
+      "target": "cfg(target_os = \"linux\")"
+    }
+  },
+  "boundary": {
+    "inputMaximumBytes": 8388608,
+    "outputMaximumBytes": 65536,
+    "timeoutMilliseconds": 2000,
+    "providerCalls": false,
+    "customerContent": false,
+    "collateralFetch": false,
+    "imageFetch": false
+  }
+}

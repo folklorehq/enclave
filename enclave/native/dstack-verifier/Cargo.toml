@@ -1,0 +1,28 @@
+[package]
+name = "dstack-verifier"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "dstack_verifier"
+path = "src/protocol.rs"
+
+[[bin]]
+name = "dstack-verifier"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22.1"
+dcap-qvl = { version = "=0.5.2", default-features = false, features = ["std"] }
+parity-scale-codec = { version = "3.7.5", default-features = false, features = ["std"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sha2 = "0.10"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+dstack-upstream-verifier = { package = "dstack-verifier", git = "https://github.com/Dstack-TEE/dstack", rev = "542d3d41f2051af88f2f0c76ca3c1212a64ac545", default-features = false }
+ra-tls = { git = "https://github.com/Dstack-TEE/dstack", rev = "542d3d41f2051af88f2f0c76ca3c1212a64ac545" }
+tokio = { version = "1.46.1", default-features = false, features = ["rt", "time"] }

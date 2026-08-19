@@ -6,6 +6,7 @@ import {
   type BootManifestUserData,
   type EnclaveRuntimeEvidence,
   type EnclaveHealthRecord,
+  type RuntimeDatabaseCredentialReceipt,
   type RuntimeAttestationKeyBundle,
 } from '@folklore/contracts/enclave-attestation';
 import {
@@ -45,6 +46,7 @@ export interface RuntimeAttestationReadinessSnapshot {
   bootManifestVerified: boolean;
   kmsUnsealed: boolean;
   tenantApiReady: boolean;
+  runtimeDatabase?: RuntimeDatabaseCredentialReceipt;
 }
 
 export interface RuntimeAttestationKeyGenerator {
@@ -98,6 +100,11 @@ export class RuntimeAttestationService {
       publicKey: Uint8Array.from(this.#sessionKey.publicKey),
       signature: Uint8Array.from(sign(null, payload, this.#sessionKey.privateKey)),
     };
+  }
+
+  sessionPublicKey(): Uint8Array {
+    if (!this.#attested || !this.#sessionKey) throw this.failure('runtime_attestation_not_ready');
+    return Uint8Array.from(this.#sessionKey.publicKey);
   }
 
   private claimNonce(nonce: Uint8Array): { nonce: Uint8Array; digest: string } {
@@ -173,8 +180,8 @@ export class RuntimeAttestationService {
   }
 
   private async getIngestPublicKey(
-    userData: BootManifestUserData,
-    snapshot: RuntimeAttestationReadinessSnapshot,
+    _userData: BootManifestUserData,
+    _snapshot: RuntimeAttestationReadinessSnapshot,
   ): Promise<Uint8Array> {
     const configured = await this.readiness.getIngestPublicKey?.();
     if (!(configured instanceof Uint8Array) || configured.byteLength !== 32) {
@@ -214,7 +221,8 @@ export class RuntimeAttestationService {
       snapshot.tenantAssigned === true &&
       snapshot.bootManifestVerified === true &&
       snapshot.kmsUnsealed === true &&
-      snapshot.tenantApiReady === true
+      snapshot.tenantApiReady === true &&
+      (snapshot.manifest.runtimeDatabase === undefined || snapshot.runtimeDatabase !== undefined)
     );
   }
 
@@ -238,6 +246,7 @@ export class RuntimeAttestationService {
       bootManifestVerified: snapshot.bootManifestVerified,
       kmsUnsealed: snapshot.kmsUnsealed,
       tenantApiReady: snapshot.tenantApiReady,
+      ...(snapshot.runtimeDatabase ? { runtimeDatabase: snapshot.runtimeDatabase } : {}),
     };
   }
 

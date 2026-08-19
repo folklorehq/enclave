@@ -23,6 +23,7 @@ interface AuthorizationGrant {
   connectionId?: string;
   callbackUri: string;
   attestationGeneration: string;
+  activationGeneration?: string;
   stateBindingId: string;
   issuedAt: string;
   expiresAt: string;
@@ -128,6 +129,7 @@ export class EnclaveOAuthAuthorizationService {
       response.sourceUserId = identity.sourceUserId;
       response.externalTenantId = identity.externalTenantId ?? response.externalTenantId;
       const connectionId = this.requireConnectionId(grant);
+      const activationGeneration = this.requireActivationGeneration(grant);
       const encryptedAccessToken = await this.sealer.seal({
         orgId: grant.orgId,
         sourceKind: grant.sourceKind,
@@ -150,6 +152,7 @@ export class EnclaveOAuthAuthorizationService {
         orgId: grant.orgId,
         deploymentId: grant.deploymentId,
         connectionId,
+        activationGeneration,
         sourceKind: grant.sourceKind,
         attestationGeneration: grant.attestationGeneration,
         sourceUserId: response.sourceUserId ?? null,
@@ -289,6 +292,11 @@ export class EnclaveOAuthAuthorizationService {
     return grant.connectionId;
   }
 
+  private requireActivationGeneration(grant: AuthorizationGrant): string {
+    if (!grant.activationGeneration) throw new EnclaveOAuthRedemptionError();
+    return grant.activationGeneration;
+  }
+
   private grantAad(grant: AuthorizationGrant): string {
     return [
       'folklore.oauth-code-grant.v1',
@@ -297,6 +305,7 @@ export class EnclaveOAuthAuthorizationService {
       grant.sourceKind,
       grant.callbackUri,
       grant.attestationGeneration,
+      grant.activationGeneration ?? '',
       grant.stateBindingId,
       grant.issuedAt,
       grant.expiresAt,
