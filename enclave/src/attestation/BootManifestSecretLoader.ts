@@ -42,7 +42,10 @@ export interface AttestedSecretDecryptorPort {
 
 export type BootManifestSecretLoadInput = Pick<VerifiedBootManifest, 'secretReferences'> &
   Partial<
-    Pick<VerifiedBootManifest, 'enclaveOutputKey' | 'awsAccountId' | 'awsRegion' | 'kmsKeyArn'>
+    Pick<
+      VerifiedBootManifest,
+      'enclaveOutputKey' | 'enclaveOutputKeyKmsKeyArn' | 'awsAccountId' | 'awsRegion'
+    >
   >;
 
 export type LoadedBootManifestSecret = Readonly<{
@@ -150,7 +153,7 @@ export class BootManifestSecretLoader {
     if (
       !this.#recipientDecryptor ||
       !manifest.enclaveOutputKey ||
-      !manifest.kmsKeyArn ||
+      !manifest.enclaveOutputKeyKmsKeyArn ||
       !manifest.awsAccountId ||
       !manifest.awsRegion
     ) {
@@ -171,7 +174,7 @@ export class BootManifestSecretLoader {
     try {
       plaintext = await this.#recipientDecryptor.decryptForRecipient({
         ciphertext,
-        keyId: manifest.kmsKeyArn,
+        keyId: manifest.enclaveOutputKeyKmsKeyArn,
         encryptionContext: {
           PARAMETER_ARN: `arn:aws:ssm:${manifest.awsRegion}:${manifest.awsAccountId}:parameter${reference.path}`,
         },

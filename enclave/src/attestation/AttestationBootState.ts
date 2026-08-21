@@ -254,6 +254,7 @@ export class AttestationBootState {
             manifest.enclaveOutputKey.keyId,
             manifest.enclaveOutputKey.publicKeySpki,
             manifest.enclaveOutputKey.privateKeySecretReferenceId,
+            manifest.enclaveOutputKeyKmsKeyArn,
           ]
         : null,
       // Two manifests differing only in the recovery key must not checkpoint as the same boot.

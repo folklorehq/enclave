@@ -541,6 +541,7 @@ function encodeManifestFields(
         manifest.enclaveOutputKey.keyId,
         manifest.enclaveOutputKey.publicKeySpki,
         manifest.enclaveOutputKey.privateKeySecretReferenceId,
+        manifest.enclaveOutputKeyKmsKeyArn,
       ],
     ]);
   }
