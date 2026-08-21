@@ -98,11 +98,11 @@ export function buildTrustedSignerRecoveryRoot(input: {
 }
 
 const RECOVERY_ROOT_MEMBER_PEMS = [
-  '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAOdgHwqXdDQLdY5VVfMXELbcn4oUThc7eCs07HpZ2oFw=\n-----END PUBLIC KEY-----\n',
-  '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAX+IjgWE9V3gSunjRpWjUCnHxJmYy5U1TdR6nMFDZLKw=\n-----END PUBLIC KEY-----\n',
-  '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEApjuNuEkVJZcxIsxc5U/PWgWtip4jJoRiTvl8n0ZZjnI=\n-----END PUBLIC KEY-----\n',
-  '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAiOKoVQ+Lu5Jtt/t4j6jDB76/8o5AMZ9mjm2qFmaiHCE=\n-----END PUBLIC KEY-----\n',
-  '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA7XzPND2XECw3w0UKgarijVi72xWYfi0HlkYqay39N2Q=\n-----END PUBLIC KEY-----\n',
+  '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA5nyAa8SFLOnyyQ8+y16p5Dwg4plMTFoQYf8OtpOjTd0=\n-----END PUBLIC KEY-----\n',
+  '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAPXM8H5W8ilDG5mTW3L6HvGO52X49O5T8cAYFDAqgilQ=\n-----END PUBLIC KEY-----\n',
+  '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAHQv7cRFCv7MOnXX7dFgOJMBn9hBP9TDOz462pcc45XQ=\n-----END PUBLIC KEY-----\n',
+  '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAW2RKyGGSF7ngyYk+XnCPgthLXGFRz0K9dYRCTTroWow=\n-----END PUBLIC KEY-----\n',
+  '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAMASYV+nldc3Wlj0HzysjourFaHUR9/IEQdqo7MSCg0Q=\n-----END PUBLIC KEY-----\n',
 ] as const;
 
 export const TRUSTED_SIGNER_RECOVERY_ROOT_MEMBERS: readonly TrustedSignerRecoveryRootMemberV1[] =
