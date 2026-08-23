@@ -131,6 +131,10 @@ export {
   type SignedRecoveryRootUpdateV1,
 } from './signed-recovery-root-update.js';
 export {
+  canonicalSignerFloorBootstrapSubjectBytes,
+  canonicalSignerFloorCommitSubjectBytes,
+} from './signer-floor-canonical.js';
+export {
   RECOVERY_FREEZE_STATE,
   REQUIRED_RECOVERY_READER_SET,
   evaluateRecoveryRootInstallation,
