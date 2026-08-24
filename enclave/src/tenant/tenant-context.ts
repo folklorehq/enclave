@@ -1,3 +1,4 @@
+import type { VerifiedActivePolicySnapshotV1 } from '@folklore/inference';
 import type { KeyObject } from 'node:crypto';
 import type { KmsKeyringNode } from '@aws-crypto/client-node';
 import { EnclaveCrypto, type SealedContentKeyringConfig } from '../crypto/esdk.js';
@@ -38,6 +39,9 @@ export class TenantContext {
     readonly processedOutputsBucket = '',
     readonly deploymentId = '',
     readonly tenantDeploymentId?: string,
+    private readonly activePolicySnapshotProvider?: () =>
+      | VerifiedActivePolicySnapshotV1
+      | undefined,
   ) {
     this.keyringOrNull = keyring;
     this.hnswOrNull = hnsw;
@@ -77,6 +81,10 @@ export class TenantContext {
 
   decryptStorageCanary(ciphertext: Buffer, generation: number): Promise<Buffer> {
     return this.crypto.decryptStorageCanary(ciphertext, this.tenantId, generation);
+  }
+
+  activePolicySnapshot(): VerifiedActivePolicySnapshotV1 | undefined {
+    return this.activePolicySnapshotProvider?.();
   }
 
   codebaseSelectionScope(): {

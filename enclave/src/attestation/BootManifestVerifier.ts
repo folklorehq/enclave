@@ -1,6 +1,7 @@
 import { createHash, createPublicKey, KeyObject, verify } from 'node:crypto';
 import {
   parseBootManifestWire,
+  generationHighWaterRuntimeConfigV1Schema,
   type BootManifest,
   type BootManifestResourcePrefixes,
   type BootManifestKeyset,
@@ -164,6 +165,18 @@ export class BootManifestVerifier {
       case 'SignedBootManifestV3':
         return this.verifyV3(parsed, runtimeIdentity);
     }
+  }
+
+  verifyGenerationHighWaterRuntimeConfig(
+    manifest: VerifiedBootManifest,
+    required: boolean,
+  ): VerifiedBootManifest['generationHighWaterRuntimeConfig'] {
+    const config = manifest.generationHighWaterRuntimeConfig;
+    if (!config && required) throw new Error('generation_high_water_runtime_config_missing');
+    if (!config) return undefined;
+    const parsed = generationHighWaterRuntimeConfigV1Schema.safeParse(config);
+    if (!parsed.success) throw new Error('generation_high_water_runtime_config_invalid');
+    return Object.freeze(parsed.data);
   }
 
   private verifyV2(
@@ -414,6 +427,16 @@ export class BootManifestVerifier {
           modelAllowlist: Object.freeze([...manifest.inferenceAttestation.modelAllowlist]),
         })
       : undefined;
+    const verifiedReleaseIdentity = manifest.verifiedReleaseIdentity
+      ? Object.freeze({ ...manifest.verifiedReleaseIdentity })
+      : undefined;
+    const activePolicyBootTrust = manifest.activePolicyBootTrust
+      ? Object.freeze({
+          ...manifest.activePolicyBootTrust,
+          authority: Object.freeze({ ...manifest.activePolicyBootTrust.authority }),
+          carrierSigner: Object.freeze({ ...manifest.activePolicyBootTrust.carrierSigner }),
+        })
+      : undefined;
     const activePolicyCarrier = manifest.activePolicyCarrier
       ? Object.freeze({
           ...manifest.activePolicyCarrier,
@@ -440,6 +463,8 @@ export class BootManifestVerifier {
       ...(controlPlaneIdentity ? { controlPlaneIdentity } : {}),
       ...(inferenceTrustPolicy ? { inferenceTrustPolicy } : {}),
       ...(inferenceAttestation ? { inferenceAttestation } : {}),
+      ...(verifiedReleaseIdentity ? { verifiedReleaseIdentity } : {}),
+      ...(activePolicyBootTrust ? { activePolicyBootTrust } : {}),
       ...(activePolicyCarrier ? { activePolicyCarrier } : {}),
     });
   }

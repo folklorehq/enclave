@@ -1,4 +1,10 @@
 export {
+  ACTIVE_POLICY_AUTHORIZATION_ENVELOPE_SIGNATURE_DOMAIN,
+  ACTIVE_POLICY_AUTHORITY_SIGNATURE_DOMAIN,
+  activePolicyAuthorizationEnvelopeSignatureInputV1,
+  activePolicyAuthoritySignatureInputV1,
+} from './active-policy-authority.js';
+export {
   deriveAttestationUserData,
   encodeAttestationUserData,
   encodeBootManifest,
@@ -70,6 +76,11 @@ export {
   type VerifyAssignmentManifestWireOptions,
 } from './signed-assignment-manifest.js';
 export {
+  digestAssignmentManifestSubjectV4,
+  encodeAssignmentManifestSubjectV4,
+  verifySignedAssignmentManifestV4,
+} from './signed-assignment-manifest-v4.js';
+export {
   GATE_A_WRAPPER_CANONICAL_DOMAIN,
   digestGateAWrapperV1,
   digestGateAWrapperWithoutArtifactDigestV1,
@@ -135,6 +146,10 @@ export {
   canonicalSignerFloorCommitSubjectBytes,
 } from './signer-floor-canonical.js';
 export {
+  verifySignerFloorCommitV2,
+  type SignerFloorCommitVerificationInputV2,
+} from './signer-floor-authority.js';
+export {
   RECOVERY_FREEZE_STATE,
   REQUIRED_RECOVERY_READER_SET,
   evaluateRecoveryRootInstallation,
@@ -186,3 +201,27 @@ export {
   encodeSignedActivePolicyCarrierV1,
   signedActivePolicyCarrierArrayV1,
 } from './active-policy-carrier-canonical.js';
+export * from './tenant-policy-admission.js';
+export {
+  SigstoreEnclaveProvenanceVerifier,
+  parseVerifiedEnclaveRelease,
+  releaseVerificationMatchesManifest,
+  verifiedEnclaveReleaseIdentity,
+} from './verified-enclave-release.js';
+export type {
+  EnclaveProvenanceVerifier,
+  VerifiedProvenanceSubject,
+} from './verified-enclave-release.js';
+export type { VerifiedEnclaveRelease, VerifiedEnclaveReleaseIdentityV1 } from '@folklore/contracts';
+export {
+  GENERATION_HIGH_WATER_SIGNING_DOMAIN,
+  decodeGenerationHighWaterLogEntryV1,
+  encodeGenerationHighWaterLogEntryV1,
+  generationHighWaterCheckpointDigestV1,
+  generationHighWaterEntryDigestV1,
+  generationHighWaterSignatureInputV1,
+  generationHighWaterSigningMaterial,
+  GenerationHighWaterCanonicalError,
+} from './generation-high-water-canonical.js';
+export type { GenerationHighWaterSigningMaterial } from './generation-high-water-canonical.js';
+export { decodeGenerationHighWaterCandidateV1 } from './generation-high-water-canonical.js';

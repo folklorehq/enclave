@@ -104,6 +104,37 @@ function encodeInferenceAttestation(
   ];
 }
 
+function encodeActivePolicyBootTrust(
+  trust: NonNullable<BootManifest['activePolicyBootTrust']>,
+): unknown[] {
+  return [
+    trust.schema,
+    trust.releaseId,
+    trust.pcr0,
+    trust.bootRootDigest,
+    [
+      trust.authority.keyArn,
+      trust.authority.keyId,
+      trust.authority.publicKeySpkiSha256,
+      trust.authority.epoch,
+    ],
+    [
+      trust.carrierSigner.schema,
+      trust.carrierSigner.version,
+      trust.carrierSigner.keyArn,
+      trust.carrierSigner.keyId,
+      trust.carrierSigner.publicKeySpkiSha256,
+      trust.carrierSigner.epoch,
+    ],
+  ];
+}
+
+function encodeVerifiedReleaseIdentity(
+  identity: NonNullable<BootManifest['verifiedReleaseIdentity']>,
+): unknown[] {
+  return [identity.releaseId, identity.pcr0, identity.bootRootDigest];
+}
+
 function encodeInferenceTrustPolicy(
   policy: InferenceTrustPolicyV1 | InferenceTrustPolicyV2,
 ): unknown[] {
@@ -349,7 +380,7 @@ function encodeActiveInferenceTrustPolicyV2Fields(
 export function encodeActivePolicyAuthorizationEnvelopeV1(
   input: Omit<ActivePolicyAuthorizationEnvelopeV1, 'signature'>,
 ): Uint8Array {
-  return encode([
+  const fields: unknown[] = [
     ACTIVE_INFERENCE_TRUST_POLICY_V2_CANONICAL_DOMAIN,
     input.schema,
     input.orgId,
@@ -364,7 +395,30 @@ export function encodeActivePolicyAuthorizationEnvelopeV1(
     input.signerKeyId,
     input.signatureAlgorithm,
     input.policySignature,
-  ]);
+  ];
+
+  if (
+    input.authorityKmsKeyArn === undefined &&
+    input.authorityPublicKeySpkiSha256 === undefined &&
+    input.authorityEpoch === undefined
+  ) {
+    return encode(fields);
+  }
+  if (
+    input.authorityKmsKeyArn === undefined ||
+    input.authorityPublicKeySpkiSha256 === undefined ||
+    input.authorityEpoch === undefined
+  ) {
+    throw new Error('active_policy_authority_identity_incomplete');
+  }
+  fields.splice(
+    10,
+    0,
+    input.authorityKmsKeyArn,
+    input.authorityPublicKeySpkiSha256,
+    input.authorityEpoch,
+  );
+  return encode(fields);
 }
 
 export function digestActivePolicyAuthorizationEnvelopeV1(
@@ -529,6 +583,18 @@ function encodeManifestFields(
           manifest.activePolicyReference.keysetHighWater.digest,
         ],
       ],
+    ]);
+  }
+  if (manifest.activePolicyBootTrust !== undefined) {
+    fields.push([
+      'active-policy-boot-trust',
+      encodeActivePolicyBootTrust(manifest.activePolicyBootTrust),
+    ]);
+  }
+  if (manifest.verifiedReleaseIdentity !== undefined) {
+    fields.push([
+      'verified-release-identity',
+      encodeVerifiedReleaseIdentity(manifest.verifiedReleaseIdentity),
     ]);
   }
   if (manifest.inferenceTrustPolicy !== undefined) {

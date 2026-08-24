@@ -26,6 +26,13 @@ import {
   type InferenceModel,
 } from '../inference/CachedInference.js';
 import { S3LlmCache } from '../inference/S3LlmCache.js';
+import {
+  TenantPolicyBoundInference,
+  type TenantPolicyFreshnessPort,
+  type TenantPolicyRuntimeEvidencePort,
+  type TenantPolicyVerifiedBindingForwarder,
+  type TenantPolicySnapshotProvider,
+} from '../inference/TenantPolicyBoundInference.js';
 import { TenantContext } from './tenant-context.js';
 
 export interface TenantIdentity {
@@ -68,6 +75,15 @@ export interface TenantContextFactoryDeps {
   processedOutputsBucket: string;
   sealMasterKey?: SealMasterKeyFn;
   unsealMasterKey?: UnsealMasterKeyFn;
+  activePolicySnapshotFor?: (tenantId: string) => ReturnType<TenantContext['activePolicySnapshot']>;
+  enforceTenantPolicy?: boolean;
+  activePolicyFreshnessFor?: (tenantId: string) => TenantPolicyFreshnessPort | undefined;
+  activePolicyRuntimeEvidenceFor?: (
+    tenantId: string,
+  ) => TenantPolicyRuntimeEvidencePort | undefined;
+  activePolicyBindingForwarderFor?: (
+    tenantId: string,
+  ) => TenantPolicyVerifiedBindingForwarder | undefined;
 }
 
 const MASTER_KEY_BYTES = 32;
@@ -94,15 +110,18 @@ export class TenantContextFactory {
     const masterKey = await this.bootMasterKey(identity);
     try {
       const hnsw = await HnswStore.load(this.deps.s3, keyring, processedBucket, identity.tenantId);
+      const context: { current?: TenantContext } = {};
       const pipeline = new Pipeline(
         hnsw,
         this.deps.s3,
         keyring,
         processedBucket,
         identity.tenantId,
-        this.buildInference(keyring, identity.tenantId, processedBucket),
+        this.buildInference(keyring, identity.tenantId, processedBucket, () =>
+          context.current?.activePolicySnapshot(),
+        ),
       );
-      return new TenantContext(
+      const tenantContext = new TenantContext(
         identity.tenantId,
         identity.kmsKeyId,
         keyring,
@@ -115,7 +134,10 @@ export class TenantContextFactory {
         processedBucket,
         identity.deploymentId ?? '',
         identity.tenantDeploymentId,
+        () => this.deps.activePolicySnapshotFor?.(identity.tenantId),
       );
+      context.current = tenantContext;
+      return tenantContext;
     } catch (error) {
       masterKey.fill(0);
       throw error;
@@ -126,6 +148,7 @@ export class TenantContextFactory {
     keyring: KmsKeyringNode,
     tenantId: string,
     processedBucket: string,
+    snapshotProvider: TenantPolicySnapshotProvider,
   ): InferenceModel {
     const cache = new S3LlmCache({
       s3: this.deps.s3,
@@ -133,11 +156,20 @@ export class TenantContextFactory {
       bucket: processedBucket,
       orgId: tenantId,
     });
-    return new CachedInference(phalaInference, cache, {
+    const cached = new CachedInference(phalaInference, cache, {
       embedModel: inferenceModel('embed'),
       generateModel: inferenceModel('generate'),
       critiqueModel: inferenceModel('critique'),
       promptVersion: LLM_CACHE_PROMPT_VERSION,
+    });
+    if (!this.deps.enforceTenantPolicy) return cached;
+    return new TenantPolicyBoundInference(tenantId, snapshotProvider, cached, {
+      freshnessProvider: () => this.deps.activePolicyFreshnessFor?.(tenantId),
+      requireFreshness: true,
+      runtimeEvidence: this.deps.activePolicyRuntimeEvidenceFor?.(tenantId),
+      requireRuntimeEvidence: true,
+      verifiedBindingForwarder: this.deps.activePolicyBindingForwarderFor?.(tenantId),
+      requireBindingForwarding: true,
     });
   }
 

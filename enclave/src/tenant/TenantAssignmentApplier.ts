@@ -2,20 +2,32 @@ import type { Logger } from '@folklore/core';
 import type {
   AssignmentApplyResult,
   NormalizedAssignmentManifestV1,
+  SignedActivePolicyCarrierV1,
   TenantAssignment,
   VersionedTenantAssignment,
 } from '@folklore/contracts';
 import type { TenantContext } from './tenant-context.js';
 import type { TenantIdentity } from './TenantContextFactory.js';
-import type { TenantRegistry } from './tenant-registry.js';
+import { TenantRegistry } from './tenant-registry.js';
 import type { QueueAssignment } from './QueueSetDrainer.js';
 import { toInitialStorageKeyVersion } from './tenant-assignments.js';
+import {
+  TenantGenerationRegistry,
+  type TenantGenerationEntry,
+} from './TenantGenerationRegistry.js';
+import {
+  TenantPolicySnapshotRegistry,
+  type TenantPolicySnapshotLike,
+} from './TenantPolicySnapshotRegistry.js';
 import {
   isVerifiedAssignmentManifest,
   type VerifiedAssignmentManifest,
 } from './VerifiedAssignmentManifest.js';
 
 export type BuildTenantContext = (identity: TenantIdentity) => Promise<TenantContext>;
+export type TenantPolicyAssignment = VersionedTenantAssignment & {
+  readonly activePolicyCarrier?: SignedActivePolicyCarrierV1;
+};
 const TENANT_TEARDOWN_TIMEOUT_MS = 10_000;
 
 // Called for every replaced or dropped context before it is zeroized so co-resident subsystems can
@@ -29,6 +41,18 @@ export type OnTenantQuiescenceFailure = (
   phase: 'generation' | 'teardown',
 ) => void;
 
+export interface TenantPolicyAssignmentApplierOptions<TSnapshot extends TenantPolicySnapshotLike> {
+  readonly registry: TenantRegistry;
+  readonly generationRegistry: TenantGenerationRegistry<TenantContext, TSnapshot>;
+  readonly snapshots: TenantPolicySnapshotRegistry<TSnapshot, TenantContext>;
+  readonly build: BuildTenantContext;
+  readonly verifyPolicy: (assignment: TenantPolicyAssignment) => Promise<TSnapshot>;
+  readonly logger: Logger;
+  readonly onTornDown?: OnTenantTornDown;
+  readonly onActivated?: OnTenantActivated;
+  readonly onGenerationChanged?: OnTenantGenerationChanged;
+}
+
 interface TeardownHookResult {
   completed: boolean;
   settled: Promise<void>;
@@ -39,26 +63,222 @@ interface TeardownHookResult {
 // one (§2.2 point 5). Idempotent — re-applying the same set is a no-op. Also the source of truth for
 // the drain set, so a queue is added/removed in lock-step with its tenant's context.
 export class TenantAssignmentApplier {
-  private readonly assigned = new Map<string, VersionedTenantAssignment>();
+  private readonly assigned = new Map<string, TenantPolicyAssignment>();
   private applying = false;
+  private policyApplyTail: Promise<void> = Promise.resolve();
   private lastAcceptedGeneration = 0;
+  private lastAcceptedDigest: string | undefined;
+  private activePolicyGeneration: number | undefined;
+  private readonly registry: TenantRegistry;
+  private readonly build: BuildTenantContext;
+  private readonly logger: Logger;
+  private readonly onTornDown: OnTenantTornDown | undefined;
+  private readonly teardownTimeoutMs: number;
+  private readonly defaultDeploymentId: string;
+  private readonly onActivated: OnTenantActivated | undefined;
+  private readonly onGenerationChanged: OnTenantGenerationChanged | undefined;
+  private readonly onGenerationCommitted: OnTenantGenerationCommitted | undefined;
+  private readonly onQuiescenceFailure: OnTenantQuiescenceFailure | undefined;
+  private readonly policyMode:
+    | TenantPolicyAssignmentApplierOptions<TenantPolicySnapshotLike>
+    | undefined;
 
   constructor(
-    private readonly registry: TenantRegistry,
-    private readonly build: BuildTenantContext,
-    private readonly logger: Logger,
-    private readonly onTornDown?: OnTenantTornDown,
-    private readonly teardownTimeoutMs: number = TENANT_TEARDOWN_TIMEOUT_MS,
-    private readonly defaultDeploymentId = '',
-    private readonly onActivated?: OnTenantActivated,
-    private readonly onGenerationChanged?: OnTenantGenerationChanged,
-    private readonly onGenerationCommitted?: OnTenantGenerationCommitted,
-    private readonly onQuiescenceFailure?: OnTenantQuiescenceFailure,
-  ) {}
+    registryOrOptions:
+      | TenantRegistry
+      | TenantPolicyAssignmentApplierOptions<TenantPolicySnapshotLike>,
+    build?: BuildTenantContext,
+    logger?: Logger,
+    onTornDown?: OnTenantTornDown,
+    teardownTimeoutMs: number = TENANT_TEARDOWN_TIMEOUT_MS,
+    defaultDeploymentId = '',
+    onActivated?: OnTenantActivated,
+    onGenerationChanged?: OnTenantGenerationChanged,
+    onGenerationCommitted?: OnTenantGenerationCommitted,
+    onQuiescenceFailure?: OnTenantQuiescenceFailure,
+  ) {
+    if (registryOrOptions instanceof TenantRegistry) {
+      if (!build || !logger) throw new Error('tenant_assignment_applier_dependencies_required');
+      this.registry = registryOrOptions;
+      this.build = build;
+      this.logger = logger;
+      this.onTornDown = onTornDown;
+      this.teardownTimeoutMs = teardownTimeoutMs;
+      this.defaultDeploymentId = defaultDeploymentId;
+      this.onActivated = onActivated;
+      this.onGenerationChanged = onGenerationChanged;
+      this.onGenerationCommitted = onGenerationCommitted;
+      this.onQuiescenceFailure = onQuiescenceFailure;
+      return;
+    }
+    this.registry = registryOrOptions.registry;
+    this.build = registryOrOptions.build;
+    this.logger = registryOrOptions.logger;
+    this.onTornDown = registryOrOptions.onTornDown;
+    this.teardownTimeoutMs = TENANT_TEARDOWN_TIMEOUT_MS;
+    this.defaultDeploymentId = '';
+    this.onActivated = registryOrOptions.onActivated;
+    this.onGenerationChanged = registryOrOptions.onGenerationChanged;
+    this.onGenerationCommitted = undefined;
+    this.onQuiescenceFailure = undefined;
+    this.policyMode = registryOrOptions;
+  }
+
+  async applyAssignments(
+    assignments: readonly TenantPolicyAssignment[],
+    generation: number,
+    digest?: string,
+  ): Promise<{
+    readonly applied: boolean;
+    readonly generation: number;
+    readonly state: ReturnType<
+      TenantGenerationRegistry<TenantContext, TenantPolicySnapshotLike>['read']
+    >;
+  }> {
+    const result = this.policyApplyTail.then(() =>
+      this.applyPolicyAssignments(assignments, generation, digest),
+    );
+    this.policyApplyTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  private async applyPolicyAssignments(
+    assignments: readonly TenantPolicyAssignment[],
+    generation: number,
+    digest?: string,
+  ): Promise<{
+    readonly applied: boolean;
+    readonly generation: number;
+    readonly state: ReturnType<
+      TenantGenerationRegistry<TenantContext, TenantPolicySnapshotLike>['read']
+    >;
+  }> {
+    if (!this.policyMode) throw new Error('tenant_policy_applier_mode_unavailable');
+    const expectedGeneration = this.policyMode.generationRegistry.generation();
+    if (generation === expectedGeneration) {
+      if (
+        digest !== undefined &&
+        digest === this.policyMode.generationRegistry.read().digest &&
+        this.matchesAssignments(assignments)
+      ) {
+        return {
+          applied: false,
+          generation,
+          state: this.policyMode.generationRegistry.read(),
+        };
+      }
+      throw new Error('assignment_manifest_generation_conflict');
+    }
+    if (generation !== expectedGeneration + 1) {
+      throw new Error('assignment_manifest_generation_mismatch');
+    }
+    const previous = this.policyMode.generationRegistry.read();
+    const staged = new Map<
+      string,
+      TenantGenerationEntry<TenantContext, TenantPolicySnapshotLike>
+    >();
+    const built = new Set<TenantContext>();
+    const quiesced = new Set<string>();
+    let published = false;
+    try {
+      const verifiedSnapshots = new Map<string, TenantPolicySnapshotLike>();
+      for (const assignment of assignments) {
+        verifiedSnapshots.set(assignment.tenantId, await this.policyMode.verifyPolicy(assignment));
+      }
+      const stagedSnapshots = this.policyMode.snapshots.stage(verifiedSnapshots);
+      for (const assignment of assignments) {
+        const context = await this.build({
+          tenantId: assignment.tenantId,
+          deploymentId: assignment.deploymentId,
+          ...(assignment.tenantDeploymentId
+            ? { tenantDeploymentId: assignment.tenantDeploymentId }
+            : {}),
+          kmsKeyId: assignment.kmsKeyId,
+          activeStorageKeyVersion: assignment.activeStorageKeyVersion,
+          storageKeyHistory: assignment.storageKeyHistory,
+          recoveryPubkey: assignment.recoveryPubkey,
+          sealedBlobBucket: assignment.sealedBlobBucket,
+          rawPayloadsBucket: assignment.rawPayloadsBucket,
+          processedBucket: assignment.processedBucket,
+        });
+        built.add(context);
+        const snapshot = stagedSnapshots.get(assignment.tenantId);
+        if (!snapshot) throw new Error('tenant_policy_snapshot_missing');
+        staged.set(assignment.tenantId, { context, snapshot });
+      }
+      const nextState = new Map(
+        [...staged].map(([tenantId, entry]) => [
+          tenantId,
+          { context: entry.context, snapshot: entry.snapshot },
+        ]),
+      );
+      for (const tenantId of previous.entries.keys()) {
+        await this.policyMode.onGenerationChanged?.(tenantId);
+        quiesced.add(tenantId);
+      }
+      this.policyMode.generationRegistry.replaceGeneration(
+        previous.generation,
+        nextState,
+        generation,
+        digest,
+      );
+      published = true;
+      this.activePolicyGeneration = undefined;
+      this.assigned.clear();
+      for (const assignment of assignments) this.assigned.set(assignment.tenantId, assignment);
+      this.lastAcceptedGeneration = generation;
+      this.lastAcceptedDigest = digest;
+      const reread = this.policyMode.generationRegistry.read();
+      if (reread.generation !== generation || reread.entries.size !== assignments.length) {
+        throw new Error('tenant_generation_post_read_mismatch');
+      }
+      for (const assignment of assignments) {
+        const entry = reread.entries.get(assignment.tenantId);
+        if (
+          !entry ||
+          entry.context !== nextState.get(assignment.tenantId)?.context ||
+          entry.snapshot !== nextState.get(assignment.tenantId)?.snapshot
+        ) {
+          throw new Error('tenant_generation_post_read_mismatch');
+        }
+      }
+      for (const [tenantId, oldEntry] of previous.entries) {
+        if (
+          !reread.entries.has(tenantId) ||
+          reread.entries.get(tenantId)?.context !== oldEntry.context
+        ) {
+          try {
+            await this.onTornDown?.(tenantId);
+          } finally {
+            oldEntry.context.zeroize();
+          }
+        }
+      }
+      return { applied: true, generation, state: reread };
+    } catch (error) {
+      if (!published) {
+        for (const context of built) context.zeroize();
+        for (const tenantId of quiesced) this.onActivated?.(tenantId);
+      } else {
+        for (const tenantId of this.policyMode.generationRegistry.read().entries.keys()) {
+          this.onQuiescenceFailure?.(tenantId, 'teardown');
+        }
+      }
+      throw error;
+    }
+  }
 
   queueAssignments(): QueueAssignment[] {
+    if (this.policyMode && this.activePolicyGeneration !== this.lastAcceptedGeneration) return [];
     return [...this.assigned.values()]
-      .filter((a) => this.registry.has(a.tenantId))
+      .filter((a) =>
+        this.policyMode
+          ? this.policyMode.generationRegistry.get(a.tenantId) !== undefined
+          : this.registry.has(a.tenantId),
+      )
       .map((a) => ({
         tenantId: a.tenantId,
         queueUrl: a.queueUrl,
@@ -74,9 +294,21 @@ export class TenantAssignmentApplier {
     return this.lastAcceptedGeneration;
   }
 
+  activateGeneration(generation: number): void {
+    if (!this.policyMode || generation !== this.lastAcceptedGeneration) {
+      throw new Error('assignment_generation_activation_mismatch');
+    }
+    if (this.activePolicyGeneration === generation) return;
+    this.activePolicyGeneration = generation;
+    for (const tenantId of this.policyMode.generationRegistry.read().entries.keys()) {
+      this.onActivated?.(tenantId);
+    }
+  }
+
   matchesCurrentManifest(manifest: NormalizedAssignmentManifestV1): boolean {
     return (
       manifest.generation === this.lastAcceptedGeneration &&
+      manifest.digest === this.lastAcceptedDigest &&
       this.matchesAssignments(manifest.assignments)
     );
   }
@@ -94,6 +326,7 @@ export class TenantAssignmentApplier {
     if (!this.matchesAssignments(manifest.assignments)) {
       throw new Error('assignment_manifest_apply_incomplete');
     }
+    this.lastAcceptedDigest = manifest.digest;
     return { applied: true, generation: manifest.generation };
   }
 

@@ -2,6 +2,7 @@ import {
   assignmentManifestDigestPayload,
   assignmentManifestSignaturePayload,
   assignmentManifestV2Payload,
+  assignmentManifestV2Schema,
   canonicalJson,
   legacyAssignmentReadFloorV1Schema,
   parseAssignmentManifestWire,
@@ -17,6 +18,7 @@ import {
 import { createHash, createPublicKey, verify } from 'node:crypto';
 import { buildSignerPurposeSignatureMessage } from '@folklore/contracts';
 import { encodeAssignmentManifestSubjectV3, digestCanonicalCbor } from './canonical-cbor.js';
+import { verifySignedAssignmentManifestV4 } from './signed-assignment-manifest-v4.js';
 
 export type SignedAssignmentManifestVerificationFailure =
   | 'assignment_manifest_invalid'
@@ -118,7 +120,7 @@ export interface VerifyAssignmentManifestWireOptions {
   keyRecord?: LegacyAssignmentKeyRecordV1 | null;
 }
 
-/** Discriminated dual-read assignment verifier: the three non-colliding wires, floor-bounded for legacy/current reads (plan migration rule 2/4). */
+/** Verifies the signed assignment wires and preserves their normalized discriminants. */
 export function verifyAssignmentManifestWire(
   raw: unknown,
   expectedPoolId: string,
@@ -134,8 +136,16 @@ export function verifyAssignmentManifestWire(
     keyRecord: options.keyRecord,
   });
   switch (parsed.wire) {
+    case 'SignedAssignmentManifestV4':
+      verifySignedAssignmentManifestV4(
+        parsed.raw,
+        expectedPoolId,
+        publicKeySpki,
+        options.lastGeneration + 1,
+      );
+      return parsed;
     case 'SignedAssignmentManifestV3': {
-      const envelope = parsed.raw as SignedAssignmentManifestV3;
+      const envelope = parsed.raw;
       verifySignedAssignmentManifestV3(
         envelope,
         expectedPoolId,
@@ -145,12 +155,12 @@ export function verifyAssignmentManifestWire(
       return parsed;
     }
     case 'AssignmentManifestV2': {
-      const signed = parsed.raw as AssignmentManifestV2;
+      const signed = assignmentManifestV2Schema.parse(parsed.raw);
       verifyAssignmentManifestV2Signature(signed, publicKeySpki);
       return parsed;
     }
     case 'LegacySignedAssignmentManifestV1': {
-      const signed = parsed.raw as LegacySignedAssignmentManifestV1;
+      const signed = parsed.raw;
       verifySignedAssignmentManifest(
         signed,
         expectedPoolId,

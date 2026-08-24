@@ -1,4 +1,5 @@
 import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { KMSClient } from '@aws-sdk/client-kms';
 import { SQSClient } from '@aws-sdk/client-sqs';
 import { SSMClient, PutParameterCommand, GetParameterCommand } from '@aws-sdk/client-ssm';
@@ -6,11 +7,18 @@ import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-sec
 import { awsClientTransport } from './aws/aws-transport.js';
 import { TenantContextFactory } from './tenant/TenantContextFactory.js';
 import { TenantRegistry } from './tenant/tenant-registry.js';
+import { TenantGenerationRegistry } from './tenant/TenantGenerationRegistry.js';
+import {
+  TenantPolicySnapshotRegistry,
+  type TenantPolicySnapshotLike,
+} from './tenant/TenantPolicySnapshotRegistry.js';
+import type { TenantContext } from './tenant/tenant-context.js';
 import {
   resolveBootAssignments,
   parseAssignmentManifestWire,
 } from './tenant/tenant-assignments.js';
 import { TenantAssignmentApplier } from './tenant/TenantAssignmentApplier.js';
+import type { TenantPolicyAssignment } from './tenant/TenantAssignmentApplier.js';
 import { TenantRequestQuiescer } from './tenant/TenantRequestQuiescer.js';
 import { TenantRequestQuiescenceMonitor } from './tenant/TenantRequestQuiescenceMonitor.js';
 import { TenantMessageRouter } from './tenant/tenant-message-router.js';
@@ -51,6 +59,14 @@ import {
   type InferenceModel,
 } from './inference/CachedInference.js';
 import { S3LlmCache } from './inference/S3LlmCache.js';
+import {
+  TenantPolicyBoundInference,
+  type TenantPolicyFreshnessPort,
+  type TenantPolicyRuntimeEvidencePort,
+  type TenantPolicyVerifiedBindingForwarder,
+} from './inference/TenantPolicyBoundInference.js';
+import { TrustedTimeAuthority } from './inference/TrustedTimeAuthority.js';
+import { NsmTrustedTimeSource } from './inference/NsmTrustedTimeSource.js';
 import { installGlobalEgressDispatcher } from './egress/proxy.js';
 import {
   createContainer,
@@ -72,6 +88,7 @@ import {
 } from '@folklore/control-plane';
 import {
   assignmentAckPayload,
+  assignmentPolicyVerificationDigest,
   assignmentAckSchema,
   assignmentStorageProofPayload,
   poolAssignmentAckKey,
@@ -95,7 +112,9 @@ import {
 } from './attestation/VerifiedBootPolicyStateLoader.js';
 import {
   BootStateActivePolicyReferenceVerifier,
-  createEnclaveActivePolicyKeyVerifier,
+  buildV4ExpectedGenerationContext,
+  type BootBoundGenerationContext,
+  loadEnclaveActivePolicyTrust,
 } from './inference/BootStateActivePolicyReferenceVerifier.js';
 import {
   DurableGenerationHighWaterClient,
@@ -103,10 +122,15 @@ import {
   type DurableGenerationHighWaterVerifierPort,
 } from './inference/DurableGenerationHighWaterClient.js';
 import { DurableGenerationHighWaterClientAdapter } from './inference/DurableGenerationHighWaterClientAdapter.js';
+import { AwsDurableGenerationHighWaterTransport } from './inference/AwsDurableGenerationHighWaterTransport.js';
+import { BootBoundGenerationHighWaterVerifier } from './inference/BootBoundGenerationHighWaterVerifier.js';
 import {
   ActivePolicyCarrierVerifier,
+  type DurableGenerationHighWaterClientPort,
+  type TrustedTimeAuthorityPort,
   VerifiedActivePolicySnapshotVerifier,
   type VerifiedActivePolicySnapshotV1,
+  ActivePolicyModelProvenanceSource,
 } from '@folklore/inference';
 import { createOAuthRuntime, createPinnedControlPlaneFetch } from './pull/oauth-composition.js';
 import { evictMintedTokensForOrg, resetMintedTokenCache } from './pull/pull-runner.js';
@@ -186,6 +210,7 @@ const s3 = new S3Client({
   ...awsClientTransport(),
   forcePathStyle: process.env['ENCLAVE_S3_FORCE_PATH_STYLE'] === 'true',
 });
+const dynamodb = new DynamoDBClient({ region: REGION, ...awsClientTransport() });
 const sqs = new SQSClient({ region: REGION, ...awsClientTransport() });
 const ssm = new SSMClient({ region: REGION, ...awsClientTransport() });
 const kms = new KMSClient({ region: REGION, ...awsClientTransport() });
@@ -219,6 +244,7 @@ async function loadAgentToken(): Promise<void> {
 // check-in channel (§4.3); a dedicated box (default tier §6.1) is env-configured. So POOL_ID + empty
 // env is valid — it boots with zero tenants and the applier fills the registry from the manifest.
 const POOL_ID = process.env['POOL_ID']?.trim() ?? '';
+const isSharedPool = POOL_ID.length > 0;
 
 const ASSIGNMENT_MANIFEST_PUBLIC_KEY = process.env['ASSIGNMENT_MANIFEST_PUBLIC_KEY'] ?? '';
 
@@ -228,7 +254,7 @@ const ASSIGNMENT_MANIFEST_PUBLIC_KEY = process.env['ASSIGNMENT_MANIFEST_PUBLIC_K
 const bootAssignments = resolveBootAssignments(process.env);
 // Pool-scoped idle (§5): the wake Lambda tracks the pool, so a shared host reports idle under the
 // pool path; a dedicated box keeps its per-tenant path so N=1 behavior is unchanged.
-const idleSsmPath = POOL_ID
+const idleSsmPath = isSharedPool
   ? `/folklore/pool/${POOL_ID}/idle`
   : `/folklore/${bootAssignments[0]!.tenantId}/idle`;
 
@@ -241,19 +267,42 @@ const devKmsStub = process.env['ENCLAVE_DEV_KMS_STUB'] === 'true';
 // rather than read back off runtimeAttestation because enable/start null that handle on failure,
 // and a later first boot must not read a discarded manifest as an absent one.
 let verifiedBootManifest: VerifiedBootManifest | undefined;
+type LiveTenantPolicySnapshot = TenantPolicySnapshotLike & VerifiedActivePolicySnapshotV1;
+let activePolicySnapshotFor: (tenantId: string) => LiveTenantPolicySnapshot | undefined = () =>
+  undefined;
+const evictedPolicyTenants = new Set<string>();
+const trustedTimeByTenant = new Map<
+  string,
+  { authority: TrustedTimeAuthority; ready: Promise<void> }
+>();
+let activePolicyFreshnessFor: (tenantId: string) => TenantPolicyFreshnessPort | undefined = () =>
+  undefined;
+let activePolicyRuntimeEvidenceFor: (
+  tenantId: string,
+) => TenantPolicyRuntimeEvidencePort | undefined = () => undefined;
+let activePolicyBindingForwarderFor: (
+  tenantId: string,
+) => TenantPolicyVerifiedBindingForwarder | undefined = () => undefined;
+const activePolicyProvenanceSource = new ActivePolicyModelProvenanceSource();
 
 const tenantFactory = new TenantContextFactory({
   s3,
   region: REGION,
   sealedBlobBucket: SEALED_BLOB_BUCKET,
   processedOutputsBucket: PROCESSED_OUTPUTS_BUCKET,
-  signedRecoveryPubkey: () => (POOL_ID ? undefined : verifiedBootManifest?.recoveryPubkey),
-  signedStorageKeyArn: () => (POOL_ID ? undefined : verifiedBootManifest?.storageKeyArn),
+  signedRecoveryPubkey: () => (isSharedPool ? undefined : verifiedBootManifest?.recoveryPubkey),
+  signedStorageKeyArn: () => (isSharedPool ? undefined : verifiedBootManifest?.storageKeyArn),
+  activePolicySnapshotFor: (tenantId) => activePolicySnapshotFor(tenantId),
+  enforceTenantPolicy: isSharedPool,
+  activePolicyFreshnessFor: (tenantId) => activePolicyFreshnessFor(tenantId),
+  activePolicyRuntimeEvidenceFor: (tenantId) => activePolicyRuntimeEvidenceFor(tenantId),
+  activePolicyBindingForwarderFor: (tenantId) => activePolicyBindingForwarderFor(tenantId),
   ...(devKmsStub
     ? devMasterKeySealers(process.env['NODE_ENV'] ?? '', process.env['DATA_KEK'])
     : {}),
 });
-const registry = new TenantRegistry();
+const generationRegistry = new TenantGenerationRegistry<TenantContext, LiveTenantPolicySnapshot>();
+const registry = new TenantRegistry(generationRegistry);
 const tenantRequests = new TenantRequestQuiescer();
 // Late-bound: the synthesis consumer and the answer-inference cache are composed further down, but
 // the applier must be able to evict a torn-down tenant's resident theme index + LLM-cache RAM front
@@ -263,6 +312,9 @@ let synthesisConsumer: SynthesisConsumer | undefined;
 let apiContainer: ApiContainer | undefined;
 const drainerRef: { current?: QueueSetDrainer } = {};
 let verifiedPoolManifest: VerifiedAssignmentManifest | undefined;
+let verifiedBootGenerationContext: BootBoundGenerationContext | undefined;
+let durableGenerationHighWaterClient: DurableGenerationHighWaterClientPort | undefined;
+let activePolicyGeneration = 0;
 const runtimeDatabaseLease = new RuntimeDatabaseLease<ApiContainer, RuntimeDatabaseConnection>({
   requestRestart: (exitCode) => process.exit(exitCode),
 });
@@ -293,6 +345,8 @@ const assignmentApplier = new TenantAssignmentApplier(
   undefined,
   DEPLOYMENT_ID,
   (tenantId) => {
+    evictedPolicyTenants.delete(tenantId);
+    trustedTimeByTenant.delete(tenantId);
     drainerRef.current?.finishTenantEviction(tenantId);
     synthesisConsumer?.finishTenantEviction(tenantId);
     tenantRequests.activate(tenantId);
@@ -317,6 +371,8 @@ const assignmentApplier = new TenantAssignmentApplier(
     }
   },
   (tenantId) => {
+    evictedPolicyTenants.delete(tenantId);
+    trustedTimeByTenant.delete(tenantId);
     drainerRef.current?.finishTenantEviction(tenantId);
     synthesisConsumer?.finishTenantEviction(tenantId);
     tenantRequests.activate(tenantId);
@@ -326,16 +382,147 @@ const assignmentApplier = new TenantAssignmentApplier(
     process.exit(1);
   },
 );
-// Plan Task 2: the verified active-policy snapshot provider is the only boot-to-gateway policy
-// authority. It stays undefined until a boot manifest carries a signed active-policy carrier,
-// and any invocation fails closed while the durable high-water transport is unavailable.
-let verifiedActivePolicySnapshotProvider:
-  | (() => Promise<VerifiedActivePolicySnapshotV1>)
-  | undefined;
-// PR5 non-activation: the evidence recorder factory stays unavailable until H4. No evidence
-// session is injected and no explicit enablement is passed, so this composition root never
-// exposes the evidence recorder, and enclave/src/index.ts must not call the factory while the
-// evidence seam is dormant.
+let liveActivePolicySnapshotVerifier: VerifiedActivePolicySnapshotVerifier | undefined;
+const policySnapshots = new TenantPolicySnapshotRegistry<LiveTenantPolicySnapshot, TenantContext>(
+  generationRegistry,
+);
+activePolicySnapshotFor = (tenantId) =>
+  evictedPolicyTenants.has(tenantId) ? undefined : policySnapshots.get(tenantId);
+activePolicyFreshnessFor = (tenantId) => {
+  const snapshot = activePolicySnapshotFor(tenantId);
+  const highWater = durableGenerationHighWaterClient;
+  if (!snapshot || !highWater || !runtimeAttestation) return undefined;
+  const expectedContext = () => expectedFreshnessContextFor(tenantId, snapshot);
+  let time = trustedTimeByTenant.get(tenantId);
+  if (!time) {
+    const authority = new TrustedTimeAuthority({
+      nsm: new NsmTrustedTimeSource({ nsm: { attest: getAttestationDoc } }),
+      clock: { readNanoseconds: () => process.hrtime.bigint() },
+    });
+    const bootEpoch = String(runtimeAttestation.bootSessionState().bootEpoch);
+    const context = expectedContext();
+    const ready = authority.initialize({
+      orgId: tenantId,
+      deploymentId: context.deploymentId,
+      bootEpoch,
+      releaseId: context.releaseId,
+      eifDigest: context.eifDigest,
+      pcr0: context.pcr0,
+      bootRootDigest: context.bootRootDigest,
+      policyGeneration: context.policyGeneration,
+      activationGeneration: context.activationGeneration,
+      keysetEpoch: context.keysetEpoch,
+      keysetDigest: context.keysetDigest,
+    });
+    time = { authority, ready };
+    trustedTimeByTenant.set(tenantId, time);
+  }
+  const trustedTime: TrustedTimeAuthorityPort = {
+    read: async (context) => {
+      await time.ready;
+      return time.authority.read(context);
+    },
+  };
+  return {
+    highWater,
+    trustedTime,
+    expectedContext,
+    refreshIntervalMs: snapshot.policy.lifetime.admissionLeaseLifetimeMs,
+    evict: () => {
+      evictedPolicyTenants.add(tenantId);
+      trustedTimeByTenant.delete(tenantId);
+    },
+  };
+};
+activePolicyRuntimeEvidenceFor = (tenantId) => {
+  const attestation = runtimeAttestation;
+  if (!attestation) return undefined;
+  try {
+    const composition = attestation.gatewayEvidenceComposition();
+    return {
+      assertSnapshot: (snapshot: VerifiedActivePolicySnapshotV1) => {
+        if (snapshot.orgId !== tenantId) throw new Error('runtime_evidence_tenant_mismatch');
+        composition.assertSnapshot(snapshot);
+      },
+    };
+  } catch {
+    return undefined;
+  }
+};
+activePolicyBindingForwarderFor = (tenantId) => async (binding, snapshot) => {
+  if (snapshot.orgId !== tenantId || binding.orgId !== tenantId) {
+    throw new Error('active_policy_binding_tenant_mismatch');
+  }
+  const forwarded = activePolicyProvenanceSource.tupleFor({ snapshot, role: binding.role });
+  if (forwarded.roleBinding !== binding) throw new Error('active_policy_binding_replaced');
+};
+
+function expectedFreshnessContextFor(
+  tenantId: string,
+  snapshot: LiveTenantPolicySnapshot,
+): ReturnType<TenantPolicyFreshnessPort['expectedContext']> {
+  const tenantContext = generationRegistry.get(tenantId)?.context;
+  const bootContext = verifiedBootGenerationContext;
+  if (!tenantContext || !bootContext)
+    throw new Error('active_policy_freshness_context_unavailable');
+  const deploymentId = tenantContext.tenantDeploymentId ?? tenantContext.deploymentId;
+  if (!deploymentId || tenantContext.tenantId !== tenantId) {
+    throw new Error('active_policy_freshness_context_mismatch');
+  }
+  return {
+    orgId: tenantId,
+    deploymentId,
+    policyDigest: snapshot.policyDigest,
+    policyGeneration: snapshot.policyGeneration,
+    activationGeneration: snapshot.activationGeneration,
+    configurationGeneration: snapshot.configurationGeneration,
+    keysetEpoch: snapshot.policy.minimumHighWater.keysetEpoch,
+    keysetDigest: snapshot.policy.minimumHighWater.keysetDigest,
+    releaseId: bootContext.releaseId,
+    protectedSourceCommit: bootContext.protectedSourceCommit,
+    eifDigest: bootContext.eifDigest,
+    pcr0: bootContext.pcr0,
+    bootRootDigest: bootContext.bootRootDigest,
+  };
+}
+const policyAssignmentApplier = new TenantAssignmentApplier({
+  registry,
+  generationRegistry,
+  snapshots: policySnapshots,
+  build: (identity) => tenantFactory.build(identity),
+  verifyPolicy: async (assignment: TenantPolicyAssignment) => {
+    const carrier = assignment.activePolicyCarrier;
+    const bootContext = verifiedBootGenerationContext;
+    if (!carrier || !liveActivePolicySnapshotVerifier || !bootContext) {
+      throw new Error('active_policy_snapshot_unavailable');
+    }
+    const carrierContext = carrier.payload.generationContext;
+    const snapshot = await liveActivePolicySnapshotVerifier.verifyCarrier({
+      carrier,
+      expectedContext: buildV4ExpectedGenerationContext({
+        bootContext,
+        carrierContext,
+        tenantId: assignment.tenantId,
+        deploymentId: assignment.deploymentId,
+      }),
+    });
+    return snapshot;
+  },
+  logger,
+  onGenerationChanged: async (tenantId) => {
+    await tenantRequests.fence(tenantId);
+    await drainerRef.current?.evictTenant(tenantId);
+    await synthesisConsumer?.evictTenant(tenantId);
+    await evictAnswerInference?.(tenantId);
+    await apiContainer?.evictCollabTenant(tenantId);
+  },
+  onTornDown: (tenantId) => evictMintedTokensForOrg(tenantId),
+  onActivated: (tenantId) => {
+    drainerRef.current?.finishTenantEviction(tenantId);
+    synthesisConsumer?.finishTenantEviction(tenantId);
+    tenantRequests.activate(tenantId);
+  },
+});
 let runtimeAttestation =
   createRuntimeAttestationComposition({
     env: process.env,
@@ -366,39 +553,57 @@ runtimeAttestation = await initializeRuntimeAttestationForBoot(
   async (prepared) => {
     verifiedBootManifest = prepared?.verifiedManifest();
     const bootManifest = verifiedBootManifest;
+    if (isSharedPool && process.env['NODE_ENV'] === 'production') {
+      if (!bootManifest?.generationHighWaterRuntimeConfig) {
+        throw new Error('generation_high_water_runtime_config_missing');
+      }
+    }
     const activePolicyCarrier = bootManifest?.activePolicyCarrier;
-    if (bootManifest && activePolicyCarrier) {
-      // Plan Task 2: production policy verification is built only from the verified boot policy
-      // state loader, the shared carrier verifier adapter, and the durable high-water adapter.
-      // No policy object, reference URL, receipt metadata, environment variable, or assignment
-      // metadata is accepted as policy authority. The provider is dormant until the gated
-      // gateway composition invokes it; the high-water transport is unavailable, so any
-      // invocation fails closed rather than authorizing with an unverified floor.
-      const sharedCarrierVerifier = new ActivePolicyCarrierVerifier(
-        createEnclaveActivePolicyKeyVerifier(),
-      );
-      const referenceVerifier = new BootStateActivePolicyReferenceVerifier(sharedCarrierVerifier);
-      const loader = new VerifiedBootPolicyStateLoader({
-        verifiedManifest: bootManifest,
-        carrierVerifier: referenceVerifier,
+    const activePolicyBootTrust = bootManifest?.activePolicyBootTrust;
+    if (activePolicyCarrier && !activePolicyBootTrust) {
+      throw new Error('boot_manifest_active_policy_boot_trust_unavailable');
+    }
+    if (isSharedPool && process.env['NODE_ENV'] === 'production' && !activePolicyBootTrust) {
+      throw new Error('shared_pool_active_policy_boot_trust_unavailable');
+    }
+    if (bootManifest && activePolicyBootTrust) {
+      const generationHighWaterRuntimeConfig = bootManifest.generationHighWaterRuntimeConfig;
+      if (!generationHighWaterRuntimeConfig)
+        throw new Error('generation_high_water_runtime_config_missing');
+      verifiedBootGenerationContext = buildVerifiedBootGenerationContext(bootManifest);
+      const activePolicyTrust = await loadEnclaveActivePolicyTrust({
+        bootTrust: activePolicyBootTrust,
+        kms,
       });
+      const sharedCarrierVerifier = new ActivePolicyCarrierVerifier(activePolicyTrust.keyVerifier, {
+        authority: activePolicyTrust.authority,
+        carrierSigner: activePolicyTrust.carrierSigner,
+      });
+      const referenceVerifier = new BootStateActivePolicyReferenceVerifier(sharedCarrierVerifier);
       const highWaterAdapter = new DurableGenerationHighWaterClientAdapter(
         new DurableGenerationHighWaterClient(
-          unavailableHighWaterTransport(),
-          unavailableHighWaterVerifier(),
+          new AwsDurableGenerationHighWaterTransport({
+            config: generationHighWaterRuntimeConfig,
+            s3,
+            dynamodb,
+          }),
+          new BootBoundGenerationHighWaterVerifier({
+            config: generationHighWaterRuntimeConfig,
+          }),
         ),
       );
+      durableGenerationHighWaterClient = highWaterAdapter;
       const snapshotVerifier = new VerifiedActivePolicySnapshotVerifier({
         carrierVerifier: referenceVerifier,
         highWater: highWaterAdapter,
       });
-      verifiedActivePolicySnapshotProvider = async () => {
-        const bootState = await loader.loadVerifiedBootPolicyState();
-        return snapshotVerifier.verify({
-          bootState,
-          expectedContext: buildVerifiedBootGenerationContext(bootManifest, activePolicyCarrier),
-        });
-      };
+      liveActivePolicySnapshotVerifier = snapshotVerifier;
+      if (activePolicyCarrier) {
+        await new VerifiedBootPolicyStateLoader({
+          verifiedManifest: bootManifest,
+          carrierVerifier: referenceVerifier,
+        }).loadVerifiedBootPolicyState();
+      }
     }
     const signedPolicy = verifiedBootManifest?.inferenceAttestation;
     const trustPolicy = verifiedBootManifest?.inferenceTrustPolicy;
@@ -408,7 +613,7 @@ runtimeAttestation = await initializeRuntimeAttestationForBoot(
     if (trustPolicy) setInferenceTrustPolicy(trustPolicy);
     if (signedPolicy) configureInferenceAttestation(signedPolicy);
     else if (!trustPolicy) configureLocalInferencePolicy();
-    if (process.env['NODE_ENV'] === 'production' && POOL_ID) {
+    if (process.env['NODE_ENV'] === 'production' && isSharedPool) {
       assignmentManifestPublicKeyForVerifiedBoot(
         verifiedBootManifest,
         ASSIGNMENT_MANIFEST_PUBLIC_KEY,
@@ -418,7 +623,7 @@ runtimeAttestation = await initializeRuntimeAttestationForBoot(
   },
   logger.child({ component: 'attestation' }),
 );
-const poolRuntimeAttestation = POOL_ID
+const poolRuntimeAttestation = isSharedPool
   ? new PoolRuntimeAttestationService(
       () => ({
         poolDeploymentId: DEPLOYMENT_ID,
@@ -450,9 +655,14 @@ await loadAgentToken();
 const outputAuthenticator = createEnclaveOutputAuthenticator();
 
 function outputAssignmentGeneration(): number {
-  const generation = POOL_ID
-    ? assignmentApplier.generation()
-    : (verifiedBootManifest?.configurationGeneration ?? 0);
+  const generation =
+    POOL_ID && activePolicyGeneration > 0
+      ? activePolicyGeneration
+      : POOL_ID
+        ? policyAssignmentApplier.generation() > 0
+          ? activePolicyGeneration
+          : assignmentApplier.generation()
+        : (verifiedBootManifest?.configurationGeneration ?? 0);
   if (!Number.isSafeInteger(generation) || generation < 1) {
     if (process.env['NODE_ENV'] === 'development') return 1;
     throw new Error('enclave_output_identity_unavailable');
@@ -578,7 +788,7 @@ const poolHalt = new HaltGate(
   haltCache,
   DEPLOYMENT_ID,
   logger,
-  POOL_ID ? [poolHaltKey(POOL_ID)] : [],
+  isSharedPool ? [poolHaltKey(POOL_ID)] : [],
 );
 const evictTenantSubsystems = async (tenantId: string): Promise<void> => {
   const results = await Promise.allSettled(
@@ -607,7 +817,7 @@ const tenantRequestQuiescence = new TenantRequestQuiescenceMonitor({
 const beginTenantRequest = async (tenantId: string) => {
   const halted = await new HaltGate(haltCache, DEPLOYMENT_ID, logger, [
     tenantHaltKey(tenantId),
-    ...(POOL_ID ? [poolHaltKey(POOL_ID)] : []),
+    ...(isSharedPool ? [poolHaltKey(POOL_ID)] : []),
   ]).isHalted();
   if (halted) return undefined;
   return tenantRequests.begin(tenantId);
@@ -617,21 +827,23 @@ const beginTenantRequest = async (tenantId: string) => {
 // re-reads it and rebuilds the registry (add/remove tenants, §2.2 pt 5). Idempotent, so a periodic
 // re-read reconverges to the latest assignment. Dedicated boxes have no POOL_ID and no manifest.
 async function refreshAssignments(): Promise<void> {
-  if (!POOL_ID) return;
+  if (!isSharedPool) return;
   try {
     const manifest = await haltCache.get(poolAssignmentsKey(POOL_ID));
     if (!manifest) return;
+    const currentGeneration =
+      activePolicyGeneration > 0
+        ? policyAssignmentApplier.generation()
+        : assignmentApplier.generation();
     let parsed: NormalizedAssignmentManifestV1;
     try {
-      parsed = parseAssignmentManifestWire(manifest, POOL_ID, assignmentApplier.generation());
+      parsed = parseAssignmentManifestWire(manifest, POOL_ID, currentGeneration);
     } catch (err) {
       if (!(err instanceof Error) || err.message !== 'assignment_manifest_stale') throw err;
-      const replay = parseAssignmentManifestWire(
-        manifest,
-        POOL_ID,
-        assignmentApplier.generation() - 1,
-      );
-      if (replay.poolId !== POOL_ID || !assignmentApplier.matchesCurrentManifest(replay)) throw err;
+      const replay = parseAssignmentManifestWire(manifest, POOL_ID, currentGeneration - 1);
+      const replayApplier =
+        replay.wire === 'SignedAssignmentManifestV4' ? policyAssignmentApplier : assignmentApplier;
+      if (replay.poolId !== POOL_ID || !replayApplier.matchesCurrentManifest(replay)) throw err;
       parsed = replay;
     }
     const floor = await haltCache.get<unknown>(poolAssignmentGenerationFloorKey(POOL_ID));
@@ -651,6 +863,30 @@ async function refreshAssignments(): Promise<void> {
       ),
     );
     assertInferenceAttestationEcho(verified.inferenceAttestation);
+    const isV4 = parsed.wire === 'SignedAssignmentManifestV4';
+    if (isV4 && !liveActivePolicySnapshotVerifier) {
+      throw new Error('shared_pool_active_policy_boot_trust_unavailable');
+    }
+    if (!isV4 && activePolicyGeneration > 0) {
+      throw new Error('assignment_manifest_v3_after_policy_mode');
+    }
+    const result = isV4
+      ? policyAssignmentApplier.matchesCurrentManifest(verified)
+        ? {
+            applied: true as const,
+            generation: parsed.generation,
+            state: generationRegistry.read(),
+          }
+        : await policyAssignmentApplier.applyAssignments(
+            verified.assignments,
+            parsed.generation,
+            parsed.digest,
+          )
+      : assignmentApplier.matchesCurrentManifest(verified)
+        ? { applied: true as const, generation: parsed.generation }
+        : await assignmentApplier.applyManifest(verified);
+    if (!result.applied) return;
+    const policyState = isV4 && 'state' in result ? result.state : undefined;
     if (process.env['NODE_ENV'] === 'production' && !verified.runtimeDatabase) {
       throw new Error('runtime_database_signed_config_unavailable');
     }
@@ -662,16 +898,15 @@ async function refreshAssignments(): Promise<void> {
       }
       apiContainer = runtimeDatabaseLease.api();
     }
-    const result = assignmentApplier.matchesCurrentManifest(verified)
-      ? { applied: true as const, generation: parsed.generation }
-      : await assignmentApplier.applyManifest(verified);
-    if (!result.applied) return;
-    verifiedPoolManifest = verified;
     if (!runtimeAttestation && !poolRuntimeAttestation) {
       throw new Error('runtime_attestation_not_ready');
     }
+    const activeEntries = policyState?.entries;
+    const activeContexts = activeEntries
+      ? [...activeEntries.values()].map((entry) => entry.context)
+      : registry.all();
     const successfulTenantIds: string[] = [];
-    for (const context of [...registry.all()].sort((left, right) =>
+    for (const context of [...activeContexts].sort((left, right) =>
       left.tenantId.localeCompare(right.tenantId),
     )) {
       successfulTenantIds.push(await storageCanaryProof.prove(context, parsed.generation));
@@ -684,12 +919,37 @@ async function refreshAssignments(): Promise<void> {
       ...(parsed.wire === 'SignedAssignmentManifestV3'
         ? { assignmentPayload: 'AssignmentManifestV3Payload' as const }
         : {}),
+      ...(isV4
+        ? {
+            assignmentPayload: 'AssignmentManifestV4Payload' as const,
+            policyVerificationVersion: 1 as const,
+            verifiedTenantCount: activeEntries?.size ?? 0,
+            policyVerificationDigest: assignmentPolicyVerificationDigest(
+              [...(activeEntries ?? new Map())].map(([tenantId, entry]) => ({
+                tenantId,
+                deploymentId: entry.snapshot.deploymentId,
+                policyDigest: entry.snapshot.policyDigest,
+                policyGeneration: entry.snapshot.policyGeneration,
+                activationGeneration: entry.snapshot.activationGeneration,
+                configurationGeneration: entry.snapshot.configurationGeneration,
+                keysetEpoch: entry.snapshot.generationContext.keysetEpoch,
+                keysetDigest: entry.snapshot.generationContext.keysetDigest,
+                releaseId: entry.snapshot.generationContext.releaseId,
+                protectedSourceCommit: entry.snapshot.generationContext.protectedSourceCommit,
+                eifDigest: entry.snapshot.generationContext.eifDigest,
+                pcr0: entry.snapshot.generationContext.pcr0,
+                bootRootDigest: entry.snapshot.generationContext.bootRootDigest,
+                carrierDigest: entry.snapshot.carrierDigest,
+                authorizationEnvelopeDigest: entry.snapshot.authorizationEnvelopeDigest,
+              })),
+            ),
+          }
+        : {}),
       floorGeneration: parsed.generation,
       floorDigest: parsed.digest,
       healthy: true,
       ingestPublicKeys: Object.fromEntries(
-        registry
-          .all()
+        activeContexts
           .map((context): readonly [string, string] => [
             context.tenantId,
             Buffer.from(deriveIngestKeypair(context.masterKey).publicKeyRaw).toString('hex'),
@@ -703,9 +963,10 @@ async function refreshAssignments(): Promise<void> {
       ),
     };
     const acknowledgmentPayload = Buffer.from(assignmentAckPayload(unsignedAcknowledgment), 'utf8');
+    verifiedPoolManifest = verified;
     let signed: { publicKey: Uint8Array; signature: Uint8Array };
     try {
-      if (POOL_ID) {
+      if (isSharedPool) {
         if (!poolRuntimeAttestation) throw new Error('runtime_attestation_not_ready');
         signed = await poolRuntimeAttestation.signCurrent(acknowledgmentPayload);
       } else {
@@ -726,6 +987,11 @@ async function refreshAssignments(): Promise<void> {
       },
     });
     await haltCache.set(poolAssignmentAckKey(POOL_ID), acknowledgment);
+    if (isV4) {
+      if (!policyState) throw new Error('active_policy_generation_unavailable');
+      policyAssignmentApplier.activateGeneration(parsed.generation);
+      activePolicyGeneration = policyState.generation;
+    }
     logger.info('assignment manifest applied', unsignedAcknowledgment);
   } catch (err) {
     if (err instanceof Error && err.message === 'assignment_manifest_stale') return;
@@ -862,12 +1128,22 @@ try {
         bucket: tenant.processedOutputsBucket || PROCESSED_OUTPUTS_BUCKET,
         orgId,
       });
-      const inference = new CachedInference(phalaInference, cache, {
+      const cached = new CachedInference(phalaInference, cache, {
         embedModel: inferenceModel('embed'),
         generateModel: inferenceModel('generate'),
         critiqueModel: inferenceModel('critique'),
         promptVersion: ANSWER_CACHE_VERSION,
       });
+      const inference = !POOL_ID
+        ? cached
+        : new TenantPolicyBoundInference(orgId, () => tenant.activePolicySnapshot(), cached, {
+            freshness: activePolicyFreshnessFor(orgId),
+            requireFreshness: true,
+            runtimeEvidence: activePolicyRuntimeEvidenceFor(orgId),
+            requireRuntimeEvidence: true,
+            verifiedBindingForwarder: activePolicyBindingForwarderFor(orgId),
+            requireBindingForwarding: true,
+          });
       entry = { inference, cache };
       answerInferenceByOrg.set(orgId, entry);
     }
@@ -991,7 +1267,7 @@ await boxServer.start().catch((err) => logger.error('BOX_SERVER_START_FAILED', {
 // unauthenticated upgrade hold the host (or a whole shared pool) awake indefinitely.
 activityMonitor.addPin(() => apiContainer?.hasActiveCollabSession() ?? false);
 
-if (!POOL_ID) {
+if (!isSharedPool) {
   runtimeAttestation = await enableRuntimeAttestation(
     runtimeAttestation,
     logger.child({ component: 'attestation' }),
@@ -1015,6 +1291,10 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
     resolveTenant,
     processedBucket: PROCESSED_OUTPUTS_BUCKET,
     processedBucketFor: (orgId) => resolveTenant(orgId).processedOutputsBucket,
+    activePolicyFreshnessFor,
+    activePolicyRuntimeEvidenceFor,
+    activePolicyBindingForwarderFor,
+    enforceTenantPolicy: isSharedPool,
     synthesisQueueUrl: SYNTHESIS_REQUEST_QUEUE_URL,
     processedQueueUrl: PROCESSED_QUEUE_URL,
     previewFetcher: fetchLinkPreview,
@@ -1109,7 +1389,10 @@ drainerRef.current = new QueueSetDrainer({
   sqs,
   s3,
   router,
-  assignments: () => assignmentApplier.queueAssignments(),
+  assignments: () =>
+    activePolicyGeneration > 0
+      ? policyAssignmentApplier.queueAssignments()
+      : assignmentApplier.queueAssignments(),
   processedQueueUrl: PROCESSED_QUEUE_URL,
   processedOutputsBucket: PROCESSED_OUTPUTS_BUCKET,
   rawPayloadsBucket: RAW_PAYLOADS_BUCKET,
@@ -1124,7 +1407,7 @@ drainerRef.current = new QueueSetDrainer({
   idlePollThreshold: IDLE_POLL_THRESHOLD,
   isBusy: () => activityMonitor.isBusy(),
   onDrainComplete: async () => {
-    if (!POOL_ID) return;
+    if (!isSharedPool) return;
     await haltCache.set(`pool:usage:${DEPLOYMENT_ID}`, collectPoolUsage(), 300);
   },
   logger,

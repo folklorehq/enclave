@@ -185,6 +185,12 @@ export class TrustedEvidenceContextProvider {
     });
   }
 
+  assertSnapshot(snapshot: VerifiedActivePolicySnapshotV1): void {
+    if (snapshot !== this.#activePolicySnapshot) {
+      throw new TrustedEvidenceContextError('trusted_evidence_context_invalid');
+    }
+  }
+
   private buildValues(
     snapshot: VerifiedActivePolicySnapshotV1,
     generationContext: VerifiedActivePolicySnapshotV1['generationContext'],

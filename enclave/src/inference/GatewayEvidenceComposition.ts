@@ -2,6 +2,7 @@ import type { EvidenceAnchorVerifier } from './EvidenceAnchorVerifier.js';
 import type { EvidenceKeySession } from './EvidenceKeySession.js';
 import { GatewayEvidenceRecorder } from './GatewayEvidenceRecorder.js';
 import type { TrustedEvidenceContextProvider } from './TrustedEvidenceContextProvider.js';
+import type { VerifiedActivePolicySnapshotV1 } from '@folklore/inference';
 
 export type GatewayEvidenceCompositionErrorCode = 'evidence_composition_incomplete';
 
@@ -40,5 +41,9 @@ export class GatewayEvidenceComposition {
 
   createRecorder(): GatewayEvidenceRecorder {
     return new GatewayEvidenceRecorder(this.#provider, this.#anchorVerifier, this.#keySession);
+  }
+
+  assertSnapshot(snapshot: VerifiedActivePolicySnapshotV1): void {
+    this.#provider.assertSnapshot(snapshot);
   }
 }

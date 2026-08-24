@@ -67,7 +67,7 @@ export class PoolRuntimeAttestationService {
         tenantAssigned: true,
         bootManifestVerified: false,
         runtimeTrust: 'pool-assignment' as const,
-        assignmentManifestVerified: true as const,
+        assignmentManifestVerified: ready.assignmentManifestVerified as true,
         kmsUnsealed: true,
         tenantApiReady: true,
         runtimeDatabase: ready.runtimeDatabase,
