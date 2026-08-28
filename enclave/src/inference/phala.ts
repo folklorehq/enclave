@@ -48,9 +48,11 @@ export class SyntheticPhalaInferenceError extends Error {
   }
 }
 
-// UNWIRED: synthetic-only commissioning guard has no live provider caller until Gate B admission.
+// UNWIRED: synthetic commissioning is test-only and has no live provider caller.
 export function assertSyntheticPhalaPayload(input: SyntheticPhalaPayloadV1): void {
-  if (input.payloadKind !== 'synthetic-commissioning') throw new SyntheticPhalaInferenceError();
+  if (process.env['NODE_ENV'] === 'production' || input.payloadKind !== 'synthetic-commissioning') {
+    throw new SyntheticPhalaInferenceError();
+  }
 }
 
 export function familyOf(model: string): string {
