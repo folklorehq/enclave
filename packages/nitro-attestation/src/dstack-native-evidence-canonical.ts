@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto';
+import { aciDstackRawEvidenceV1Schema, type AciDstackRawEvidenceV1 } from '@folklore/contracts';
 import { canonicalCbor } from './canonical-cbor.js';
 import { domainSeparatedBytes, sha256Hex } from './model-provenance-canonical.js';
 
 export const DSTACK_NATIVE_EVIDENCE_V1_DOMAIN = 'folklore.dstack-native-evidence.v1';
+export const DSTACK_RAW_EVIDENCE_V2_DOMAIN = 'folklore.dstack-raw-evidence.v2';
 
 const STRICT_BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
@@ -52,6 +54,43 @@ export interface DstackNativeEvidenceDigestResultV1 {
   readonly collateralDigest: string;
   readonly eventLogDigest: string;
   readonly vmConfigDigest: string;
+}
+
+export interface DstackRawEvidenceDigestV2 {
+  readonly evidenceDigest: string;
+  readonly quoteDigest: string;
+  readonly collateralDigest: string;
+  readonly eventLogDigest: string;
+  readonly vmConfigDigest: string;
+}
+
+export function digestDstackRawEvidenceV2(
+  evidence: AciDstackRawEvidenceV1,
+): DstackRawEvidenceDigestV2 {
+  evidence = aciDstackRawEvidenceV1Schema.parse(evidence);
+  const quoteDigest = sha256Hex(Buffer.from(evidence.quote_base64, 'base64'));
+  const collateralDigest = sha256Hex(Buffer.from(evidence.collateral_base64, 'base64'));
+  const eventLogDigest = sha256Hex(Buffer.from(evidence.event_log_base64, 'base64'));
+  const vmConfigDigest = sha256Hex(Buffer.from(evidence.vm_config_base64, 'base64'));
+  const evidenceDigest = sha256Hex(
+    domainSeparatedBytes(DSTACK_RAW_EVIDENCE_V2_DOMAIN, [
+      evidence.version,
+      evidence.format,
+      evidence.session_id,
+      evidence.workload_keyset_digest,
+      quoteDigest,
+      collateralDigest,
+      eventLogDigest,
+      vmConfigDigest,
+    ]),
+  );
+  return { evidenceDigest, quoteDigest, collateralDigest, eventLogDigest, vmConfigDigest };
+}
+
+export class DstackRawEvidenceDigestAuthority {
+  digest(evidence: AciDstackRawEvidenceV1): string {
+    return `sha256:${digestDstackRawEvidenceV2(evidence).evidenceDigest}`;
+  }
 }
 
 function assertStrictBase64(value: string, label: string): void {

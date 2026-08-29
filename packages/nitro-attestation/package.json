@@ -15,7 +15,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "check-types": "tsc --noEmit",
+    "check-types": "tsc --noEmit && tsc --noEmit -p tsconfig.task-2a-tests.json",
     "lint": "eslint .",
     "test": "vitest run",
     "clean": "rm -rf dist .turbo"

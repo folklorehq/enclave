@@ -1,0 +1,13 @@
+{
+  "extends": "@folklore/tsconfig/node.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": [
+    "src/**/*.ts",
+    "test/dstack-native-evidence-canonical.test.ts",
+    "test/public-api.test.ts"
+  ],
+  "exclude": ["dist", "node_modules"]
+}
