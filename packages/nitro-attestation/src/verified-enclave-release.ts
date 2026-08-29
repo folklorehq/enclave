@@ -5,8 +5,15 @@ import {
   assertApprovedBootManifestRoot,
   getBootManifestRootIdentity,
 } from './trusted-boot-root-policy.js';
+import { TRUSTED_SIGNER_RECOVERY_ROOT_DIGEST } from './trusted-signer-recovery-root.js';
 
 const sourceSha = z.string().regex(/^[0-9a-f]{40}$/);
+const RECOVERY_ROOT_SOURCE_ARTIFACT =
+  'packages/nitro-attestation/src/trusted-signer-recovery-root.ts';
+const TRUSTED_TIME_RECORD_PRODUCER =
+  'enclave/src/gate-a/GenerationHighWaterTrustedTimeRecordProducer.ts';
+const TRUSTED_TIME_RECORD_VERIFIER = 'enclave/src/gate-a/GenerationHighWaterTrustedTimeVerifier.ts';
+const BUILD_IDENTITY_WORKFLOW = 'build-enclave.yml';
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/);
 const pcr = z.string().regex(/^(?!0{96}$)[0-9a-f]{96}$/);
 const immutableArtifactBucket = z.string().regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]-immutable$/);
@@ -44,6 +51,33 @@ const attestationManifestSchema = z
         minimumKeysetGeneration: z.number().int().positive(),
       })
       .strict(),
+    recoveryRoot: z
+      .object({
+        digest: sha256,
+        sourceArtifact: z.literal(RECOVERY_ROOT_SOURCE_ARTIFACT),
+      })
+      .strict(),
+    recoveryInstallation: z
+      .object({
+        state: z.literal('recovery-freeze'),
+        acknowledgement: z.literal('pending-all-readers'),
+      })
+      .strict(),
+    trustedTime: z
+      .object({
+        authority: z.literal('NSM+CLOCK_MONOTONIC_RAW'),
+        recordProducer: z.literal(TRUSTED_TIME_RECORD_PRODUCER),
+        recordVerifier: z.literal(TRUSTED_TIME_RECORD_VERIFIER),
+        hostWallClockAuthority: z.literal(false),
+      })
+      .strict(),
+    buildIdentity: z
+      .object({
+        sourceSha,
+        workflow: z.literal(BUILD_IDENTITY_WORKFLOW),
+        buildId: z.string().min(1),
+      })
+      .strict(),
   })
   .strict()
   .superRefine((manifest, ctx) => {
@@ -57,6 +91,9 @@ const attestationManifestSchema = z
       [manifest.kmsPcrUpdate.subjectSha256, manifest.artifact.sha256],
       [manifest.tenantBoot.artifactKey, artifactKey],
       [manifest.tenantBoot.subjectSha256, manifest.artifact.sha256],
+      [manifest.recoveryRoot.digest, TRUSTED_SIGNER_RECOVERY_ROOT_DIGEST],
+      [manifest.buildIdentity.sourceSha, manifest.sourceSha],
+      [manifest.buildIdentity.buildId, `enclave-${manifest.sourceSha}`],
     ] as const;
     if (bindings.some(([actual, expected]) => actual !== expected)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'artifact binding mismatch' });
