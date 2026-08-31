@@ -13,6 +13,21 @@ import type {
   VerifiedActivePolicyReferenceV1,
 } from '@folklore/inference';
 
+// AWS KMS advertises both ED25519_SHA_512 and the ED25519_PH_SHA_512 pre-hash variant on every
+// Ed25519 key; the signer only ever uses ED25519_SHA_512.
+const ALLOWED_ED25519_SIGNING_ALGORITHMS = new Set(['ED25519_SHA_512', 'ED25519_PH_SHA_512']);
+
+// True when the key advertises exactly the allowed Ed25519 algorithms and the one we use is present.
+function hasOnlyAllowedEd25519SigningAlgorithms(
+  algorithms: readonly string[] | undefined,
+): boolean {
+  return (
+    algorithms !== undefined &&
+    algorithms.includes('ED25519_SHA_512') &&
+    algorithms.every((algorithm) => ALLOWED_ED25519_SIGNING_ALGORITHMS.has(algorithm))
+  );
+}
+
 // Enclave-side constructor-injected adapter over the single shared carrier verifier. It contains no independent signature check, no local generation context, and accepts
 // no caller-supplied policy, envelope, key, request, route, environment, or assignment metadata.
 export class BootStateActivePolicyReferenceVerifier implements ActivePolicyCarrierVerifierPort {
@@ -207,8 +222,7 @@ async function loadEnclaveActivePolicyPublicKey(input: {
     metadata.KeyManager !== 'CUSTOMER' ||
     metadata.Origin !== 'AWS_KMS' ||
     metadata.MultiRegion !== false ||
-    metadata.SigningAlgorithms?.length !== 1 ||
-    metadata.SigningAlgorithms[0] !== 'ED25519_SHA_512'
+    !hasOnlyAllowedEd25519SigningAlgorithms(metadata.SigningAlgorithms)
   ) {
     throw new Error('enclave_active_policy_kms_metadata_mismatch');
   }
@@ -217,8 +231,7 @@ async function loadEnclaveActivePolicyPublicKey(input: {
     response.KeyId !== identity.keyArn ||
     response.KeySpec !== 'ECC_NIST_EDWARDS25519' ||
     response.KeyUsage !== 'SIGN_VERIFY' ||
-    response.SigningAlgorithms?.length !== 1 ||
-    response.SigningAlgorithms[0] !== 'ED25519_SHA_512' ||
+    !hasOnlyAllowedEd25519SigningAlgorithms(response.SigningAlgorithms) ||
     !response.PublicKey
   ) {
     throw new Error('enclave_active_policy_kms_metadata_mismatch');
