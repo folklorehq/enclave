@@ -1,5 +1,6 @@
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import type { SealMasterKeyFn, UnsealMasterKeyFn } from '../tenant/TenantContextFactory.js';
+import { assertDevKmsStubAllowed } from './dev-kms-stub-guard.js';
 
 // Dev-only master-key seal/unseal: localstack KMS cannot do the Nitro Recipient decrypt, so a raw
 // DATA_KEK stands in for the per-tenant CMK. Refuses to load outside development/test — the
@@ -8,9 +9,7 @@ export function devMasterKeySealers(
   nodeEnv: string,
   dataKek: string | undefined,
 ): { sealMasterKey: SealMasterKeyFn; unsealMasterKey: UnsealMasterKeyFn } {
-  if (nodeEnv !== 'development' && nodeEnv !== 'test') {
-    throw new Error('ENCLAVE_DEV_KMS_STUB is development-only (NODE_ENV must be development)');
-  }
+  assertDevKmsStubAllowed(nodeEnv);
   const key = Buffer.from(dataKek ?? '', 'base64');
   if (key.length !== 32) {
     throw new Error('ENCLAVE_DEV_KMS_STUB requires a 32-byte base64 DATA_KEK');

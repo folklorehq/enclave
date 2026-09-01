@@ -1085,7 +1085,7 @@ async function resolveInteractiveCodebaseConnection(orgId: string) {
 }
 
 function createCodebaseSettingsPort() {
-  if (!mintGitHubInstallationToken) throw new Error('codebase_selection_unavailable');
+  if (!mintGitHubInstallationToken) return undefined;
   return new EnclaveCodebaseSettingsAdapter({
     s3,
     resolveTenant,
@@ -1157,6 +1157,7 @@ try {
     answerInferenceByOrg.delete(tenantId);
     await entry.cache.close();
   };
+  const codebaseSettingsPort = createCodebaseSettingsPort();
   const apiOptions: CreateContainerOptions = {
     // content-touching enclave opens no data-carrying egress — box-API telemetry inert by composition, not by omitting POSTHOG_API_KEY.
     telemetry: new NoopTelemetryClient(),
@@ -1171,7 +1172,7 @@ try {
     // traffic from anywhere, and a scanner hitting it must not be able to hold this host awake.
     onAuthenticatedRequest: () => activityMonitor.touch(),
     beginTenantRequest,
-    codebaseSettings: createCodebaseSettingsPort(),
+    ...(codebaseSettingsPort ? { codebaseSettings: codebaseSettingsPort } : {}),
     retrieverFactory: buildRetriever,
     // grounded answers reuse the same per-request gated retrieval spine, then feed only
     // audience-visible decrypted bodies to the in-enclave TEE model — nothing leaves the enclave.

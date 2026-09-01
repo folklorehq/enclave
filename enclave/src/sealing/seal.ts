@@ -3,6 +3,7 @@ import { KMSClient, DecryptCommand, EncryptCommand } from '@aws-sdk/client-kms';
 import { generateKeyPairSync, privateDecrypt, constants } from 'crypto';
 import { awsClientTransport } from '../aws/aws-transport.js';
 import { getAttestationDoc } from './nsm.js';
+import { assertDevKmsStubAllowed } from './dev-kms-stub-guard.js';
 
 const REGION = process.env['AWS_REGION'] ?? 'us-east-1';
 const MASTER_KEY_PURPOSE = 'master-key';
@@ -92,6 +93,27 @@ async function decryptWithContextAndKeyId(
   kmsKeyId: string,
   encryptionContext: Record<string, string>,
 ): Promise<{ keyId: string; plaintext: Buffer }> {
+  // Dev-only: localstack KMS cannot perform the Nitro Recipient decrypt (it returns no
+  // CiphertextForRecipient), so a plain KMS Decrypt stands in for every seal.ts decrypt (content
+  // keyring, boot-manifest secrets, provider-refresh secrets, boot checkpoints, runtime-DB creds).
+  // Fail-closed exactly like devMasterKeySealers: the shared guard throws outside development/test,
+  // and the production EIF additionally pins NODE_ENV=production in entrypoint.sh AND denies this
+  // flag from the parent env (aws-transport/egress-allowlist tests), so it can never activate there.
+  // The AAD (EncryptionContext) is forwarded unchanged, so tenant/purpose binding is preserved.
+  if (process.env['ENCLAVE_DEV_KMS_STUB'] === 'true') {
+    assertDevKmsStubAllowed(process.env['NODE_ENV'] ?? '');
+    const devResponse = await kmsClient().send(
+      new DecryptCommand({
+        KeyId: kmsKeyId,
+        CiphertextBlob: ciphertext,
+        EncryptionContext: encryptionContext,
+      }),
+    );
+    if (!devResponse.KeyId || !devResponse.Plaintext) {
+      throw new Error('recipient_kms_output_invalid');
+    }
+    return { keyId: devResponse.KeyId, plaintext: Buffer.from(devResponse.Plaintext) };
+  }
   // ephemeral key embedded in attDoc so KMS encrypts the response to us, not over the wire
   const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const ephemeralPubDer = Buffer.from(publicKey.export({ type: 'spki', format: 'der' }));
