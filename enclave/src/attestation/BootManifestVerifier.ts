@@ -197,6 +197,13 @@ export class BootManifestVerifier {
     if (!this.matchesRuntimeIdentity(parsed.signed.manifest, runtimeIdentity)) {
       throw new Error(bootManifestVerificationErrors.identity);
     }
+    // The v2 signature (encodeBootManifest / encodeManifestFields) does NOT cover
+    // inferenceCommissioning, so a parent could graft the marker onto a valid v2 pins-only
+    // envelope and disable receipt verification. The commissioning marker is v3-only (its
+    // full-JSON subject hash covers every field); reject it on the legacy path. Fail closed.
+    if (parsed.signed.manifest.inferenceCommissioning !== undefined) {
+      throw new Error(bootManifestVerificationErrors.invalid);
+    }
     return this.freezeOwnedManifest(parsed.signed.manifest);
   }
 

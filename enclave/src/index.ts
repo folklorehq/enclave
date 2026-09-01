@@ -49,6 +49,7 @@ import {
   inferenceModel,
   phalaInference,
   setInferenceTelemetry,
+  setInferenceCommissioning,
   setInferenceTrustPolicy,
   setVerifiedInferenceReceiptSink,
 } from './inference/phala.js';
@@ -611,6 +612,7 @@ runtimeAttestation = await initializeRuntimeAttestationForBoot(
       throw new Error('signed_inference_trust_policy_unavailable');
     }
     if (trustPolicy) setInferenceTrustPolicy(trustPolicy);
+    setInferenceCommissioning(verifiedBootManifest?.inferenceCommissioning);
     if (signedPolicy) configureInferenceAttestation(signedPolicy);
     else if (!trustPolicy) configureLocalInferencePolicy();
     if (process.env['NODE_ENV'] === 'production' && isSharedPool) {

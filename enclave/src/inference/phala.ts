@@ -106,6 +106,10 @@ let _inferenceTrustPolicy: InferenceTrustPolicyV1 | undefined;
 let _inferenceFetch: typeof fetch | null = null;
 let _inferencePolicy: SignedInferenceAttestation | null = null;
 let _isLocalPolicy = false;
+// Set only from the signature-verified boot manifest's inferenceCommissioning marker. This, not the
+// absence of a trust policy, is what authorizes staged (unverified) inference in production.
+let _commissioningUnverified = false;
+let _commissioningTlsSpki: readonly string[] | undefined;
 
 const TEST_ROLE_MODELS: Record<InferenceModelRole, { model: string; revision: string }> = {
   embed: { model: 'qwen/qwen3-embedding-8b', revision: 'test' },
@@ -150,6 +154,24 @@ export function setInferenceTrustPolicy(policy: unknown): void {
   if (_inferenceTrustPolicy) assertPolicyRoleModels(_inferenceTrustPolicy);
   _backend = null;
   _inferenceFetch = null;
+}
+
+// Enable staged (unverified) inference from the signature-verified boot manifest's commissioning
+// marker. Production-safe because the manifest is signed and PCR-gated; refuses to run staged unless
+// the marker is present. Forbidden alongside a full trust policy (that must keep the real verifier).
+export function setInferenceCommissioning(
+  marker: { unverifiedReceipts: true; tlsSpkiSha256: readonly string[] } | undefined,
+): void {
+  if (marker === undefined) {
+    _commissioningUnverified = false;
+    _commissioningTlsSpki = undefined;
+    return;
+  }
+  if (_inferenceTrustPolicy) {
+    throw new Error('inference commissioning marker conflicts with a signed trust policy');
+  }
+  _commissioningUnverified = true;
+  _commissioningTlsSpki = marker.tlsSpkiSha256;
 }
 
 export function configureInferenceAttestation(input: InferenceAttestationInput): void {
@@ -278,6 +300,23 @@ function telemetry(): TelemetryClient {
   return (_telemetry ??= createTelemetryClient());
 }
 
+let _stagedVerificationWarned = false;
+
+// Loud, content-free, once-per-boot: records that inference receipt verification is staged OFF for a
+// commissioning tenant so the outage is observable rather than silent. Never reached in production
+// unless INFERENCE_COMMISSIONING_UNVERIFIED=1 was set explicitly (see allowsUnverifiedInference).
+function warnStagedInferenceVerification(): void {
+  if (_stagedVerificationWarned) return;
+  _stagedVerificationWarned = true;
+  const mode = process.env['NODE_ENV'] === 'production' ? 'commissioning' : 'non_production';
+  process.stderr.write(
+    `inference.receipt_verification.staged_off mode=${mode} — pinned endpoint, receipts NOT verified\n`,
+  );
+  // Relayed to the control plane via the check-in ops-event channel, so the staged-off state is
+  // observable where the enclave's own stderr is not (production has no debug-mode log reader).
+  telemetry().track('inference.receipt_verification_staged_off', 'system', { mode });
+}
+
 export function buildReceiptVerifier(
   telemetryClient: TelemetryClient = telemetry(),
   fetchImpl?: typeof fetch,
@@ -301,7 +340,8 @@ export function buildReceiptVerifier(
       verifyReceipt: async () => undefined,
     };
   }
-  if (_inferencePolicy && isNonProductionEnvironment()) {
+  if (_inferencePolicy && allowsUnverifiedInference()) {
+    warnStagedInferenceVerification();
     return {
       ensureAttested: async () => undefined,
       verifyReceipt: async () => undefined,
@@ -341,7 +381,7 @@ function getBackend(): TeeEndpointBackend | OpenAICompatBackend {
     return _backend;
   }
 
-  if (!_inferencePolicy || !isNonProductionEnvironment()) {
+  if (!_inferencePolicy || !allowsUnverifiedInference()) {
     throw new Error('inference commissioning prerequisite unmet: signed trust policy unavailable');
   }
 
@@ -354,8 +394,23 @@ function getBackend(): TeeEndpointBackend | OpenAICompatBackend {
     responseVerifier: buildReceiptVerifier(),
     usageSink: recordTokenUsage,
     telemetry: telemetry(),
+    // Even with receipt verification staged off, keep the TLS transport pinned to the real endpoint
+    // SPKI (from the signed commissioning marker) so content never egresses to an unpinned host.
+    ...(commissioningPinnedFetch() ? { fetchImpl: commissioningPinnedFetch()! } : {}),
   });
   return _backend;
+}
+
+// A pinned fetch for staged commissioning inference: same transport pinning as the verified path
+// (proxy + SPKI), built from the pins endpoint and the signed marker's tlsSpkiSha256.
+function commissioningPinnedFetch(): typeof fetch | undefined {
+  if (!_commissioningUnverified || !_commissioningTlsSpki || !_inferencePolicy) return undefined;
+  const url = new URL(_inferencePolicy.endpoint);
+  return (_inferenceFetch ??= createPinnedInferenceFetch({
+    origin: url.origin,
+    route: url.pathname,
+    tlsSpkiSha256: [..._commissioningTlsSpki],
+  }));
 }
 
 function pinnedInferenceFetch(policy: InferenceTrustPolicyV1): typeof fetch {
@@ -377,7 +432,7 @@ export function assertInferenceConfigured(): void {
     return;
   }
 
-  if (!_inferenceTrustPolicy && !(_inferencePolicy && isNonProductionEnvironment())) {
+  if (!_inferenceTrustPolicy && !(_inferencePolicy && allowsUnverifiedInference())) {
     currentInferenceTrustPolicy();
   }
   if (!PROXY_PORT && !apiKey()) {
@@ -419,6 +474,14 @@ function roleModelName(role: InferenceModelRole): string {
 
 function isNonProductionEnvironment(): boolean {
   return process.env['NODE_ENV'] !== 'production';
+}
+
+// Staged (unverified) inference is permitted only when: this is a non-production env, OR the
+// signature-verified boot manifest carried the explicit inferenceCommissioning marker
+// (_commissioningUnverified). It is NEVER inferred from the absence of a trust policy — the
+// active-policy carrier path also has no trust policy, and must keep the real verifier.
+function allowsUnverifiedInference(): boolean {
+  return isNonProductionEnvironment() || _commissioningUnverified;
 }
 
 function isTestOnlyUnverifiedInference(): boolean {
