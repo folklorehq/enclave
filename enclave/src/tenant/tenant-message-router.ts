@@ -11,7 +11,7 @@ import {
 } from '@folklore/contracts';
 import { decryptPayload, type EncryptedPayload } from '../ingest/receiver.js';
 import type { CanaryAuthorizationConsumer } from '../ingest/HttpCanaryAuthorizationConsumer.js';
-import type { ProcessedFact } from '../pipeline/index.js';
+import { PipelineProcessingError, type ProcessedFact } from '../pipeline/index.js';
 import type { OAuthRefreshCommand, OAuthRefreshMetadataUpdate } from '@folklore/contracts/enclave';
 import { pullDueMessageSchema } from '@folklore/contracts/enclave';
 import { z } from 'zod';
@@ -39,6 +39,7 @@ import {
 } from '../pull/source-connections-client.js';
 import { withInferenceReceiptContext } from '../inference/inference-receipt-context.js';
 import { CodebaseSelectionStore } from '../codebase/CodebaseSelectionStore.js';
+import { errorType } from '../logging/error-fields.js';
 
 export interface IngestMessage {
   encryption_version: 2;
@@ -130,6 +131,24 @@ export class CrossTenantRoutingError extends Error {
   }
 }
 
+export type TenantMessageRoutePhase =
+  | 'decrypt'
+  | 'pipeline'
+  | 'encrypt'
+  | 'store'
+  | 'embed'
+  | 'index';
+
+export class TenantMessageRouteError extends Error {
+  constructor(
+    readonly phase: TenantMessageRoutePhase,
+    readonly errorType: string,
+  ) {
+    super('tenant_message_route_failed');
+    this.name = 'TenantMessageRouteError';
+  }
+}
+
 function isPullDueMessage(raw: RoutableMessage): raw is PullDueMessage {
   return raw.type === 'pull-due';
 }
@@ -204,16 +223,21 @@ export class TenantMessageRouter {
     };
     if (raw.encryption_version !== 2) throw new Error('unsupported_ingest_encryption_version');
     this.validateCanaryAuthorization(raw);
-    const plaintext = decryptPayload(payload, context.ingestPrivateKey, {
-      version: raw.encryption_version,
-      tenantId: raw.tenant_id,
-      source: raw.source,
-      type: raw.type,
-      eventType: raw.eventType,
-      canaryRunId: raw.canary_run_id,
-      requestId: raw.request_id,
-      canaryAuthorization: raw.canary_authorization,
-    });
+    let plaintext: Buffer;
+    try {
+      plaintext = decryptPayload(payload, context.ingestPrivateKey, {
+        version: raw.encryption_version,
+        tenantId: raw.tenant_id,
+        source: raw.source,
+        type: raw.type,
+        eventType: raw.eventType,
+        canaryRunId: raw.canary_run_id,
+        requestId: raw.request_id,
+        canaryAuthorization: raw.canary_authorization,
+      });
+    } catch (error) {
+      throw new TenantMessageRouteError('decrypt', errorType(error));
+    }
     this.validateCanaryBody(raw.canary_authorization, plaintext);
     const canaryProof = raw.canary_authorization
       ? await this.createCanaryProof(raw.canary_authorization)
@@ -236,11 +260,19 @@ export class TenantMessageRouter {
         raw.canary_run_id && raw.request_id
           ? { canary_run_id: raw.canary_run_id, request_id: raw.request_id }
           : undefined;
-      const facts = await withInferenceReceiptContext(receiptContext, () =>
-        raw.type === 'pull-normalized'
-          ? context.pipeline.handleNormalized(plaintext, raw.source)
-          : context.pipeline.handle(plaintext, raw.source, raw.eventType ?? ''),
-      );
+      let facts: ProcessedFact[];
+      try {
+        facts = await withInferenceReceiptContext(receiptContext, () =>
+          raw.type === 'pull-normalized'
+            ? context.pipeline.handleNormalized(plaintext, raw.source)
+            : context.pipeline.handle(plaintext, raw.source, raw.eventType ?? ''),
+        );
+      } catch (error) {
+        if (error instanceof PipelineProcessingError) {
+          throw new TenantMessageRouteError(error.phase, error.errorType);
+        }
+        throw new TenantMessageRouteError('pipeline', errorType(error));
+      }
       if (canaryProof && raw.canary_authorization) {
         const outcomeProof = await this.createCanaryOutcomeProof(raw.canary_authorization, facts);
         const completed = await this.completeCanaryAuthorization(outcomeProof);

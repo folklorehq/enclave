@@ -26,8 +26,10 @@ import {
 } from '../pull/pull-runner.js';
 import { HALT_POLL_INTERVAL_MS, type HaltGate } from '../control/HaltGate.js';
 import { DurableAckBatch } from '../ingest/DurableAckBatch.js';
+import { errorType as classifyErrorType } from '../logging/error-fields.js';
 import {
   parseRoutableMessage,
+  TenantMessageRouteError,
   type RoutableMessage,
   type TenantMessageRouter,
 } from './tenant-message-router.js';
@@ -195,9 +197,12 @@ export class QueueSetDrainer {
     ackBatch: DurableAckBatch,
   ): Promise<void> {
     let releaseReplay: (() => Promise<void>) | undefined;
+    let phase = 'parse';
+    let errorType = 'Error';
     try {
       const parsed: unknown = JSON.parse(msg.Body!);
       const raw = parseRoutableMessage(parsed);
+      phase = 'route';
       const routed = await this.deps.router.route(raw, assignment.tenantId);
       releaseReplay = routed.releaseReplay;
       const {
@@ -209,13 +214,16 @@ export class QueueSetDrainer {
         shouldAcknowledge,
         commitReplay,
       } = routed;
+      phase = 'archive';
       this.archive(
         context.tenantId,
         msg,
         assignment.rawPayloadsBucket ?? this.deps.rawPayloadsBucket ?? '',
       );
+      phase = 'emit';
       await this.emitFacts(facts, assignment.assignmentGeneration);
       if (!shouldAcknowledge) {
+        phase = 'release';
         await this.releaseReplay(releaseReplay);
         releaseReplay = undefined;
         const failure = this.pullFailureAfterRetry(raw, assignment.assignmentGeneration);
@@ -254,13 +262,22 @@ export class QueueSetDrainer {
         ack: () => this.ackCurrentAssignment(assignment, msg.ReceiptHandle!),
       });
       releaseReplay = undefined;
-    } catch {
+    } catch (error) {
       await this.releaseReplay(releaseReplay);
-      // Content-free SQS id only — err could carry a decrypted-content snippet. An
-      // unassigned or cross-tenant message is never acked here, so it stays in queue (then DLQ).
+      if (error instanceof TenantMessageRouteError) {
+        phase = error.phase;
+        errorType = error.errorType;
+      } else {
+        errorType = classifyErrorType(error);
+      }
+      // The fixed phase is content-free; an unassigned or cross-tenant message is never acked here,
+      // so it stays in queue (then DLQ).
       // A tenant torn down mid-sweep (reassignment §4.3 zeroizes its context) lands here too — its
       // ingest key throws — so the message is left unacked and redelivered once reassigned; fail-closed.
-      this.deps.logger.error('failed to process message', { id: msg.MessageId });
+      this.deps.logger.error('ingest_message_processing_failed', {
+        phase,
+        error_type: errorType,
+      });
     }
   }
 
