@@ -84,6 +84,7 @@ export async function runExport(
 
   const page = await deps.reader.loadPage(orgId, target.themeId, target.audienceId);
   if (!page) return null;
+  if (page.owner.isAggregate !== false) return null;
 
   // Fail closed: an above-public ceiling must resolve to exactly ONE audience's access (option B);
   // no resolved audience means we cannot bound the projection, so refuse rather than over-collect.
