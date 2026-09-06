@@ -211,7 +211,9 @@ async function fetchOAuthRouteCapability(routeId: string): Promise<OAuthRouteCap
       new GetItemCommand({
         TableName: ROUTING_TABLE,
         Key: { routingKey: { S: `oauth#${routeId}` } },
-        ProjectionExpression: 'routeId, orgId, source, attestationGeneration',
+        ProjectionExpression: 'routeId, orgId, #source, attestationGeneration',
+        // source is a DynamoDB reserved word; bare it fails with ValidationException.
+        ExpressionAttributeNames: { '#source': 'source' },
         ConsistentRead: true,
       }),
     );
