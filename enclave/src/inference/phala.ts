@@ -2,8 +2,10 @@ import {
   AciReceiptVerifier,
   OpenAICompatBackend,
   TeeEndpointBackend,
+  assertVerifiedActivePolicySnapshotV1,
   type InferenceResponseVerifier,
   type ToolSpec,
+  type VerifiedActivePolicySnapshotV1,
 } from '@folklore/inference';
 import {
   inferenceTrustPolicyV1Schema,
@@ -11,6 +13,7 @@ import {
   type InferenceModelRole,
   type InferenceTrustPolicyV1,
   type InferenceTrustPolicyV2,
+  type NormalizedAssignmentManifestV1,
 } from '@folklore/contracts';
 import { createTelemetryClient, type TelemetryClient } from '@folklore/telemetry';
 import {
@@ -91,6 +94,16 @@ function assertPolicyRoleModels(policy: InferenceTrustPolicyV1): void {
 
 let GENERATE_MAX_TOKENS = DEFAULT_GENERATE_MAX_TOKENS;
 export let EMBED_DIM = DEFAULT_EMBED_DIM;
+
+// A shared process cannot change an existing tenant's index dimension for another policy.
+export function assertPublicInferenceEmbeddingDimension(
+  snapshot: VerifiedActivePolicySnapshotV1,
+): void {
+  assertVerifiedActivePolicySnapshotV1(snapshot);
+  if (snapshot.policy.roles.embed.capabilities.embeddingDimension !== EMBED_DIM) {
+    throw new Error('public_aci_embedding_index_dimension_mismatch');
+  }
+}
 
 function apiKey(): string | undefined {
   return process.env['TEE_API_KEY'];
@@ -270,7 +283,20 @@ export function configureInferenceAttestationForTest(input: InferenceAttestation
   configureInferenceAttestation(input);
 }
 
-export function assertInferenceAttestationEcho(input: InferenceAttestationInput | undefined): void {
+export function assertInferenceAttestationEcho(
+  input: InferenceAttestationInput | undefined,
+  wire: NormalizedAssignmentManifestV1['wire'] = 'SignedAssignmentManifestV3',
+): void {
+  if (_publicInferenceTrustPolicy) {
+    if (wire !== 'SignedAssignmentManifestV4') {
+      throw new Error('public_inference_requires_policy_assignment_v4');
+    }
+    // Current signed V4 producers retain this legacy compatibility echo. It cannot
+    // authorize or install inference settings on a public-profile process. The
+    // verified per-tenant V4 carrier remains the sole role/dimension authority.
+    if (input !== undefined) inferenceAttestationConfigSchema.parse(input);
+    return;
+  }
   if (input === undefined) return;
   const parsed = inferenceAttestationConfigSchema.parse(input);
   if (!sameInferenceAttestation(signedInferenceAttestation(), parsed)) {

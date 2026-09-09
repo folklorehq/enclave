@@ -20,6 +20,7 @@ import type {
 import { PublicAciPinnedKeysetAuthority } from './PublicAciPinnedKeysetAuthority.js';
 import { createPublicAciOperationBackend } from './PublicAciOperationBackend.js';
 import { createPinnedInferenceTransport } from '../egress/inference.js';
+import { assertPublicInferenceEmbeddingDimension } from './phala.js';
 
 // Leave ten seconds of headroom below the NSM checkpoint maximum age.
 const PUBLIC_ACI_OPERATION_BUDGET_MS = 50_000;
@@ -115,6 +116,7 @@ export function createPublicAciRuntimeBackendFactory(
     )
       throw new Error('public_aci_tenant_mismatch');
     const role = exactRole(binding, snapshot);
+    assertPublicInferenceEmbeddingDimension(snapshot);
     const startedAt = performance.now();
     const remainingBudget = () => {
       const remaining = Math.floor(

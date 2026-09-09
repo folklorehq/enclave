@@ -44,6 +44,7 @@ import {
 } from './wiki/content-sealers.js';
 import {
   assertInferenceConfigured,
+  assertPublicInferenceEmbeddingDimension,
   assertInferenceAttestationEcho,
   configureInferenceAttestation,
   configureLocalInferencePolicy,
@@ -515,6 +516,9 @@ const policyAssignmentApplier = new TenantAssignmentApplier({
         deploymentId: assignment.deploymentId,
       }),
     });
+    if (verifiedBootManifest?.providerInferenceTrustPolicy) {
+      assertPublicInferenceEmbeddingDimension(snapshot);
+    }
     return snapshot;
   },
   logger,
@@ -883,7 +887,7 @@ async function refreshAssignments(): Promise<void> {
         ASSIGNMENT_MANIFEST_PUBLIC_KEY,
       ),
     );
-    assertInferenceAttestationEcho(verified.inferenceAttestation);
+    assertInferenceAttestationEcho(verified.inferenceAttestation, parsed.wire);
     const isV4 = parsed.wire === 'SignedAssignmentManifestV4';
     if (isV4 && !liveActivePolicySnapshotVerifier) {
       throw new Error('shared_pool_active_policy_boot_trust_unavailable');
