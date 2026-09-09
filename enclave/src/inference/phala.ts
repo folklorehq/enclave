@@ -7,8 +7,10 @@ import {
 } from '@folklore/inference';
 import {
   inferenceTrustPolicyV1Schema,
+  inferenceTrustPolicyV2Schema,
   type InferenceModelRole,
   type InferenceTrustPolicyV1,
+  type InferenceTrustPolicyV2,
 } from '@folklore/contracts';
 import { createTelemetryClient, type TelemetryClient } from '@folklore/telemetry';
 import {
@@ -103,6 +105,7 @@ let _backend: TeeEndpointBackend | OpenAICompatBackend | null = null;
 let _telemetry: TelemetryClient | null = null;
 let _verifiedReceiptSink: ((sessionId: string) => void | Promise<void>) | undefined;
 let _inferenceTrustPolicy: InferenceTrustPolicyV1 | undefined;
+let _publicInferenceTrustPolicy: InferenceTrustPolicyV2 | undefined;
 let _inferenceFetch: typeof fetch | null = null;
 let _inferencePolicy: SignedInferenceAttestation | null = null;
 let _isLocalPolicy = false;
@@ -144,6 +147,9 @@ export function setInferenceTrustPolicy(policy: unknown): void {
     return;
   }
   const parsed = inferenceTrustPolicyV1Schema.parse(policy);
+  if (_publicInferenceTrustPolicy) {
+    throw new Error('signed inference trust policy conflicts with public inference trust policy');
+  }
   if (_inferenceTrustPolicy) {
     if (JSON.stringify(_inferenceTrustPolicy) !== JSON.stringify(parsed)) {
       throw new Error('signed inference trust policy changed');
@@ -152,6 +158,26 @@ export function setInferenceTrustPolicy(policy: unknown): void {
   }
   _inferenceTrustPolicy = parsed;
   if (_inferenceTrustPolicy) assertPolicyRoleModels(_inferenceTrustPolicy);
+  _backend = null;
+  _inferenceFetch = null;
+}
+
+/** Configure the public provider profile used only for approved role metadata lookup. */
+export function setPublicInferenceTrustPolicy(policy: unknown): void {
+  const parsed = inferenceTrustPolicyV2Schema.parse(policy);
+  if (parsed.evidence.profile !== 'dstack-tdx-public-v1') {
+    throw new Error('public inference trust policy requires dstack-tdx-public-v1 profile');
+  }
+  if (_inferenceTrustPolicy || _inferencePolicy || _isLocalPolicy || _commissioningUnverified) {
+    throw new Error('public inference trust policy conflicts with legacy inference policy');
+  }
+  if (_publicInferenceTrustPolicy) {
+    if (JSON.stringify(_publicInferenceTrustPolicy) !== JSON.stringify(parsed)) {
+      throw new Error('public inference trust policy changed');
+    }
+    return;
+  }
+  _publicInferenceTrustPolicy = parsed;
   _backend = null;
   _inferenceFetch = null;
 }
@@ -170,11 +196,17 @@ export function setInferenceCommissioning(
   if (_inferenceTrustPolicy) {
     throw new Error('inference commissioning marker conflicts with a signed trust policy');
   }
+  if (_publicInferenceTrustPolicy) {
+    throw new Error('inference commissioning marker conflicts with public inference trust policy');
+  }
   _commissioningUnverified = true;
   _commissioningTlsSpki = marker.tlsSpkiSha256;
 }
 
 export function configureInferenceAttestation(input: InferenceAttestationInput): void {
+  if (_publicInferenceTrustPolicy) {
+    throw new Error('signed inference attestation conflicts with public inference trust policy');
+  }
   const parsed = inferenceAttestationConfigSchema.parse(input);
   if (_inferencePolicy) {
     if (!sameInferenceAttestation(_inferencePolicy, parsed)) {
@@ -190,6 +222,9 @@ export function configureInferenceAttestation(input: InferenceAttestationInput):
 }
 
 export function configureLocalInferencePolicy(env: NodeJS.ProcessEnv = process.env): void {
+  if (_publicInferenceTrustPolicy) {
+    throw new Error('local inference policy conflicts with public inference trust policy');
+  }
   if (env['NODE_ENV'] !== 'development' && env['NODE_ENV'] !== 'test') {
     throw new Error('local inference policy forbidden in production');
   }
@@ -351,6 +386,9 @@ export function buildReceiptVerifier(
 }
 
 function getBackend(): TeeEndpointBackend | OpenAICompatBackend {
+  if (_publicInferenceTrustPolicy) {
+    throw new Error('global inference backend unavailable under public inference profile');
+  }
   if (_backend) return _backend;
 
   if (_isLocalPolicy) {
@@ -418,6 +456,9 @@ function pinnedInferenceFetch(policy: InferenceTrustPolicyV1): typeof fetch {
 }
 
 export function resolveBaseUrl(): string {
+  if (_publicInferenceTrustPolicy) {
+    return `${_publicInferenceTrustPolicy.origin}${_publicInferenceTrustPolicy.route}`;
+  }
   if (_inferenceTrustPolicy) {
     return `${_inferenceTrustPolicy.origin}${_inferenceTrustPolicy.route}`;
   }
@@ -427,6 +468,13 @@ export function resolveBaseUrl(): string {
 }
 
 export function assertInferenceConfigured(): void {
+  if (_publicInferenceTrustPolicy) {
+    if (!apiKey()) {
+      throw new Error('inference not configured: set TEE_API_KEY');
+    }
+    resolveBaseUrl();
+    return;
+  }
   if (_isLocalPolicy) {
     resolveBaseUrl();
     return;
@@ -456,6 +504,7 @@ function requireInferenceTrustPolicy(): InferenceTrustPolicyV1 {
 }
 
 function inferenceRoleModel(role: InferenceModelRole): { model: string; revision: string } {
+  if (_publicInferenceTrustPolicy) return _publicInferenceTrustPolicy.roleModels[role];
   if (_inferenceTrustPolicy) return _inferenceTrustPolicy.roleModels[role];
   if (_inferencePolicy) return { model: roleModelName(role), revision: 'unversioned' };
   if (process.env['NODE_ENV'] === 'test') return TEST_ROLE_MODELS[role];

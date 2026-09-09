@@ -31,6 +31,7 @@ import {
   type TenantPolicyFreshnessPort,
   type TenantPolicyRuntimeEvidencePort,
   type TenantPolicyVerifiedBindingForwarder,
+  type TenantPolicyVerifiedBindingBackendFactory,
   type TenantPolicySnapshotProvider,
 } from '../inference/TenantPolicyBoundInference.js';
 import { TenantContext } from './tenant-context.js';
@@ -84,6 +85,9 @@ export interface TenantContextFactoryDeps {
   activePolicyBindingForwarderFor?: (
     tenantId: string,
   ) => TenantPolicyVerifiedBindingForwarder | undefined;
+  activePolicyBackendFor?: (
+    tenantId: string,
+  ) => TenantPolicyVerifiedBindingBackendFactory | undefined;
 }
 
 const MASTER_KEY_BYTES = 32;
@@ -165,10 +169,12 @@ export class TenantContextFactory {
     if (!this.deps.enforceTenantPolicy) return cached;
     return new TenantPolicyBoundInference(tenantId, snapshotProvider, cached, {
       freshnessProvider: () => this.deps.activePolicyFreshnessFor?.(tenantId),
+      operationCache: cache,
       requireFreshness: true,
       runtimeEvidence: this.deps.activePolicyRuntimeEvidenceFor?.(tenantId),
       requireRuntimeEvidence: true,
       verifiedBindingForwarder: this.deps.activePolicyBindingForwarderFor?.(tenantId),
+      backendForVerifiedBinding: this.deps.activePolicyBackendFor?.(tenantId),
       requireBindingForwarding: true,
     });
   }

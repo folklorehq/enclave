@@ -184,6 +184,9 @@ function encodeInferenceTrustPolicy(
       [...policy.evidence.measuredComposeDigests],
       [...policy.evidence.imageDigests],
       [...policy.evidence.dstackKmsRoots],
+      ...(policy.evidence.profile === undefined
+        ? []
+        : [['public-aci-profile-v1', policy.evidence.profile]]),
     ],
     [
       policy.sourceProvenance.repositories.map((repository) => [
@@ -599,6 +602,12 @@ function encodeManifestFields(
   }
   if (manifest.inferenceTrustPolicy !== undefined) {
     fields.push(encodeInferenceTrustPolicy(manifest.inferenceTrustPolicy));
+  }
+  if (manifest.providerInferenceTrustPolicy !== undefined) {
+    fields.push([
+      'provider-inference-trust-policy.v1',
+      encodeInferenceTrustPolicy(manifest.providerInferenceTrustPolicy),
+    ]);
   }
   if (manifest.enclaveOutputKey !== undefined) {
     fields.push([

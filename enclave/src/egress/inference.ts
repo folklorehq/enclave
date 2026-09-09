@@ -11,22 +11,35 @@ export function createPinnedInferenceFetch(
   policy: InferenceTransportPolicy,
   fetchImpl: typeof globalThis.fetch = globalThis.fetch,
 ): typeof globalThis.fetch {
+  return createPinnedInferenceTransport(policy, fetchImpl).fetch;
+}
+
+export function createPinnedInferenceTransport(
+  policy: InferenceTransportPolicy,
+  fetchImpl: typeof globalThis.fetch = globalThis.fetch,
+): { fetch: typeof globalThis.fetch; close: () => Promise<void> } {
+  const origin = policy.origin;
+  const route = policy.route;
+  const pins = [...policy.tlsSpkiSha256];
   const dispatcher = new ProxyAgent({
     uri: `http://localhost:${EGRESS_PROXY_PORT}`,
     requestTls: {
       checkServerIdentity: (hostname, certificate) =>
-        verifyInferenceCertificate(hostname, certificate, policy.tlsSpkiSha256),
+        verifyInferenceCertificate(hostname, certificate, pins),
     },
   });
 
-  return async (input, init) => {
+  let closed = false;
+  let closing: Promise<void> | undefined;
+  const fetch: typeof globalThis.fetch = async (input, init) => {
+    if (closed) throw new Error('inference_transport_closed');
     const supplied =
       typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     const url = new URL(supplied);
-    const routePrefix = policy.route === '/' ? '/' : `${policy.route}/`;
+    const routePrefix = route === '/' ? '/' : `${route}/`;
     if (
-      url.origin !== policy.origin ||
-      (url.pathname !== policy.route && !url.pathname.startsWith(routePrefix))
+      url.origin !== origin ||
+      (url.pathname !== route && !url.pathname.startsWith(routePrefix))
     ) {
       throw new Error('inference_origin_mismatch');
     }
@@ -35,6 +48,13 @@ export function createPinnedInferenceFetch(
       redirect: 'error',
       ...(fetchImpl === globalThis.fetch ? { dispatcher } : {}),
     } as RequestInit & { dispatcher?: ProxyAgent });
+  };
+  return {
+    fetch,
+    close: () => {
+      closed = true;
+      return (closing ??= dispatcher.close());
+    },
   };
 }
 

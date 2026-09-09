@@ -3,6 +3,14 @@ import type { BootManifestCoordinatorResult } from './BootManifestCoordinator.js
 import type { LoadedBootManifestSecret } from './BootManifestSecretLoader.js';
 import type { BootManifestRuntimeIdentity, VerifiedBootManifest } from './BootManifestVerifier.js';
 
+type DeepReadonly<T> = T extends (...args: never[]) => unknown
+  ? T
+  : T extends readonly (infer U)[]
+    ? readonly DeepReadonly<U>[]
+    : T extends object
+      ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
+      : T;
+
 export const attestationBootStateErrors = {
   notVerified: 'attestation_boot_not_verified',
   kmsNotReady: 'attestation_boot_kms_not_ready',
@@ -248,6 +256,9 @@ export class AttestationBootState {
       ),
       manifest.inferenceAttestation ?? null,
       manifest.inferenceTrustPolicy ?? null,
+      ...(manifest.providerInferenceTrustPolicy
+        ? [['providerInferenceTrustPolicy', manifest.providerInferenceTrustPolicy]]
+        : []),
       manifest.assignmentManifestPublicKeySpki ?? null,
       manifest.enclaveOutputKey
         ? [
@@ -279,11 +290,15 @@ export class AttestationBootState {
           modelAllowlist: Object.freeze([...manifest.inferenceAttestation.modelAllowlist]),
         })
       : undefined;
+    const providerInferenceTrustPolicy = manifest.providerInferenceTrustPolicy
+      ? this.deepFreeze(manifest.providerInferenceTrustPolicy)
+      : undefined;
     return Object.freeze({
       ...manifest,
       resourcePrefixes: Object.freeze({ ...manifest.resourcePrefixes }),
       secretReferences,
       ...(inferenceAttestation ? { inferenceAttestation } : {}),
+      ...(providerInferenceTrustPolicy ? { providerInferenceTrustPolicy } : {}),
     });
   }
 
@@ -295,6 +310,14 @@ export class AttestationBootState {
 
   private ownCheckpoint(checkpoint: AttestationBootCheckpoint): AttestationBootCheckpoint {
     return Object.freeze({ ...checkpoint });
+  }
+
+  private deepFreeze<T>(value: T): DeepReadonly<T> {
+    if (value && typeof value === 'object') {
+      Object.freeze(value);
+      for (const child of Object.values(value as Record<string, unknown>)) this.deepFreeze(child);
+    }
+    return value as DeepReadonly<T>;
   }
 
   private failure(code: AttestationBootStateError): Error {

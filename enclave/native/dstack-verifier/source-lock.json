@@ -37,8 +37,8 @@
       "rev": "542d3d41f2051af88f2f0c76ca3c1212a64ac545",
       "target": "cfg(target_os = \"linux\")",
       "defaultFeatures": false,
-      "runtimePath": "Linux-only pinned request-mapping seam; every current build is fail-closed and only exercises the bounded protocol adapter until offline verification is available",
-      "upstreamCollateralBehavior": "The pinned upstream verifier API requires internally configured collateral clients and may fetch PCCS or OS images; Gate A does not invoke that online path. The native boundary accepts supplied collateral only for bounded decoding and digest binding, maps the exact upstream request fields for compile-time compatibility, and returns dstack_unavailable until an offline upstream API is available."
+      "runtimePath": "Version 1 remains fail-closed. Version 2 uses pinned dcap-qvl offline production-root verification and pinned dstack-attest measured runtime-event replay on Linux.",
+      "upstreamCollateralBehavior": "The upstream online verifier is not invoked. Version 2 verifies caller-supplied QuoteCollateralV3 with QuoteVerifier::new_prod at the trusted caller evaluation time, then checks runtime-event replay against verified RTMR3. No collateral or OS image fetch occurs. OS image, ACPI and key-custody authorization are not asserted."
     },
     "raTls": {
       "package": "ra-tls",
@@ -46,6 +46,16 @@
       "git": "https://github.com/Dstack-TEE/dstack",
       "rev": "542d3d41f2051af88f2f0c76ca3c1212a64ac545",
       "target": "cfg(target_os = \"linux\")"
+    },
+    "dstackAttest": {
+      "package": "dstack-attest",
+      "git": "https://github.com/Dstack-TEE/dstack",
+      "rev": "542d3d41f2051af88f2f0c76ca3c1212a64ac545",
+      "defaultFeatures": false
+    },
+    "ez-hash": {
+      "version": "1.1.0",
+      "requirement": "=1.1.0"
     }
   },
   "boundary": {
@@ -56,5 +66,21 @@
     "customerContent": false,
     "collateralFetch": false,
     "imageFetch": false
+  },
+  "productionQuoteRoot": {
+    "path": "trusted/IntelSGXRootCA.der",
+    "sha256": "44a0196b2b99f889b8e149e95b807a350e7424964399e885a7cbb8ccfab674d3",
+    "source": "dcap-qvl 0.5.2 TrustedRootCA.der",
+    "verification": "QuoteVerifier::new_prod; no custom trust roots accepted"
+  },
+  "publicProfileCollateral": {
+    "path": "trusted/phala-tdx-collateral.json",
+    "sha256": "689c1a531486f41bc14a45844ed273174360b6a5ceaa5a6d8a398c577d1aba3e",
+    "retrievedFrom": "https://pccs.phala.network",
+    "retrievedAt": "2026-09-08T20:41:02Z",
+    "format": "dcap-qvl 0.5.2 QuoteCollateralV3, JSON whitespace normalized",
+    "verification": "Verified offline by QuoteVerifier::new_prod against actual public quote. Native validates all collateral certificate/CRL/TCB/QE validity on every call. Expiry or hardware mismatch fails closed and requires a reviewed collateral refresh, not relaxed verification.",
+    "providerReportIncluded": false,
+    "productionApproval": false
   }
 }

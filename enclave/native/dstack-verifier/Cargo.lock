@@ -1016,7 +1016,9 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "dcap-qvl",
+ "dstack-attest",
  "dstack-verifier 0.6.0",
+ "ez-hash",
  "parity-scale-codec",
  "ra-tls",
  "serde",

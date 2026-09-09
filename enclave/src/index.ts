@@ -28,6 +28,7 @@ import { saveAllTenantIndices } from './tenant/index-persistence.js';
 import { createTenantResolver } from './tenant/tenant-resolver.js';
 import { BoxServer } from './http/BoxServer.js';
 import { SynthesisConsumer } from './workers/SynthesisConsumer.js';
+import { recordTokenUsage } from './inference/TokenUsageScope.js';
 import { fetchLinkPreview } from './preview/preview-client.js';
 import { HaltGate, poolHaltKey, tenantHaltKey } from './control/HaltGate.js';
 import { ActivityMonitor } from './control/ActivityMonitor.js';
@@ -51,6 +52,7 @@ import {
   setInferenceTelemetry,
   setInferenceCommissioning,
   setInferenceTrustPolicy,
+  setPublicInferenceTrustPolicy,
   setVerifiedInferenceReceiptSink,
 } from './inference/phala.js';
 import { currentInferenceReceiptContext } from './inference/inference-receipt-context.js';
@@ -65,8 +67,10 @@ import {
   type TenantPolicyFreshnessPort,
   type TenantPolicyRuntimeEvidencePort,
   type TenantPolicyVerifiedBindingForwarder,
+  type TenantPolicyVerifiedBindingBackendFactory,
 } from './inference/TenantPolicyBoundInference.js';
-import { TrustedTimeAuthority } from './inference/TrustedTimeAuthority.js';
+import { createPublicAciRuntimeBackendFactory } from './inference/PublicAciRuntimeBackendFactory.js';
+import { createOperationTrustedTime } from './inference/OperationTrustedTime.js';
 import { NsmTrustedTimeSource } from './inference/NsmTrustedTimeSource.js';
 import { installGlobalEgressDispatcher } from './egress/proxy.js';
 import {
@@ -128,7 +132,6 @@ import { BootBoundGenerationHighWaterVerifier } from './inference/BootBoundGener
 import {
   ActivePolicyCarrierVerifier,
   type DurableGenerationHighWaterClientPort,
-  type TrustedTimeAuthorityPort,
   VerifiedActivePolicySnapshotVerifier,
   type VerifiedActivePolicySnapshotV1,
   ActivePolicyModelProvenanceSource,
@@ -272,10 +275,6 @@ type LiveTenantPolicySnapshot = TenantPolicySnapshotLike & VerifiedActivePolicyS
 let activePolicySnapshotFor: (tenantId: string) => LiveTenantPolicySnapshot | undefined = () =>
   undefined;
 const evictedPolicyTenants = new Set<string>();
-const trustedTimeByTenant = new Map<
-  string,
-  { authority: TrustedTimeAuthority; ready: Promise<void> }
->();
 let activePolicyFreshnessFor: (tenantId: string) => TenantPolicyFreshnessPort | undefined = () =>
   undefined;
 let activePolicyRuntimeEvidenceFor: (
@@ -285,6 +284,27 @@ let activePolicyBindingForwarderFor: (
   tenantId: string,
 ) => TenantPolicyVerifiedBindingForwarder | undefined = () => undefined;
 const activePolicyProvenanceSource = new ActivePolicyModelProvenanceSource();
+
+function activePolicyBackendFor(
+  tenantId: string,
+): TenantPolicyVerifiedBindingBackendFactory | undefined {
+  const providerPolicy = verifiedBootManifest?.providerInferenceTrustPolicy;
+  if (!providerPolicy) return undefined;
+  return async (binding, snapshot) => {
+    const freshness = activePolicyFreshnessFor(tenantId);
+    if (!freshness || !runtimeAttestation || activePolicySnapshotFor(tenantId) !== snapshot) {
+      throw new Error('public_aci_runtime_authority_unavailable');
+    }
+    const factory = createPublicAciRuntimeBackendFactory({
+      providerPolicy,
+      tenantId,
+      freshness,
+      bootEpoch: String(runtimeAttestation.bootSessionState().bootEpoch),
+      apiKey: process.env['TEE_API_KEY'],
+    });
+    return factory(binding, snapshot);
+  };
+}
 
 const tenantFactory = new TenantContextFactory({
   s3,
@@ -298,6 +318,7 @@ const tenantFactory = new TenantContextFactory({
   activePolicyFreshnessFor: (tenantId) => activePolicyFreshnessFor(tenantId),
   activePolicyRuntimeEvidenceFor: (tenantId) => activePolicyRuntimeEvidenceFor(tenantId),
   activePolicyBindingForwarderFor: (tenantId) => activePolicyBindingForwarderFor(tenantId),
+  activePolicyBackendFor,
   ...(devKmsStub
     ? devMasterKeySealers(process.env['NODE_ENV'] ?? '', process.env['DATA_KEK'])
     : {}),
@@ -347,7 +368,6 @@ const assignmentApplier = new TenantAssignmentApplier(
   DEPLOYMENT_ID,
   (tenantId) => {
     evictedPolicyTenants.delete(tenantId);
-    trustedTimeByTenant.delete(tenantId);
     drainerRef.current?.finishTenantEviction(tenantId);
     synthesisConsumer?.finishTenantEviction(tenantId);
     tenantRequests.activate(tenantId);
@@ -373,7 +393,6 @@ const assignmentApplier = new TenantAssignmentApplier(
   },
   (tenantId) => {
     evictedPolicyTenants.delete(tenantId);
-    trustedTimeByTenant.delete(tenantId);
     drainerRef.current?.finishTenantEviction(tenantId);
     synthesisConsumer?.finishTenantEviction(tenantId);
     tenantRequests.activate(tenantId);
@@ -394,18 +413,12 @@ activePolicyFreshnessFor = (tenantId) => {
   const highWater = durableGenerationHighWaterClient;
   if (!snapshot || !highWater || !runtimeAttestation) return undefined;
   const expectedContext = () => expectedFreshnessContextFor(tenantId, snapshot);
-  let time = trustedTimeByTenant.get(tenantId);
-  if (!time) {
-    const authority = new TrustedTimeAuthority({
-      nsm: new NsmTrustedTimeSource({ nsm: { attest: getAttestationDoc } }),
-      clock: { readNanoseconds: () => process.hrtime.bigint() },
-    });
-    const bootEpoch = String(runtimeAttestation.bootSessionState().bootEpoch);
-    const context = expectedContext();
-    const ready = authority.initialize({
+  const context = expectedContext();
+  const trustedTime = createOperationTrustedTime(
+    {
       orgId: tenantId,
       deploymentId: context.deploymentId,
-      bootEpoch,
+      bootEpoch: String(runtimeAttestation.bootSessionState().bootEpoch),
       releaseId: context.releaseId,
       eifDigest: context.eifDigest,
       pcr0: context.pcr0,
@@ -414,16 +427,12 @@ activePolicyFreshnessFor = (tenantId) => {
       activationGeneration: context.activationGeneration,
       keysetEpoch: context.keysetEpoch,
       keysetDigest: context.keysetDigest,
-    });
-    time = { authority, ready };
-    trustedTimeByTenant.set(tenantId, time);
-  }
-  const trustedTime: TrustedTimeAuthorityPort = {
-    read: async (context) => {
-      await time.ready;
-      return time.authority.read(context);
     },
-  };
+    {
+      nsm: new NsmTrustedTimeSource({ nsm: { attest: getAttestationDoc } }),
+      clock: { readNanoseconds: () => process.hrtime.bigint() },
+    },
+  );
   return {
     highWater,
     trustedTime,
@@ -431,7 +440,6 @@ activePolicyFreshnessFor = (tenantId) => {
     refreshIntervalMs: snapshot.policy.lifetime.admissionLeaseLifetimeMs,
     evict: () => {
       evictedPolicyTenants.add(tenantId);
-      trustedTimeByTenant.delete(tenantId);
     },
   };
 };
@@ -608,13 +616,20 @@ runtimeAttestation = await initializeRuntimeAttestationForBoot(
     }
     const signedPolicy = verifiedBootManifest?.inferenceAttestation;
     const trustPolicy = verifiedBootManifest?.inferenceTrustPolicy;
-    if (process.env['NODE_ENV'] === 'production' && !signedPolicy && !trustPolicy) {
+    const providerPolicy = verifiedBootManifest?.providerInferenceTrustPolicy;
+    if (
+      process.env['NODE_ENV'] === 'production' &&
+      !signedPolicy &&
+      !trustPolicy &&
+      !providerPolicy
+    ) {
       throw new Error('signed_inference_trust_policy_unavailable');
     }
-    if (trustPolicy) setInferenceTrustPolicy(trustPolicy);
+    if (providerPolicy) setPublicInferenceTrustPolicy(providerPolicy);
+    else if (trustPolicy) setInferenceTrustPolicy(trustPolicy);
     setInferenceCommissioning(verifiedBootManifest?.inferenceCommissioning);
     if (signedPolicy) configureInferenceAttestation(signedPolicy);
-    else if (!trustPolicy) configureLocalInferencePolicy();
+    else if (!trustPolicy && !providerPolicy) configureLocalInferencePolicy();
     if (process.env['NODE_ENV'] === 'production' && isSharedPool) {
       assignmentManifestPublicKeyForVerifiedBoot(
         verifiedBootManifest,
@@ -650,7 +665,11 @@ const poolRuntimeAttestationServer = poolRuntimeAttestation
 console.log('tenant contexts assigned', { count: registry.size });
 
 await loadInferenceKey();
-setInferenceTrustPolicy(verifiedBootManifest?.inferenceTrustPolicy);
+if (verifiedBootManifest?.providerInferenceTrustPolicy) {
+  setPublicInferenceTrustPolicy(verifiedBootManifest.providerInferenceTrustPolicy);
+} else {
+  setInferenceTrustPolicy(verifiedBootManifest?.inferenceTrustPolicy);
+}
 assertInferenceConfigured();
 await loadAgentToken();
 
@@ -1106,6 +1125,7 @@ try {
   const buildRetriever = (retrieverDeps: RetrieverDeps) =>
     new EnclaveFactRetriever({
       ...retrieverDeps,
+      embedQuery: (orgId, query) => answerInferenceFor(orgId).embed(query),
       resolveTenant,
       s3,
       processedBucket: PROCESSED_OUTPUTS_BUCKET,
@@ -1139,11 +1159,14 @@ try {
       const inference = !POOL_ID
         ? cached
         : new TenantPolicyBoundInference(orgId, () => tenant.activePolicySnapshot(), cached, {
-            freshness: activePolicyFreshnessFor(orgId),
+            freshnessProvider: () => activePolicyFreshnessFor(orgId),
+            operationCache: cache,
+            usageSink: recordTokenUsage,
             requireFreshness: true,
             runtimeEvidence: activePolicyRuntimeEvidenceFor(orgId),
             requireRuntimeEvidence: true,
             verifiedBindingForwarder: activePolicyBindingForwarderFor(orgId),
+            backendForVerifiedBinding: activePolicyBackendFor(orgId),
             requireBindingForwarding: true,
           });
       entry = { inference, cache };
@@ -1297,6 +1320,7 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
     activePolicyFreshnessFor,
     activePolicyRuntimeEvidenceFor,
     activePolicyBindingForwarderFor,
+    activePolicyBackendFor,
     enforceTenantPolicy: isSharedPool,
     synthesisQueueUrl: SYNTHESIS_REQUEST_QUEUE_URL,
     processedQueueUrl: PROCESSED_QUEUE_URL,

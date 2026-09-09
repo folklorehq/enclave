@@ -19,6 +19,7 @@ export interface FactRetrieverDeps extends RetrieverDeps {
   s3: S3Client;
   processedBucket: string;
   processedBucketFor?: (orgId: string) => string;
+  embedQuery?: (orgId: string, query: string) => Promise<number[]>;
 }
 
 /** An audience-visible hit with its decrypted body, for callers (e.g. answer synthesis) that need more than a snippet. */
@@ -89,7 +90,9 @@ export class EnclaveFactRetriever implements FactRetriever {
     // (§4.2). The tenant's own HNSW self-guards on orgId too, so retrieval only ever answers for it.
     const tenant = this.deps.resolveTenant(orgId);
 
-    const queryVec = await embedText(query);
+    const queryVec = this.deps.embedQuery
+      ? await this.deps.embedQuery(orgId, query)
+      : await embedText(query);
     const hits = tenant.hnsw.query(orgId, queryVec, limit);
     if (hits.length === 0) return [];
 

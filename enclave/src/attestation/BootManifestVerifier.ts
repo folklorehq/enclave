@@ -85,6 +85,16 @@ type FrozenInferenceTrustPolicy = Omit<
   >[];
   readonly roleModels: Readonly<NonNullable<BootManifest['inferenceTrustPolicy']>['roleModels']>;
 };
+type DeepReadonly<T> = T extends (...args: never[]) => unknown
+  ? T
+  : T extends readonly (infer U)[]
+    ? readonly DeepReadonly<U>[]
+    : T extends object
+      ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
+      : T;
+type FrozenProviderInferenceTrustPolicy = DeepReadonly<
+  NonNullable<BootManifest['providerInferenceTrustPolicy']>
+>;
 
 export type VerifiedBootManifest = Readonly<
   Omit<
@@ -95,6 +105,7 @@ export type VerifiedBootManifest = Readonly<
     | 'controlPlaneIdentity'
     | 'inferenceTrustPolicy'
     | 'inferenceAttestation'
+    | 'providerInferenceTrustPolicy'
   >
 > & {
   readonly resourcePrefixes: Readonly<BootManifestResourcePrefixes>;
@@ -118,6 +129,7 @@ export type VerifiedBootManifest = Readonly<
       readonly modelAllowlist: readonly string[];
     }
   >;
+  readonly providerInferenceTrustPolicy?: FrozenProviderInferenceTrustPolicy;
 };
 
 export const bootManifestVerificationErrors = {
@@ -197,6 +209,7 @@ export class BootManifestVerifier {
     if (!this.matchesRuntimeIdentity(parsed.signed.manifest, runtimeIdentity)) {
       throw new Error(bootManifestVerificationErrors.identity);
     }
+    this.assertProviderPolicyPrerequisites(parsed.signed.manifest);
     // The v2 signature (encodeBootManifest / encodeManifestFields) does NOT cover
     // inferenceCommissioning, so a parent could graft the marker onto a valid v2 pins-only
     // envelope and disable receipt verification. The commissioning marker is v3-only (its
@@ -243,6 +256,7 @@ export class BootManifestVerifier {
     if (!this.matchesRuntimeIdentity(envelope.manifest, runtimeIdentity)) {
       throw new Error(bootManifestVerificationErrors.identity);
     }
+    this.assertProviderPolicyPrerequisites(envelope.manifest);
     return this.freezeOwnedManifest(envelope.manifest);
   }
 
@@ -358,6 +372,19 @@ export class BootManifestVerifier {
     );
   }
 
+  private assertProviderPolicyPrerequisites(manifest: BootManifest): void {
+    if (manifest.providerInferenceTrustPolicy === undefined) return;
+    if (
+      manifest.inferenceTrustPolicy !== undefined ||
+      manifest.inferenceAttestation !== undefined ||
+      manifest.activePolicyBootTrust === undefined ||
+      manifest.verifiedReleaseIdentity === undefined ||
+      manifest.generationHighWaterRuntimeConfig === undefined
+    ) {
+      throw new Error(bootManifestVerificationErrors.invalid);
+    }
+  }
+
   private matchesControlPlaneIdentity(
     manifestIdentity: ControlPlaneIdentity | undefined,
     runtimeIdentity: ControlPlaneIdentity | undefined,
@@ -434,6 +461,9 @@ export class BootManifestVerifier {
           modelAllowlist: Object.freeze([...manifest.inferenceAttestation.modelAllowlist]),
         })
       : undefined;
+    const providerInferenceTrustPolicy = manifest.providerInferenceTrustPolicy
+      ? this.deepFreeze(manifest.providerInferenceTrustPolicy)
+      : undefined;
     const verifiedReleaseIdentity = manifest.verifiedReleaseIdentity
       ? Object.freeze({ ...manifest.verifiedReleaseIdentity })
       : undefined;
@@ -470,6 +500,7 @@ export class BootManifestVerifier {
       ...(controlPlaneIdentity ? { controlPlaneIdentity } : {}),
       ...(inferenceTrustPolicy ? { inferenceTrustPolicy } : {}),
       ...(inferenceAttestation ? { inferenceAttestation } : {}),
+      ...(providerInferenceTrustPolicy ? { providerInferenceTrustPolicy } : {}),
       ...(verifiedReleaseIdentity ? { verifiedReleaseIdentity } : {}),
       ...(activePolicyBootTrust ? { activePolicyBootTrust } : {}),
       ...(activePolicyCarrier ? { activePolicyCarrier } : {}),
@@ -493,5 +524,13 @@ export class BootManifestVerifier {
     return createHash('sha256')
       .update(publicKey.export({ type: 'spki', format: 'der' }))
       .digest('hex');
+  }
+
+  private deepFreeze<T>(value: T): DeepReadonly<T> {
+    if (value && typeof value === 'object') {
+      Object.freeze(value);
+      for (const child of Object.values(value as Record<string, unknown>)) this.deepFreeze(child);
+    }
+    return value as DeepReadonly<T>;
   }
 }

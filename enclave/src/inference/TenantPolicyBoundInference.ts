@@ -8,6 +8,8 @@ import type {
   TrustedTimeAuthorityPort,
   TrustedTimeReadContext,
 } from '@folklore/inference';
+import type { Cache } from '@folklore/core';
+import type { InferenceOperation, InferenceUsageSink } from '@folklore/inference';
 import type { ToolSpec } from '@folklore/inference';
 import {
   assertVerifiedActivePolicyRoleBindingV1,
@@ -17,6 +19,7 @@ import {
 } from '@folklore/inference';
 import { inferenceModel, inferenceModelRevision } from './phala.js';
 import type { SynthesisInference } from './CachedInference.js';
+import { llmCacheKey } from './llm-cache.js';
 
 const DEFAULT_REFRESH_TIMEOUT_MS = 5_000;
 
@@ -40,7 +43,18 @@ export type TenantPolicyVerifiedBindingForwarder = (
   snapshot: VerifiedActivePolicySnapshotV1,
 ) => unknown;
 
+export type TenantPolicyOperationBackend = SynthesisInference & {
+  generateStructured?: (prompt: string, tool: ToolSpec, systemPrompt?: string) => Promise<unknown>;
+};
+
+export type TenantPolicyVerifiedBindingBackendFactory = (
+  binding: VerifiedActivePolicyRoleBindingV1,
+  snapshot: VerifiedActivePolicySnapshotV1,
+) => Promise<TenantPolicyOperationBackend>;
+
 export interface TenantPolicyBoundInferenceOptions {
+  readonly operationCache?: Cache;
+  readonly usageSink?: InferenceUsageSink;
   readonly freshness?: TenantPolicyFreshnessPort;
   readonly freshnessProvider?: () => TenantPolicyFreshnessPort | undefined;
   readonly requireFreshness?: boolean;
@@ -48,6 +62,7 @@ export interface TenantPolicyBoundInferenceOptions {
   readonly requireRuntimeEvidence?: boolean;
   readonly verifiedBindingForwarder?: TenantPolicyVerifiedBindingForwarder;
   readonly requireBindingForwarding?: boolean;
+  readonly backendForVerifiedBinding?: TenantPolicyVerifiedBindingBackendFactory;
   readonly structured?: (prompt: string, tool: ToolSpec, systemPrompt?: string) => Promise<unknown>;
   readonly onVerifiedBinding?: (
     binding: VerifiedActivePolicyRoleBindingV1,
@@ -88,8 +103,15 @@ export class TenantPolicyBoundInference implements SynthesisInference {
   }
 
   async embed(text: string): Promise<number[]> {
-    await this.bindingFor('embed');
-    return this.backend.embed(text);
+    const { binding, snapshot } = await this.bindingFor('embed');
+    const cache = this.operationCache;
+    if (!cache) return (await this.backendFor(binding, snapshot)).embed(text);
+    const key = this.cacheKey(binding, snapshot, 'embed', text);
+    const hit = await this.operationCacheGet(key, binding.modelId, 'embed');
+    if (hit !== null) return JSON.parse(hit) as number[];
+    const output = await (await this.backendFor(binding, snapshot)).embed(text);
+    await cache.set(key, JSON.stringify(output));
+    return output;
   }
 
   async generate(
@@ -98,8 +120,33 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     temperature?: number,
     shouldCache?: (output: string) => boolean,
   ): Promise<string> {
-    await this.bindingFor('generate');
-    return this.backend.generate(prompt, systemPrompt, temperature, shouldCache);
+    const { binding, snapshot } = await this.bindingFor('generate');
+    const cache = this.operationCache;
+    if (!cache)
+      return (await this.backendFor(binding, snapshot)).generate(
+        prompt,
+        systemPrompt,
+        temperature,
+        shouldCache,
+      );
+    const resolvedTemperature = this.validateTemperature(snapshot, binding, temperature);
+    const key = this.cacheKey(
+      binding,
+      snapshot,
+      'generate',
+      JSON.stringify({
+        prompt,
+        systemPrompt: systemPrompt ?? null,
+        temperature: resolvedTemperature,
+      }),
+    );
+    const hit = await this.operationCacheGet(key, binding.modelId, 'generate');
+    if (hit !== null) return hit;
+    const output = await (
+      await this.backendFor(binding, snapshot)
+    ).generate(prompt, systemPrompt, resolvedTemperature, shouldCache);
+    if ((shouldCache ?? (() => true))(output)) await this.options.operationCache?.set(key, output);
+    return output;
   }
 
   async critique(
@@ -107,8 +154,28 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     systemPrompt?: string,
     shouldCache?: (output: string) => boolean,
   ): Promise<string> {
-    await this.bindingFor('critique');
-    return this.backend.critique(prompt, systemPrompt, shouldCache);
+    const { binding, snapshot } = await this.bindingFor('critique');
+    const cache = this.operationCache;
+    if (!cache)
+      return (await this.backendFor(binding, snapshot)).critique(prompt, systemPrompt, shouldCache);
+    const critiqueTemperature = snapshot.policy.roles.critique.capabilities.temperature;
+    const key = this.cacheKey(
+      binding,
+      snapshot,
+      'critique',
+      JSON.stringify({
+        prompt,
+        systemPrompt: systemPrompt ?? null,
+        temperature: critiqueTemperature,
+      }),
+    );
+    const hit = await this.operationCacheGet(key, binding.modelId, 'generate');
+    if (hit !== null) return hit;
+    const output = await (
+      await this.backendFor(binding, snapshot)
+    ).critique(prompt, systemPrompt, shouldCache);
+    if ((shouldCache ?? (() => true))(output)) await this.options.operationCache?.set(key, output);
+    return output;
   }
 
   async generateStructured(
@@ -116,8 +183,10 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     tool: ToolSpec,
     systemPrompt?: string,
   ): Promise<unknown> {
-    await this.bindingFor('judge');
-    const structured = this.options.structured;
+    const { binding, snapshot } = await this.bindingFor('judge');
+    const structured = this.options.backendForVerifiedBinding
+      ? (await this.backendFor(binding, snapshot)).generateStructured
+      : this.options.structured;
     if (!structured) {
       this.evictAfterRefreshFailure(this.options.freshness ?? this.options.freshnessProvider?.());
       throw new TenantPolicyBoundInferenceError('active_policy_snapshot_refresh_failed');
@@ -127,6 +196,77 @@ export class TenantPolicyBoundInference implements SynthesisInference {
 
   async authorize(role: InferenceModelRole): Promise<void> {
     await this.bindingFor(role);
+  }
+
+  private async backendFor(
+    binding: VerifiedActivePolicyRoleBindingV1,
+    snapshot: VerifiedActivePolicySnapshotV1,
+  ): Promise<TenantPolicyOperationBackend> {
+    return this.options.backendForVerifiedBinding
+      ? this.options.backendForVerifiedBinding(binding, snapshot)
+      : this.backend;
+  }
+
+  private cacheKey(
+    binding: VerifiedActivePolicyRoleBindingV1,
+    snapshot: VerifiedActivePolicySnapshotV1,
+    operation: string,
+    input: string,
+  ): string {
+    const namespace = JSON.stringify({
+      tenantId: this.tenantId,
+      deploymentId: snapshot.deploymentId,
+      policyDigest: snapshot.policyDigest,
+      policyGeneration: snapshot.policyGeneration,
+      activationGeneration: snapshot.activationGeneration,
+      role: binding.role,
+      modelId: binding.modelId,
+      modelRevision: binding.modelRevision,
+      modelArtifactDigest: binding.modelArtifactDigest,
+      routeIdentityDigest: binding.routeIdentityDigest,
+      operation,
+    });
+    return llmCacheKey(binding.modelId, namespace, input);
+  }
+
+  private async operationCacheGet(
+    key: string,
+    model: string,
+    operation: InferenceOperation,
+  ): Promise<string | null> {
+    const hit = await this.operationCache?.get<string>(key);
+    if (hit !== null && hit !== undefined) {
+      try {
+        this.options.usageSink?.({
+          model,
+          operation,
+          promptTokens: 0,
+          completionTokens: 0,
+          cached: true,
+        });
+      } catch {
+        /* usage reporting must not break replay */
+      }
+      return hit;
+    }
+    return null;
+  }
+
+  private get operationCache(): Cache | undefined {
+    return this.options.backendForVerifiedBinding ? this.options.operationCache : undefined;
+  }
+
+  private validateTemperature(
+    snapshot: VerifiedActivePolicySnapshotV1,
+    binding: VerifiedActivePolicyRoleBindingV1,
+    requested: number | undefined,
+  ): number {
+    const allowed = snapshot.policy.roles[binding.role].capabilities.temperature;
+    const resolved = requested === undefined ? allowed : requested;
+    if (!Number.isFinite(resolved) || resolved !== allowed) {
+      throw new TenantPolicyBoundInferenceError('active_policy_role_binding_mismatch');
+    }
+    return resolved;
   }
 
   private async bindingFor(role: InferenceModelRole): Promise<{

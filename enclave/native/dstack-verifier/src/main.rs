@@ -1,4 +1,5 @@
 mod protocol;
+mod public_quote;
 
 use std::io;
 
@@ -32,9 +33,21 @@ fn main() -> std::process::ExitCode {
 fn run() -> Result<(), ()> {
     let mut stdin = io::stdin().lock();
     let input_bytes = read_frame(&mut stdin, MAX_INPUT_BYTES).map_err(|_| ())?;
-    let input: NativeInputV1 = parse_json_strict(&input_bytes).map_err(|_| ())?;
-    let output = verify(input).ok_or(())?;
-    let output_bytes = serde_json::to_vec(&output).map_err(|_| ())?;
+    let envelope: serde_json::Value = parse_json_strict(&input_bytes).map_err(|_| ())?;
+    let output_bytes = match envelope.get("version").and_then(|value| value.as_u64()) {
+        Some(1) => {
+            let input: NativeInputV1 = parse_json_strict(&input_bytes).map_err(|_| ())?;
+            serde_json::to_vec(&verify(input).ok_or(())?).map_err(|_| ())?
+        }
+        Some(2) => match public_quote::verify(&input_bytes) {
+            Ok(output) => serde_json::to_vec(&output).map_err(|_| ())?,
+            Err(code) => serde_json::to_vec(&serde_json::json!({
+                "version": 2, "verdict": "rejected", "failureCode": code
+            }))
+            .map_err(|_| ())?,
+        },
+        _ => return Err(()),
+    };
     let mut stdout = io::stdout().lock();
     write_frame(&mut stdout, &output_bytes, MAX_OUTPUT_BYTES).map_err(|_| ())
 }
