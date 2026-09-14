@@ -669,7 +669,6 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       if (routingDecision !== 'allowed') return { statusCode: 401 };
       const secret = await fetchPerTenantSecret(tenantId, source);
       if (!secret) return { statusCode: 503 };
-
       const signatureValid = verifySignature(source, headers, body, secret);
       if (!signatureValid) return { statusCode: 401 };
 

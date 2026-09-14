@@ -26,6 +26,7 @@ import { checkRateLimit } from '../rate-limiter.js';
 import { fetchDispatcherAuthSecret, computeDispatcherAuthHmac } from '../dispatcher-auth.js';
 import type { RoutingMode } from '../routing-allowlist.js';
 import { SQS_MAX_MESSAGE_BYTES } from '../encrypted-sqs-message-size.js';
+import { normalizeHeaders, verifySignature, verifySvixSignature } from '../signature-verifier.js';
 
 const ssm = new SSMClient({});
 const sqs = new SQSClient({});
@@ -33,7 +34,7 @@ const ddb = new DynamoDBClient({});
 
 const QUEUE_URL = process.env['QUEUE_URL']!;
 
-const SIGNABLE_SOURCES = new Set([
+export const SIGNABLE_SOURCES = new Set([
   'github',
   'slack',
   'linear',
@@ -102,17 +103,8 @@ const DRIVE_SYNC_STATE = 'sync';
 const CANARY_AUTHORIZATION_HEADER = 'x-folklore-canary-authorization';
 const CANARY_AUTHORIZATION_PREFIX = 'ca1.';
 
-// Atlassian Connect authenticates webhooks with a JWT (Authorization: JWT <token>), HS256-signed
-// with the app-install shared secret — not an HMAC body signature. `alg: none` is rejected.
-const CONNECT_JWT_PREFIX = 'jwt ';
-const JWT_CLOCK_SKEW_S = 60;
-
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const MS_PER_S = 1000;
-const SLACK_REPLAY_TOLERANCE_S = 300;
-const SVIX_REPLAY_TOLERANCE_S = 300;
-const SVIX_SECRET_PREFIX = 'whsec_';
-const ZOOM_REPLAY_TOLERANCE_S = 300;
 // Recall.ai signs every tenant's bot webhook with ONE workspace-level verification secret (Svix
 // scheme), not a per-tenant secret (design §4): inbound isolation rests on the unguessable per-tenant
 // ingest URL alone. Recall bots post to the `zoom` source path (design §8 — no `zoom_bot` SourceKind).
@@ -173,187 +165,8 @@ function resolveSecret(secret: string | null): SecretLookup {
   return secret === null ? { status: 'absent' } : { status: 'found', secret };
 }
 
-// Signature verification must not depend on API Gateway lowercasing header keys: a
-// relay, ALB, function URL, or direct invoke can preserve the provider's original
-// casing (Linear sends `Linear-Signature`). Lowercase once, look up lowercase.
-function normalizeHeaders(
-  headers: Record<string, string | undefined> | undefined,
-): Record<string, string | undefined> {
-  const normalized: Record<string, string | undefined> = {};
-  for (const [key, value] of Object.entries(headers ?? {})) {
-    normalized[key.toLowerCase()] = value;
-  }
-  return normalized;
-}
-
 function isParameterNotFound(err: unknown): boolean {
   return err instanceof Error && err.name === 'ParameterNotFound';
-}
-
-// Reject a signed request whose timestamp is missing, non-numeric (NaN → fail closed), or
-// outside the replay window — the basestring includes the timestamp, so this bounds replay.
-function withinReplayWindow(ts: string | undefined, toleranceS: number): boolean {
-  const tsNum = Number(ts);
-  return Number.isFinite(tsNum) && Math.abs(Date.now() / MS_PER_S - tsNum) <= toleranceS;
-}
-
-function verifySignature(
-  source: string,
-  headers: Record<string, string | undefined>,
-  body: string,
-  secret: string,
-): boolean {
-  const bodyBuf = Buffer.from(body, 'utf8');
-
-  switch (source) {
-    case 'github': {
-      const sig = headers['x-hub-signature-256'];
-      if (!sig?.startsWith('sha256=')) return false;
-      const expected = Buffer.from(sig.slice(7), 'hex');
-      const computed = createHmac('sha256', secret).update(bodyBuf).digest();
-      return expected.length === computed.length && timingSafeEqual(expected, computed);
-    }
-
-    case 'slack': {
-      const sig = headers['x-slack-signature'];
-      const ts = headers['x-slack-request-timestamp'];
-      if (!sig?.startsWith('v0=')) return false;
-      if (!withinReplayWindow(ts, SLACK_REPLAY_TOLERANCE_S)) return false;
-      const basestring = `v0:${ts}:${body}`;
-      const expected = Buffer.from(sig.slice(3), 'hex');
-      const computed = createHmac('sha256', secret).update(basestring, 'utf8').digest();
-      return expected.length === computed.length && timingSafeEqual(expected, computed);
-    }
-
-    case 'linear': {
-      // Linear sends `Linear-Signature`; normalizeHeaders lowercases the key.
-      const sig = headers['linear-signature'];
-      if (!sig) return false;
-      const expected = Buffer.from(sig, 'hex');
-      const computed = createHmac('sha256', secret).update(bodyBuf).digest();
-      return expected.length === computed.length && timingSafeEqual(expected, computed);
-    }
-
-    case 'intercom': {
-      // Intercom sends X-Hub-Signature: sha1=<hex>
-      const sig = headers['x-hub-signature'];
-      if (!sig?.startsWith('sha1=')) return false;
-      const expected = Buffer.from(sig.slice(5), 'hex');
-      const computed = createHmac('sha1', secret).update(bodyBuf).digest();
-      return expected.length === computed.length && timingSafeEqual(expected, computed);
-    }
-
-    case 'jira': {
-      // Native Jira Cloud WebSub signing (secret set at webhook registration): X-Hub-Signature,
-      // sha256 over the raw body — same header as Intercom (sha1), disambiguated by source path.
-      const sig = headers['x-hub-signature'];
-      if (!sig?.startsWith('sha256=')) return false;
-      const expected = Buffer.from(sig.slice(7), 'hex');
-      const computed = createHmac('sha256', secret).update(bodyBuf).digest();
-      return expected.length === computed.length && timingSafeEqual(expected, computed);
-    }
-
-    case 'confluence': {
-      // The provisioned secret is the Atlassian Connect app-install shared secret.
-      return verifyConnectJwt(headers['authorization'], secret);
-    }
-
-    case 'notion': {
-      // Notion signs with the subscription verification_token, not an app secret.
-      const sig = headers['x-notion-signature'];
-      if (!sig?.startsWith('sha256=')) return false;
-      const expected = Buffer.from(sig.slice(7), 'hex');
-      const computed = createHmac('sha256', secret).update(bodyBuf).digest();
-      return expected.length === computed.length && timingSafeEqual(expected, computed);
-    }
-
-    case 'meeting': {
-      // Transcript-upload HMAC over the raw body (no basestring, unlike Slack).
-      const sig = headers['x-meeting-signature'];
-      if (!sig?.startsWith('sha256=')) return false;
-      const expected = Buffer.from(sig.slice(7), 'hex');
-      const computed = createHmac('sha256', secret).update(bodyBuf).digest();
-      return expected.length === computed.length && timingSafeEqual(expected, computed);
-    }
-
-    case 'zoom_bot':
-      // Recall.ai signs via Svix: base64 HMAC-SHA256 over `${id}.${timestamp}.${body}`.
-      return verifySvixSignature(headers, body, secret);
-
-    case GOOGLE_DRIVE_SOURCE: {
-      // Drive push has no HMAC — validity is a constant-time match on the watch()-time channel token.
-      const token = headers['x-goog-channel-token'];
-      if (!token) return false;
-      const expected = Buffer.from(secret, 'utf8');
-      const provided = Buffer.from(token, 'utf8');
-      return expected.length === provided.length && timingSafeEqual(expected, provided);
-    }
-
-    case MICROSOFT365_SOURCE: {
-      // Graph change notifications carry no body HMAC — validity is the clientState we set at
-      // subscription time, matched constant-time against EVERY notification. Fail closed on any miss.
-      let parsed: { value?: Array<{ clientState?: unknown }> };
-      try {
-        parsed = JSON.parse(body);
-      } catch {
-        return false;
-      }
-      const notifications = parsed.value;
-      if (!Array.isArray(notifications) || notifications.length === 0) return false;
-      const expected = Buffer.from(secret, 'utf8');
-      return notifications.every((n) => {
-        if (typeof n.clientState !== 'string') return false;
-        const provided = Buffer.from(n.clientState, 'utf8');
-        return expected.length === provided.length && timingSafeEqual(expected, provided);
-      });
-    }
-
-    case 'zoom': {
-      // Zoom Secret Token: v0= + HMAC-SHA256 over `v0:{timestamp}:{body}` (like Slack's basestring).
-      const sig = headers['x-zm-signature'];
-      const ts = headers['x-zm-request-timestamp'];
-      if (!sig?.startsWith('v0=')) return false;
-      if (!withinReplayWindow(ts, ZOOM_REPLAY_TOLERANCE_S)) return false;
-      const basestring = `v0:${ts}:${body}`;
-      const expected = Buffer.from(sig.slice(3), 'hex');
-      const computed = createHmac('sha256', secret).update(basestring, 'utf8').digest();
-      return expected.length === computed.length && timingSafeEqual(expected, computed);
-    }
-
-    default:
-      // Fail closed: a source with no known signature scheme is never admitted.
-      return false;
-  }
-}
-
-function svixKey(secret: string): Buffer {
-  const raw = secret.startsWith(SVIX_SECRET_PREFIX)
-    ? secret.slice(SVIX_SECRET_PREFIX.length)
-    : secret;
-  return Buffer.from(raw, 'base64');
-}
-
-function verifySvixSignature(
-  headers: Record<string, string | undefined>,
-  body: string,
-  secret: string,
-): boolean {
-  const id = headers['webhook-id'] ?? headers['svix-id'];
-  const ts = headers['webhook-timestamp'] ?? headers['svix-timestamp'];
-  const sigHeader = headers['webhook-signature'] ?? headers['svix-signature'];
-  if (!id || !ts || !sigHeader) return false;
-  if (!withinReplayWindow(ts, SVIX_REPLAY_TOLERANCE_S)) return false;
-
-  const expected = createHmac('sha256', svixKey(secret))
-    .update(`${id}.${ts}.${body}`, 'utf8')
-    .digest();
-
-  for (const token of sigHeader.split(' ')) {
-    const comma = token.indexOf(',');
-    const provided = Buffer.from(comma === -1 ? token : token.slice(comma + 1), 'base64');
-    if (provided.length === expected.length && timingSafeEqual(provided, expected)) return true;
-  }
-  return false;
 }
 
 const ZOOM_URL_VALIDATION_EVENT = 'endpoint.url_validation';
@@ -393,43 +206,6 @@ function microsoft365ValidationEcho(
   const token = query?.['validationToken'];
   if (typeof token !== 'string' || token.length === 0) return null;
   return { statusCode: 200, headers: { 'content-type': 'text/plain' }, body: token };
-}
-
-// Verify signature + expiry only; qsh (query-string-hash) is not enforced — the shared-secret
-// HS256 signature is the forgery gate, and reconstructing the canonical request behind API
-// Gateway is brittle. iss/clientKey binding is enforced upstream by the per-tenant secret path.
-function verifyConnectJwt(authHeader: string | undefined, secret: string): boolean {
-  if (!authHeader || !authHeader.toLowerCase().startsWith(CONNECT_JWT_PREFIX)) return false;
-  const [headerB64, payloadB64, signatureB64] = authHeader
-    .slice(CONNECT_JWT_PREFIX.length)
-    .trim()
-    .split('.');
-  if (!headerB64 || !payloadB64 || !signatureB64) return false;
-
-  const header = decodeJwtSegment(headerB64);
-  if (header?.['alg'] !== 'HS256') return false;
-
-  const expected = createHmac('sha256', secret).update(`${headerB64}.${payloadB64}`).digest();
-  const provided = Buffer.from(signatureB64, 'base64url');
-  if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) return false;
-
-  const payload = decodeJwtSegment(payloadB64);
-  if (!payload) return false;
-  const exp = payload['exp'];
-  const now = Math.floor(Date.now() / MS_PER_S);
-  if (typeof exp !== 'number' || now > exp + JWT_CLOCK_SKEW_S) return false;
-  return true;
-}
-
-function decodeJwtSegment(segment: string): Record<string, unknown> | null {
-  try {
-    return JSON.parse(Buffer.from(segment, 'base64url').toString('utf8')) as Record<
-      string,
-      unknown
-    >;
-  } catch {
-    return null;
-  }
 }
 
 export function deriveAesKey(
