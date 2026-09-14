@@ -588,7 +588,9 @@ function testOnlyTrustPolicy(): InferenceTrustPolicyV1 {
     attestationKeys: [
       { keyId: 'test-attestation', algorithm: 'Ed25519', publicKey: `${'A'.repeat(43)}=` },
     ],
-    receiptKeys: [{ keyId: 'test-receipt', algorithm: 'Ed25519', publicKey: `${'B'.repeat(43)}=` }],
+    receiptKeys: [
+      { keyId: 'test-receipt', algorithm: 'Ed25519', publicKey: `${'B'.repeat(42)}A=` },
+    ],
     permittedModels: [
       ...new Map(
         Object.values(TEST_ROLE_MODELS).map((model) => [`${model.model} ${model.revision}`, model]),
