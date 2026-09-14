@@ -85,7 +85,7 @@ export function parseVersionedAssignmentManifest(
   return parsed;
 }
 
-/** PR2 discriminated dual-read assignment parser: parses the same union as every other reader. */
+/** Discriminated dual-read assignment parser: parses the same union as every other reader. */
 export function parseAssignmentManifestWire(
   manifest: unknown,
   expectedPoolId: string,

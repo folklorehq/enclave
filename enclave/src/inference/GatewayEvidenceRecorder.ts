@@ -46,7 +46,7 @@ export class GatewayEvidenceRecorderError extends Error {
   }
 }
 
-// The only production evidence recorder (PR5). The caller supplies only a content-free run id, a
+// The only production evidence recorder. The caller supplies only a content-free run id, a
 // fresh nonce, and a release receipt already verified by the in-enclave release verifier. Trusted
 // context comes from the verified-boot provider; the evidence anchor is bound to that context and
 // the request nonce; the typed session signs a typed unsigned envelope, never bytes, purpose, or

@@ -6,11 +6,7 @@ import {
 } from '@folklore/contracts';
 import { canonicalJson, sha256Hex } from '@folklore/utils';
 
-// PR6 enclave-side generation high-water trusted-time producer (plan Step 6). The producer is
-// wired by the runtime attestation composition to the origin/main TrustedTimeAuthority and the
-// enclave evidence key. It samples verified NSM plus CLOCK_MONOTONIC_RAW, binds the
-// boot/enclave-checkpoint/sample context and the requested subject digest, and returns only the
-// signed record. Host wall clocks, NTP, AWS servedAt, and operator timestamps are never authority.
+// Host wall clocks, NTP, AWS servedAt, and operator timestamps are never authority; the record requires explicitly injected binding, sampler, and signer.
 
 export const TRUSTED_TIME_AUTHORITY = 'NSM+CLOCK_MONOTONIC_RAW' as const;
 

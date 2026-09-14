@@ -22,7 +22,7 @@ export interface GatewayEvidenceCompositionDeps {
   keySession: EvidenceKeySession;
 }
 
-// The only constructor helper for the evidence recorder (PR5): a production recorder cannot be
+// The only constructor helper for the evidence recorder: a production recorder cannot be
 // built without trusted context, an anchor verifier, and a typed evidence session. The runtime
 // composition exposes this helper only after prepare() has produced a verified boot manifest.
 export class GatewayEvidenceComposition {

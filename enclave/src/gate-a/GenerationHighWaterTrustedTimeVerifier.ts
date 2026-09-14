@@ -5,7 +5,7 @@ import {
 
 import { TRUSTED_TIME_AUTHORITY } from './GenerationHighWaterTrustedTimeRecordProducer.js';
 
-// PR6 enclave-side generation high-water trusted-time verifier (plan Step 6). Verifies the
+// Enclave-side generation high-water trusted-time verifier. Verifies the
 // enclave-produced record: authority, finalized manifest digest binding, exact subject digest,
 // boot/checkpoint context, and signature. Rejects rollback and replay against the monotonic floor
 // and never treats host wall clocks as freshness authority.

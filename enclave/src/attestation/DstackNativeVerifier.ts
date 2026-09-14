@@ -202,7 +202,7 @@ export interface DstackNativeVerifierOptions {
 
 type NativeOutput = z.infer<typeof nativeOutputSchema>;
 
-// UNWIRED: production admission does not reach this port until offline collateral verification is available.
+// UNWIRED: production admission remains blocked by the offline-collateral-verification activation gate.
 export class DstackNativeVerifier implements DstackNativeVerifierPort {
   readonly #executablePath: string;
   readonly #args: readonly string[];

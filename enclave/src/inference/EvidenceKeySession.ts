@@ -22,7 +22,7 @@ const eifArtifactPathSchema = z
   .max(512)
   .regex(/^artifacts\/[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*\.eif$/);
 
-// The typed evidence envelope crossing the in-enclave signing boundary (PR5). It contains the
+// The typed evidence envelope crossing the in-enclave signing boundary. It contains the
 // recorder-produced schema, context fields, trusted values, run id, nonce digest, and verified
 // release receipt digest. It never contains Uint8Array, a purpose, a key id, or a caller digest.
 export interface TypedGatewayEvidenceUnsignedV2 {
@@ -105,9 +105,9 @@ export class EvidenceKeySessionError extends Error {
   }
 }
 
-// Typed in-enclave evidence signing port (PR5): the session chooses the evidence purpose and key
+// Typed in-enclave evidence signing port: the session chooses the evidence purpose and key
 // internally and returns the signer-owned metadata. No production KMS evidence key is created by
-// PR1 through PR6; the live session is unavailable until H4 and the later activation gate.
+// internally; the live session is unavailable until the evidence activation gate is complete.
 export interface EvidenceKeySession {
   signEvidence(input: {
     envelope: TypedGatewayEvidenceUnsignedV2;

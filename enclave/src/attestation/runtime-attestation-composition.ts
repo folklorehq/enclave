@@ -60,6 +60,13 @@ export interface GenerationHighWaterTrustedTimeWiringDeps {
   signer: GenerationHighWaterTrustedTimeSignerPort;
 }
 
+export type RuntimeAttestationActivationState = Readonly<{
+  boot: 'unverified' | 'verified';
+  evidence: 'unavailable' | 'wired';
+  trustedTime: 'unavailable' | 'wired';
+  inference: 'unavailable' | 'staged-unavailable' | 'available';
+}>;
+
 export interface RuntimeAttestationCompositionDeps {
   env: RuntimeAttestationEnv;
   secretLoader: BootManifestSecretLoaderPort;
@@ -74,7 +81,7 @@ export interface RuntimeAttestationCompositionDeps {
   logger?: Pick<Logger, 'info' | 'warn'>;
   serverOptions?: RuntimeAttestationServerOptions;
   evidence?: RuntimeAttestationEvidenceDeps;
-  /** PR6 enclave trusted-time record wiring for the Gate A vsock control channel. */
+  /** Enclave trusted-time record wiring for the vsock control channel. */
   trustedTime?: GenerationHighWaterTrustedTimeWiringDeps;
 }
 
@@ -119,12 +126,24 @@ export class RuntimeAttestationComposition {
     );
   }
 
+  inferenceActivationState(): RuntimeAttestationActivationState {
+    const boot = this.#verifiedManifest ? 'verified' : 'unverified';
+    const evidence = this.#evidenceComposition ? 'wired' : 'unavailable';
+    const trustedTime = this.#trustedTimeWiring ? 'wired' : 'unavailable';
+    // UNWIRED: inference remains unavailable until the evidence and trusted-time activation gates are complete.
+    const inference =
+      boot === 'verified' && evidence === 'wired' && trustedTime === 'wired'
+        ? 'staged-unavailable'
+        : 'unavailable';
+    return { boot, evidence, trustedTime, inference };
+  }
+
   verifiedManifest(): VerifiedBootManifest {
     if (!this.#verifiedManifest) throw new Error('runtime_attestation_not_prepared');
     return this.#verifiedManifest;
   }
 
-  /** The installed recovery-root digest the composition reports (PR2). */
+  /** The installed recovery-root digest reported by the composition. */
   installedRecoveryRootDigest(): string {
     return this.verifier.installedRecoveryRootDigest();
   }
@@ -133,14 +152,14 @@ export class RuntimeAttestationComposition {
     return this.verifier.recoveryInstallationReport();
   }
 
-  /** The evidence recorder factory, exposed only after a verified boot (PR5). */
+  /** The evidence recorder factory, exposed only after verified boot. */
   gatewayEvidenceComposition(): GatewayEvidenceComposition {
     if (!this.#evidenceComposition) throw new Error('evidence_unavailable');
     if (!this.#verifiedManifest) throw new Error('runtime_attestation_not_prepared');
     return this.#evidenceComposition;
   }
 
-  /** Returns the trusted-time record producer; available only after verified boot with injected wiring. */
+  /** UNWIRED: Trusted-time record production has no live caller while activation remains gated. */
   gateATrustedTimeRecordProducer(): GenerationHighWaterTrustedTimeRecordProducer {
     if (!this.#verifiedManifest) throw new Error('runtime_attestation_not_prepared');
     if (!this.#trustedTimeWiring) throw new Error('trusted_time_wiring_unavailable');
@@ -151,7 +170,7 @@ export class RuntimeAttestationComposition {
     });
   }
 
-  /** Content-free boot session identity for the evidence seam (PR5). */
+  /** Content-free boot session identity for the evidence seam. */
   bootSessionState(): { sessionId: string; bootEpoch: number } {
     return this.verifier.bootSessionState();
   }

@@ -805,7 +805,7 @@ export function encodeRuntimeHealthSignaturePayload(
   return encode(fields);
 }
 
-// PR2 canonical subject recipe (plan "Canonical subject and KMS message bytes"): a typed subject
+// Canonical subject recipe: a typed subject
 // value is canonical-CBOR-encoded exactly once; the subject digest is SHA-256 of those bytes; the
 // signature message is built from the domain tag and those exact bytes. Never double-encode
 // already-canonical bytes and never hash an envelope wrapper.

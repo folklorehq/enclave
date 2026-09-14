@@ -260,12 +260,12 @@ export class BootManifestVerifier {
     return this.freezeOwnedManifest(envelope.manifest);
   }
 
-  /** The installed recovery-root digest this verifier reports before any future unfreeze (PR2). */
+  /** The installed recovery-root digest this verifier reports before any future unfreeze. */
   installedRecoveryRootDigest(): string {
     return TRUSTED_SIGNER_RECOVERY_ROOT_DIGEST;
   }
 
-  /** Content-free boot session identity for the evidence seam (PR5). */
+  /** Content-free boot session identity for the evidence seam. */
   bootSessionState(): { sessionId: string; bootEpoch: number } {
     return {
       sessionId: createHash('sha256')

@@ -214,7 +214,7 @@ function requireNative(): { call(request: Buffer): Buffer } {
   return require('../native/nsm.node') as { call(request: Buffer): Buffer };
 }
 
-// Evidence anchor (PR5): the NSM user-data anchor is a canonical CBOR map with exactly twelve
+// Evidence anchor: the NSM user-data anchor is a canonical CBOR map with exactly twelve
 // integer keys, no unknown keys, and a maximum full request size of 512 bytes. The exact keys are
 // version, purpose code, domain code, context digest, org ID, deployment ID, session ID, boot
 // epoch, policy generation, keyset high-water epoch, keyset high-water digest, and nonce. Raw NSM

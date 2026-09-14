@@ -74,7 +74,7 @@ const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const EIF_ARTIFACT_PATH_PATTERN =
   /^artifacts\/[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*\.eif$/;
 
-// The only evidence-context authority (PR5): built from verified boot state at composition time
+// The only evidence-context authority: built from verified boot state at composition time
 // and read-only afterwards. There is no setter and no caller-supplied override; a recorder
 // constructed with this provider can only record evidence bound to the verified enclave state.
 export class TrustedEvidenceContextProvider {

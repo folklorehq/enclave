@@ -62,7 +62,7 @@ export interface DurableGenerationHighWaterTransport {
   }): Promise<DurableGenerationHighWaterEnvelopeV1>;
 }
 
-// The transport verifier (plan Task 2): the request carries only the seven request-bound
+// The transport verifier: the request carries only the seven request-bound
 // measured-boot identity fields; the signed response carries the complete thirteen-field
 // checkpoint. The adapter performs the full-context and durable-floor comparison.
 export class DurableGenerationHighWaterClient {

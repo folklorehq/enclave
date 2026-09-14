@@ -446,7 +446,9 @@ activePolicyFreshnessFor = (tenantId) => {
 };
 activePolicyRuntimeEvidenceFor = (tenantId) => {
   const attestation = runtimeAttestation;
-  if (!attestation) return undefined;
+  if (!attestation || attestation.inferenceActivationState().inference !== 'available') {
+    return undefined;
+  }
   try {
     const composition = attestation.gatewayEvidenceComposition();
     return {

@@ -138,7 +138,7 @@ export type ParsedBootManifestWireResult =
   | { wire: 'LegacySignedBootManifestV2'; manifest: BootManifest; keyset: BootManifestKeyset }
   | { wire: 'SignedBootManifestV3'; manifest: BootManifest; keyset: BootManifestKeyset };
 
-/** Discriminated dual-read boot verifier: v2 and v3 are the only accepted boot wires (PR2 migration rule 1). */
+/** Discriminated dual-read boot verifier: v2 and v3 are the only accepted boot wires. */
 export function verifySignedBootManifestWire(
   rawManifest: unknown,
   rawKeyset: unknown,

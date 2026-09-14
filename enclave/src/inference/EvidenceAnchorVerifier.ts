@@ -32,7 +32,7 @@ export class EvidenceAnchorVerifierError extends Error {
   }
 }
 
-// Pure verifier (PR5): recomputes the context digest, binds org and deployment, checks boot
+// Pure verifier: recomputes the context digest, binds org and deployment, checks boot
 // epoch, policy generation, keyset high-water, and rejects an anchor copied across sessions or
 // tenants. The trusted context comes from the verified-boot provider, never from request input.
 export class EvidenceAnchorVerifier {

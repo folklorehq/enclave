@@ -37,8 +37,8 @@
       "rev": "542d3d41f2051af88f2f0c76ca3c1212a64ac545",
       "target": "cfg(target_os = \"linux\")",
       "defaultFeatures": false,
-      "runtimePath": "Version 1 remains fail-closed. Version 2 uses pinned dcap-qvl offline production-root verification and pinned dstack-attest measured runtime-event replay on Linux.",
-      "upstreamCollateralBehavior": "The upstream online verifier is not invoked. Version 2 verifies caller-supplied QuoteCollateralV3 with QuoteVerifier::new_prod at the trusted caller evaluation time, then checks runtime-event replay against verified RTMR3. No collateral or OS image fetch occurs. OS image, ACPI and key-custody authorization are not asserted."
+      "runtimePath": "Version 1 remains fail-closed. Version 2 uses pinned dcap-qvl offline production-root verification and pinned dstack-attest measured runtime-event replay on Linux. The enclave production request-mapping seam remains fail-closed and exercises only the bounded protocol adapter until the offline-collateral-verification activation gate is complete.",
+      "upstreamCollateralBehavior": "The upstream online verifier is not invoked. Version 2 verifies caller-supplied QuoteCollateralV3 with QuoteVerifier::new_prod at the trusted caller evaluation time, then checks runtime-event replay against verified RTMR3. No collateral or OS image fetch occurs. OS image, ACPI and key-custody authorization are not asserted. The native boundary maps the exact upstream request fields for compile-time compatibility and returns dstack_unavailable until the offline-collateral-verification activation gate, including an offline upstream API and independent acceptance/rejection vectors, is complete."
     },
     "raTls": {
       "package": "ra-tls",

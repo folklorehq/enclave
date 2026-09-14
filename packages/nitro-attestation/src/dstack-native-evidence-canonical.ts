@@ -179,7 +179,7 @@ export function encodeDstackNativeEvidenceV1(input: DstackNativeEvidenceV1): Uin
 }
 
 // The helper returns the native evidence identity and all four component digests from one
-// implementation so Dstack binding code consumes a single shared value (plan Task 1 rule 11).
+// implementation so Dstack binding code consumes a single shared value.
 export function digestDstackNativeEvidenceV1(
   input: DstackNativeEvidenceV1,
 ): DstackNativeEvidenceDigestResultV1 {

@@ -143,7 +143,7 @@ export function computeDstackEvidenceDigests(
 
 const ZERO_DIGEST_64 = '0'.repeat(64) as Digest64;
 
-// One shared native-evidence identity (plan Task 3): the adapter and the native verifier both
+// One shared native-evidence identity: the adapter and the native verifier both
 // call digestDstackNativeEvidenceV1 over the same component/identity vector, so every consumer
 // of the branded result copies one digest value and never reconstructs it. The identity is
 // absent when the session or workload keyset is not supplied; the adapter fails closed then.
