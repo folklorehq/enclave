@@ -246,29 +246,82 @@ export class SigstoreEnclaveProvenanceVerifier implements EnclaveProvenanceVerif
   }
 }
 
-export async function parseVerifiedEnclaveRelease(
+// A bounded, log-safe code naming why release evidence was rejected: the silent `undefined` used to be the
+// only signal, so a stale env file and a failed deploy looked identical to the consumer that warned.
+/** A bounded, log-safe code naming why release evidence was rejected. */
+export type VerifiedEnclaveReleaseRejectionReason =
+  | 'enclave_release_attestation_manifest_missing'
+  | 'enclave_release_provenance_bundle_missing'
+  | 'enclave_release_expected_source_sha_invalid'
+  | 'enclave_release_manifest_unparseable'
+  | 'enclave_release_source_sha_mismatch'
+  | 'enclave_release_boot_root_unavailable'
+  | 'enclave_release_boot_root_mismatch'
+  | 'enclave_release_provenance_verification_failed'
+  | 'enclave_release_provenance_subject_mismatch'
+  | 'enclave_release_verification_mismatch'
+  | 'enclave_release_unexpected_failure';
+
+export interface VerifiedEnclaveReleaseOutcome {
+  readonly release: VerifiedEnclaveRelease | undefined;
+  /** Absent when release evidence is simply not configured; a bounded code for every rejection. */
+  readonly rejectionReason: VerifiedEnclaveReleaseRejectionReason | undefined;
+}
+
+function rejectedRelease(
+  rejectionReason: VerifiedEnclaveReleaseRejectionReason,
+): VerifiedEnclaveReleaseOutcome {
+  return { release: undefined, rejectionReason };
+}
+
+// The same decision as `parseVerifiedEnclaveRelease`, but it says why instead of only that it refused. No
+// severity change: the caller still decides what an unavailable release means.
+/** The release decision with the bounded reason for a refusal. */
+export async function parseVerifiedEnclaveReleaseOutcome(
   attestationValue: string | undefined,
   provenanceBundleValue: string | undefined,
   verifier: EnclaveProvenanceVerifier,
   expectedSourceSha = process.env[EXPECTED_SOURCE_SHA_ENV],
-): Promise<VerifiedEnclaveRelease | undefined> {
-  if (!attestationValue || !provenanceBundleValue) return undefined;
+): Promise<VerifiedEnclaveReleaseOutcome> {
+  if (!attestationValue && !provenanceBundleValue) {
+    return { release: undefined, rejectionReason: undefined };
+  }
+  if (!attestationValue) return rejectedRelease('enclave_release_attestation_manifest_missing');
+  if (!provenanceBundleValue) return rejectedRelease('enclave_release_provenance_bundle_missing');
   try {
-    if (!sourceSha.safeParse(expectedSourceSha).success) return undefined;
-    const manifest = attestationManifestSchema.parse(JSON.parse(attestationValue) as unknown);
-    if (manifest.sourceSha !== expectedSourceSha) return undefined;
-    assertApprovedBootManifestRoot();
+    if (!sourceSha.safeParse(expectedSourceSha).success) {
+      return rejectedRelease('enclave_release_expected_source_sha_invalid');
+    }
+    let manifest: z.infer<typeof attestationManifestSchema>;
+    try {
+      manifest = attestationManifestSchema.parse(JSON.parse(attestationValue) as unknown);
+    } catch {
+      return rejectedRelease('enclave_release_manifest_unparseable');
+    }
+    if (manifest.sourceSha !== expectedSourceSha) {
+      return rejectedRelease('enclave_release_source_sha_mismatch');
+    }
+    try {
+      assertApprovedBootManifestRoot();
+    } catch {
+      return rejectedRelease('enclave_release_boot_root_unavailable');
+    }
     const canonicalRoot = getBootManifestRootIdentity();
     if (
       manifest.bootRoot.keyId !== canonicalRoot.keyId ||
       manifest.bootRoot.derSpkiSha256 !== canonicalRoot.derSpkiSha256 ||
       manifest.bootRoot.minimumKeysetGeneration !== canonicalRoot.minimumKeysetGeneration
     ) {
-      return undefined;
+      return rejectedRelease('enclave_release_boot_root_mismatch');
     }
-    const verified = await verifier.verify(provenanceBundleValue, attestationValue);
+    let verified: VerifiedProvenanceSubject;
+    try {
+      verified = await verifier.verify(provenanceBundleValue, attestationValue);
+    } catch {
+      return rejectedRelease('enclave_release_provenance_verification_failed');
+    }
     if (verified.subjectName !== manifest.provenance.subjectName) {
-      return undefined;
+      return rejectedRelease('enclave_release_provenance_subject_mismatch');
     }
     if (
       !releaseVerificationMatchesManifest(
@@ -277,22 +330,40 @@ export async function parseVerifiedEnclaveRelease(
         verified.subjectSha256,
       )
     ) {
-      return undefined;
+      return rejectedRelease('enclave_release_verification_mismatch');
     }
     return {
-      releaseId: verified.releaseVerification.manifestSha256,
-      sourceSha: manifest.sourceSha,
-      enclaveArtifactBucket: manifest.artifact.bucket,
-      enclaveArtifactKey: manifest.artifact.key,
-      enclaveArtifactVersionId: manifest.artifact.versionId,
-      enclaveArtifactSha256: manifest.artifact.sha256,
-      pcr0: manifest.pcrs.pcr0,
+      release: {
+        releaseId: verified.releaseVerification.manifestSha256,
+        sourceSha: manifest.sourceSha,
+        enclaveArtifactBucket: manifest.artifact.bucket,
+        enclaveArtifactKey: manifest.artifact.key,
+        enclaveArtifactVersionId: manifest.artifact.versionId,
+        enclaveArtifactSha256: manifest.artifact.sha256,
+        pcr0: manifest.pcrs.pcr0,
+      },
+      rejectionReason: undefined,
     };
   } catch {
-    return undefined;
+    return rejectedRelease('enclave_release_unexpected_failure');
   }
 }
 
+/** The silent contract, unchanged: it keeps only the release and drops the reason. */
+export async function parseVerifiedEnclaveRelease(
+  attestationValue: string | undefined,
+  provenanceBundleValue: string | undefined,
+  verifier: EnclaveProvenanceVerifier,
+  expectedSourceSha = process.env[EXPECTED_SOURCE_SHA_ENV],
+): Promise<VerifiedEnclaveRelease | undefined> {
+  const outcome = await parseVerifiedEnclaveReleaseOutcome(
+    attestationValue,
+    provenanceBundleValue,
+    verifier,
+    expectedSourceSha,
+  );
+  return outcome.release;
+}
 export function releaseVerificationMatchesManifest(
   release: ReleaseVerification,
   manifest: z.infer<typeof attestationManifestSchema>,

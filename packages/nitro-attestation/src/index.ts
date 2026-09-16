@@ -209,11 +209,14 @@ export * from './tenant-policy-admission.js';
 export {
   SigstoreEnclaveProvenanceVerifier,
   parseVerifiedEnclaveRelease,
+  parseVerifiedEnclaveReleaseOutcome,
   releaseVerificationMatchesManifest,
   verifiedEnclaveReleaseIdentity,
 } from './verified-enclave-release.js';
 export type {
   EnclaveProvenanceVerifier,
+  VerifiedEnclaveReleaseOutcome,
+  VerifiedEnclaveReleaseRejectionReason,
   VerifiedProvenanceSubject,
 } from './verified-enclave-release.js';
 export type { VerifiedEnclaveRelease, VerifiedEnclaveReleaseIdentityV1 } from '@folklore/contracts';
