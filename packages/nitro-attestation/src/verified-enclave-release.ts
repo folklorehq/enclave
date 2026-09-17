@@ -26,7 +26,7 @@ const artifactVersionId = z
 const bootRootKeyId = z.string().regex(/^[a-z0-9][a-z0-9._-]{2,63}$/);
 const EXPECTED_SOURCE_SHA_ENV = 'ENCLAVE_EXPECTED_SOURCE_SHA';
 
-const attestationManifestSchema = z
+export const attestationManifestSchema = z
   .object({
     schemaVersion: z.literal(1),
     sourceSha,
@@ -99,6 +99,8 @@ const attestationManifestSchema = z
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'artifact binding mismatch' });
     }
   });
+
+export type AttestationManifestV1 = z.infer<typeof attestationManifestSchema>;
 
 const bundleSchema = z
   .object({

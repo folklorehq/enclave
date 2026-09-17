@@ -207,6 +207,7 @@ export {
 } from './active-policy-carrier-canonical.js';
 export * from './tenant-policy-admission.js';
 export {
+  attestationManifestSchema,
   SigstoreEnclaveProvenanceVerifier,
   parseVerifiedEnclaveRelease,
   parseVerifiedEnclaveReleaseOutcome,
@@ -214,6 +215,7 @@ export {
   verifiedEnclaveReleaseIdentity,
 } from './verified-enclave-release.js';
 export type {
+  AttestationManifestV1,
   EnclaveProvenanceVerifier,
   VerifiedEnclaveReleaseOutcome,
   VerifiedEnclaveReleaseRejectionReason,
