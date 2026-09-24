@@ -10,6 +10,11 @@
       "development": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./general-admission-policy-grant": {
+      "development": "./src/general-admission-policy-grant.ts",
+      "types": "./dist/general-admission-policy-grant.d.ts",
+      "default": "./dist/general-admission-policy-grant.js"
     }
   },
   "scripts": {
