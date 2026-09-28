@@ -34,6 +34,8 @@ const JUDGE_MAX_TOKENS = Number(process.env['JUDGE_MAX_TOKENS'] ?? '4096');
 
 export let CRITIQUE_MODEL = '';
 let MODEL_ALLOWLIST: readonly string[] = [];
+type LocalStructuredOutputMode = 'tool_call' | 'json_schema';
+const DEFAULT_LOCAL_STRUCTURED_OUTPUT_MODE: LocalStructuredOutputMode = 'tool_call';
 
 const PROVIDER_SEPARATOR = '/';
 
@@ -122,6 +124,7 @@ let _publicInferenceTrustPolicy: InferenceTrustPolicyV2 | undefined;
 let _inferenceFetch: typeof fetch | null = null;
 let _inferencePolicy: SignedInferenceAttestation | null = null;
 let _isLocalPolicy = false;
+let _localStructuredOutputMode: LocalStructuredOutputMode | undefined;
 // Set only from the signature-verified boot manifest's inferenceCommissioning marker. This, not the
 // absence of a trust policy, is what authorizes staged (unverified) inference in production.
 let _commissioningUnverified = false;
@@ -242,6 +245,7 @@ export function configureLocalInferencePolicy(env: NodeJS.ProcessEnv = process.e
     throw new Error('local inference policy forbidden in production');
   }
   if (_inferencePolicy) return;
+  const structuredOutputMode = localStructuredOutputMode(env);
   const { endpoint, expectedHost } = localEndpoint(env);
   const embedModel = env['EMBED_MODEL']?.trim() || 'nomic-embed-text';
   const generateModel = env['GENERATE_MODEL']?.trim() || 'llama3.1:8b';
@@ -274,6 +278,7 @@ export function configureLocalInferencePolicy(env: NodeJS.ProcessEnv = process.e
     },
     true,
   );
+  _localStructuredOutputMode = structuredOutputMode;
 }
 
 export function configureInferenceAttestationForTest(input: InferenceAttestationInput): void {
@@ -333,6 +338,13 @@ function localModelAllowlist(env: NodeJS.ProcessEnv, models: readonly string[]):
     .map((model) => model.trim())
     .filter((model) => model.length > 0);
   return configured?.length ? configured : [...new Set(models)];
+}
+
+function localStructuredOutputMode(env: NodeJS.ProcessEnv): LocalStructuredOutputMode {
+  const configured = env['LOCAL_STRUCTURED_OUTPUT_MODE'];
+  if (configured === undefined) return DEFAULT_LOCAL_STRUCTURED_OUTPUT_MODE;
+  if (configured === 'tool_call' || configured === 'json_schema') return configured;
+  throw new Error('local structured output mode invalid');
 }
 
 function localPositiveInteger(raw: string | undefined, fallback: number, name: string): number {
@@ -424,6 +436,7 @@ function getBackend(): TeeEndpointBackend | OpenAICompatBackend {
       embedModel: EMBED_MODEL,
       generateModel: GENERATE_MODEL,
       modelAllowlist: MODEL_ALLOWLIST,
+      structuredOutputMode: _localStructuredOutputMode ?? DEFAULT_LOCAL_STRUCTURED_OUTPUT_MODE,
       usageSink: recordTokenUsage,
       telemetry: telemetry(),
     });
