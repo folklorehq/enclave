@@ -75,9 +75,9 @@
   },
   "publicProfileCollateral": {
     "path": "trusted/phala-tdx-collateral.json",
-    "sha256": "689c1a531486f41bc14a45844ed273174360b6a5ceaa5a6d8a398c577d1aba3e",
+    "sha256": "9ff23749c39d1800a616650f00983a48fb9676f9309da6b09530b948d7580ada",
     "retrievedFrom": "https://pccs.phala.network",
-    "retrievedAt": "2026-09-08T20:41:02Z",
+    "retrievedAt": "2026-10-01T06:50:11Z",
     "format": "dcap-qvl 0.5.2 QuoteCollateralV3, JSON whitespace normalized",
     "verification": "Verified offline by QuoteVerifier::new_prod against actual public quote. Native validates all collateral certificate/CRL/TCB/QE validity on every call. Expiry or hardware mismatch fails closed and requires a reviewed collateral refresh, not relaxed verification.",
     "providerReportIncluded": false,
