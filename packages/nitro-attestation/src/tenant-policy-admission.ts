@@ -1,17 +1,12 @@
 import { createHash } from 'node:crypto';
 import {
-  GENERAL_ADMISSION_POLICY_GRANT_DOMAIN,
   GENERAL_ADMISSION_ISSUANCE_ID_DOMAIN,
   TENANT_POLICY_ADMISSION_DOMAIN,
   TENANT_POLICY_ADMISSION_MAX_FUTURE_SKEW_MS,
   TENANT_POLICY_ADMISSION_MAX_LIFETIME_MS,
   generalAdmissionIssuanceRecordV1Schema,
-  generalAdmissionPolicyGrantSubjectV1Schema,
-  generalAdmissionPolicyGrantV1Schema,
   tenantPolicyAdmissionSubjectV1Schema,
   tenantPolicyAdmissionV1Schema,
-  type GeneralAdmissionPolicyGrantSubjectV1,
-  type GeneralAdmissionPolicyGrantV1,
   type GeneralAdmissionIssuanceRecordV1,
   type TenantPolicyAdmissionSubjectV1,
   type TenantPolicyAdmissionV1,
@@ -19,10 +14,6 @@ import {
 import { canonicalCbor } from './canonical-cbor.js';
 
 const DOMAIN_SEPARATOR = Buffer.from(`${TENANT_POLICY_ADMISSION_DOMAIN}\0`, 'utf8');
-const GENERAL_ADMISSION_GRANT_DOMAIN_SEPARATOR = Buffer.from(
-  `${GENERAL_ADMISSION_POLICY_GRANT_DOMAIN}\0`,
-  'utf8',
-);
 const GENERAL_ADMISSION_ISSUANCE_ID_DOMAIN_SEPARATOR = Buffer.from(
   `${GENERAL_ADMISSION_ISSUANCE_ID_DOMAIN}\0`,
   'utf8',
@@ -65,20 +56,6 @@ export function tenantPolicyAdmissionObjectKey(input: TenantPolicyAdmissionObjec
   return `${TENANT_POLICY_ADMISSION_OBJECT_PREFIX}/org/${input.orgId}/deployment/${input.deploymentId}/pool-deployment/${input.poolDeploymentId}/assignment-generation/${input.assignmentGeneration}/admission/${input.admissionDigest}.cbor`;
 }
 
-export function encodeGeneralAdmissionPolicyGrantSubjectV1(
-  subject: GeneralAdmissionPolicyGrantSubjectV1,
-): Uint8Array {
-  return canonicalCbor(generalAdmissionPolicyGrantSubjectV1Schema.parse(subject));
-}
-
-export function computeGeneralAdmissionPolicyGrantDigestV1(
-  subject: GeneralAdmissionPolicyGrantSubjectV1,
-): string {
-  return createHash('sha256')
-    .update(encodeGeneralAdmissionPolicyGrantSubjectV1(subject))
-    .digest('hex');
-}
-
 export function deriveGeneralAdmissionWindowV1(trustedTime: Date | number): number {
   const time = trustedTime instanceof Date ? trustedTime.getTime() : trustedTime;
   if (!Number.isFinite(time) || time < 0) {
@@ -109,17 +86,6 @@ export function computeGeneralAdmissionIssuanceIdV1(
     .update(GENERAL_ADMISSION_ISSUANCE_ID_DOMAIN_SEPARATOR)
     .update(canonicalCbor(subject))
     .digest('hex');
-}
-
-export function generalAdmissionPolicyGrantSignatureInputV1(
-  grant: GeneralAdmissionPolicyGrantV1,
-): Uint8Array {
-  const parsed = generalAdmissionPolicyGrantV1Schema.parse(grant);
-  if (parsed.grantDigest !== computeGeneralAdmissionPolicyGrantDigestV1(parsed.subject)) {
-    throw new Error('general_admission_policy_grant_digest_mismatch');
-  }
-  const digest = createHash('sha256').update(canonicalCbor(parsed)).digest();
-  return Buffer.concat([GENERAL_ADMISSION_GRANT_DOMAIN_SEPARATOR, digest]);
 }
 
 export function encodeTenantPolicyAdmissionSubjectV1(
