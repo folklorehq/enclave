@@ -26,6 +26,7 @@ import { checkRateLimit } from '../rate-limiter.js';
 import { fetchDispatcherAuthSecret, computeDispatcherAuthHmac } from '../dispatcher-auth.js';
 import type { RoutingMode } from '../routing-allowlist.js';
 import { SQS_MAX_MESSAGE_BYTES } from '../encrypted-sqs-message-size.js';
+import { UUID_PATTERN } from '../uuid-pattern.js';
 import { normalizeHeaders, verifySignature, verifySvixSignature } from '../signature-verifier.js';
 
 const ssm = new SSMClient({});
@@ -109,6 +110,7 @@ const MS_PER_S = 1000;
 // scheme), not a per-tenant secret (design §4): inbound isolation rests on the unguessable per-tenant
 // ingest URL alone. Recall bots post to the `zoom` source path (design §8 — no `zoom_bot` SourceKind).
 const RECALL_WEBHOOK_SECRET_PATH = '/folklore/recall-api/webhook-verification-secret';
+const X25519_PUBLIC_KEY_HEX = /^[0-9a-f]{64}$/i;
 const publicKeyCache = new Map<string, { key: Buffer; expiresAt: number }>();
 const hmacSecretCache = new Map<string, { secret: string | null; expiresAt: number }>();
 
@@ -117,10 +119,14 @@ async function fetchPublicKey(tenantId: string): Promise<Buffer> {
   if (cached && Date.now() < cached.expiresAt) return cached.key;
 
   const result = await ssm.send(
-    new GetParameterCommand({ Name: `/folklore/${tenantId}/ingest-public-key` }),
+    new GetParameterCommand({
+      Name: `/folklore/${tenantId}/ingest-public-key`,
+      WithDecryption: true,
+    }),
   );
   const hex = result.Parameter?.Value;
-  if (!hex) throw new Error(`No ingest public key for tenant: ${tenantId}`);
+  if (!hex || !X25519_PUBLIC_KEY_HEX.test(hex))
+    throw new Error(`No ingest public key for tenant: ${tenantId}`);
 
   const key = Buffer.from(hex, 'hex');
   publicKeyCache.set(tenantId, { key, expiresAt: Date.now() + CACHE_TTL_MS });
@@ -438,9 +444,7 @@ function commissioningMetadata(source: string, body: string): CommissioningMetad
   const requestId = values['request_id'];
   if (
     typeof canaryRunId !== 'string' ||
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-      canaryRunId,
-    ) ||
+    !UUID_PATTERN.test(canaryRunId) ||
     typeof requestId !== 'string' ||
     !/^[A-Za-z0-9._:-]{1,128}$/.test(requestId)
   ) {

@@ -10,6 +10,8 @@ import { jiraEncryptedWebhookEnvelopeSchema } from '@folklore/contracts/enclave'
 import { fitsEncryptedSqsMessage } from './encrypted-sqs-message-size.js';
 import { checkRateLimit } from './rate-limiter.js';
 import { fetchDispatcherAuthSecret, computeDispatcherAuthHmac } from './dispatcher-auth.js';
+import { ingestFunctionName } from './ingest-function-name.js';
+import { UUID_PATTERN } from './uuid-pattern.js';
 import {
   captureNotionVerificationToken,
   getNotionVerificationCaptureConfig,
@@ -52,8 +54,6 @@ const INTERCOM_SOURCE = 'intercom';
 const INTERCOM_LIVENESS_ROUTE = 'HEAD /ingest/intercom';
 const JIRA_SOURCE = 'jira';
 const MAX_JIRA_RAW_BODY_BYTES = 2_000_000;
-const ROUTING_UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_JIRA_ADMISSION_TOKEN_BYTES = 16 * 1024;
 const JIRA_ADMISSION_SEGMENT_PATTERN = /^[A-Za-z0-9_-]+$/;
 const MAX_RATE_LIMIT_ID_BYTES = 128;
@@ -394,7 +394,7 @@ function routeQueryValue(event: Parameters<APIGatewayProxyHandlerV2>[0]): string
     if (parameterValue !== rawRouteValues[0]) return null;
   }
   const routeId = rawRouteValues[0] ?? parameterValue;
-  return routeId && ROUTING_UUID_PATTERN.test(routeId) ? routeId : null;
+  return routeId && UUID_PATTERN.test(routeId) ? routeId : null;
 }
 
 function oauthDispatchContext(
@@ -597,6 +597,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 
     // URL-routed mode: tenantId is in the path, use per-tenant secret, skip resolveTenant()
     if (tenantId) {
+      if (!UUID_PATTERN.test(tenantId)) return { statusCode: 401 };
       const bearer: ReturnType<typeof bearerAuthorization> =
         source === JIRA_SOURCE ? bearerAuthorization(headers['authorization']) : { present: false };
       if (bearer.present) {
@@ -653,7 +654,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
           source,
           body,
           headers,
-          `${tenantId}-ingest`,
+          ingestFunctionName(tenantId),
           'url',
           oauthContext,
         );
@@ -695,7 +696,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
         source,
         body,
         headers,
-        `${tenantId}-ingest`,
+        ingestFunctionName(tenantId),
         'url',
       );
       if (!invokePayload) return { statusCode: 503 };
@@ -745,7 +746,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       source,
       body,
       headers,
-      `${tenant.orgId}-ingest`,
+      ingestFunctionName(tenant.orgId),
       'payload',
     );
     if (!invokePayload) return { statusCode: 503 };
