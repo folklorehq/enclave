@@ -26,10 +26,13 @@ export { nitroAttestationFailureCodes, type NitroAttestationFailureCode } from '
 export {
   verifyAwsNitroAttestationDocument,
   verifyPoolRuntimeAttestation,
+  verifyPoolSessionKeyDocumentAtIssue,
   verifyRuntimeAttestation,
   type AwsNitroAttestationDocumentResult,
   type PoolRuntimeAttestationExpectations,
   type PoolRuntimeAttestationResult,
+  type PoolSessionKeyDocumentExpectations,
+  type VerifiedPoolSessionKeyDocument,
   type RuntimeAttestationExpectations,
   type RuntimeAttestationResult,
   type VerifiedPoolRuntimeIdentity,

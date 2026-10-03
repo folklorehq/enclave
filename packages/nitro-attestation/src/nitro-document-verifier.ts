@@ -38,7 +38,11 @@ import { derivePcr3FromRoleArn, derivePcr4FromInstanceId } from './nitro-pcr.js'
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 const CLOCK_SKEW_MS = 5_000;
 const CHALLENGE_NONCE_BYTES = 32;
-const PCR_BYTES = 48;
+const SESSION_PUBLIC_KEY_BYTES = 32;
+const ASSIGNMENT_DIGEST_PATTERN = /^[0-9a-f]{64}$/;
+const PARENT_ROLE_ARN_PATTERN = /^arn:[a-z0-9-]+:iam::\d{12}:role\/[A-Za-z0-9+=,.@_/-]+$/;
+const SESSION_KEY_DOCUMENT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const NITRO_PCR0_BYTES = 48;
 
 export interface RuntimeAttestationExpectations {
   nonce: Uint8Array;
@@ -107,6 +111,33 @@ export interface VerifiedPoolRuntimeIdentity {
   healthObservedAt: string;
 }
 
+export interface PoolSessionKeyDocumentExpectations {
+  readonly poolDeploymentId: string;
+  readonly assignmentGeneration: number;
+  readonly assignmentDigest: string;
+  readonly pcr0: Uint8Array;
+  readonly parentRoleArn: string;
+  readonly serverTime: Date;
+}
+
+export interface VerifiedPoolSessionKeyDocument {
+  readonly sessionPublicKey: Uint8Array;
+}
+
+interface VerifiedPoolDocument {
+  readonly evidence: EnclaveRuntimeEvidence;
+  readonly document: Buffer;
+  readonly payload: NitroDocumentPayload;
+  readonly userData: PoolRuntimeAttestationUserData;
+}
+
+type ExpectedPcrs = ReadonlyArray<readonly [number, Uint8Array]>;
+
+type PoolUserDataBinding = Pick<
+  PoolRuntimeAttestationExpectations,
+  'poolDeploymentId' | 'assignmentGeneration' | 'assignmentDigest'
+>;
+
 export type PoolRuntimeAttestationResult =
   | { ok: true; identity: VerifiedPoolRuntimeIdentity }
   | { ok: false; failure: NitroAttestationFailureCode };
@@ -119,19 +150,42 @@ function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
   return left.byteLength === right.byteLength && timingSafeEqual(left, right);
 }
 
+// A debug-mode enclave reports an all-zero PCR0, so zero must never be an acceptable expectation.
+function isUsablePcr0(pcr0: Uint8Array): boolean {
+  return pcr0.byteLength === NITRO_PCR0_BYTES && pcr0.some((byte) => byte !== 0);
+}
+
+function isValidPoolBinding(
+  expected: Pick<PoolRuntimeAttestationExpectations, 'pcr0' | 'parentRoleArn' | 'assignmentDigest'>,
+): boolean {
+  return (
+    isUsablePcr0(expected.pcr0) &&
+    PARENT_ROLE_ARN_PATTERN.test(expected.parentRoleArn) &&
+    ASSIGNMENT_DIGEST_PATTERN.test(expected.assignmentDigest)
+  );
+}
+
+function assertPcrs(payload: NitroDocumentPayload, expectedPcrs: ExpectedPcrs): void {
+  for (const [index, expectedPcr] of expectedPcrs) {
+    const actualPcr = payload.pcrs.get(index);
+    if (actualPcr === undefined || !bytesEqual(actualPcr, expectedPcr)) {
+      throw new NitroAttestationError('runtime_binding_mismatch');
+    }
+  }
+}
+
 function validateExpectations(expected: RuntimeAttestationExpectations): void {
   const issuedAt = expected.challengeIssuedAt.getTime();
   const expiresAt = expected.challengeExpiresAt.getTime();
   const serverTime = expected.serverTime.getTime();
   const datesAreValid = [issuedAt, expiresAt, serverTime].every(Number.isFinite);
-  const pcr0IsValid =
-    expected.pcr0.byteLength === PCR_BYTES && expected.pcr0.some((byte) => byte !== 0);
+  const pcr0IsValid = isUsablePcr0(expected.pcr0);
   if (
     !datesAreValid ||
     issuedAt >= expiresAt ||
     expected.nonce.byteLength !== CHALLENGE_NONCE_BYTES ||
     !pcr0IsValid ||
-    !/^arn:[a-z0-9-]+:iam::\d{12}:role\/[A-Za-z0-9+=,.@_/-]+$/.test(expected.parentRoleArn) ||
+    !PARENT_ROLE_ARN_PATTERN.test(expected.parentRoleArn) ||
     !/^i-[0-9a-f]{8,17}$/.test(expected.instanceId)
   ) {
     throw new NitroAttestationError('runtime_binding_mismatch');
@@ -142,16 +196,12 @@ function validatePoolExpectations(expected: PoolRuntimeAttestationExpectations):
   const issuedAt = expected.challengeIssuedAt.getTime();
   const expiresAt = expected.challengeExpiresAt.getTime();
   const serverTime = expected.serverTime.getTime();
-  const pcr0IsValid =
-    expected.pcr0.byteLength === PCR_BYTES && expected.pcr0.some((byte) => byte !== 0);
   if (
     ![issuedAt, expiresAt, serverTime].every(Number.isFinite) ||
     issuedAt >= expiresAt ||
     expected.nonce.byteLength !== CHALLENGE_NONCE_BYTES ||
-    !pcr0IsValid ||
-    !/^arn:[a-z0-9-]+:iam::\d{12}:role\/[A-Za-z0-9+=,.@_/-]+$/.test(expected.parentRoleArn) ||
-    !/^i-[0-9a-f]{8,17}$/.test(expected.instanceId) ||
-    !/^[0-9a-f]{64}$/.test(expected.assignmentDigest)
+    !isValidPoolBinding(expected) ||
+    !/^i-[0-9a-f]{8,17}$/.test(expected.instanceId)
   ) {
     throw new NitroAttestationError('runtime_binding_mismatch');
   }
@@ -203,12 +253,7 @@ function verifyDocumentBindings(
   if (expected.runtimeKeyBundleHash !== undefined && expected.runtimeKeyBundleHash !== bundleHash) {
     throw new NitroAttestationError('runtime_binding_mismatch');
   }
-  for (const [index, expectedPcr] of expectedPcrs) {
-    const actualPcr = payload.pcrs.get(index);
-    if (actualPcr === undefined || !bytesEqual(actualPcr, expectedPcr)) {
-      throw new NitroAttestationError('runtime_binding_mismatch');
-    }
-  }
+  assertPcrs(payload, expectedPcrs);
 }
 
 function verifyTimes(
@@ -306,12 +351,12 @@ function normalizedIdentity(
 
 function poolUserData(
   evidence: EnclaveRuntimeEvidence,
-  expected: PoolRuntimeAttestationExpectations,
+  expected: PoolUserDataBinding,
 ): PoolRuntimeAttestationUserData {
   const runtimeDatabase = evidence.signedHealth.record.runtimeDatabase;
   if (!runtimeDatabase) throw new NitroAttestationError('runtime_binding_mismatch');
   const sessionPublicKey = Buffer.from(evidence.sessionPublicKey, 'base64');
-  if (sessionPublicKey.byteLength !== 32) {
+  if (sessionPublicKey.byteLength !== SESSION_PUBLIC_KEY_BYTES) {
     throw new NitroAttestationError('runtime_binding_mismatch');
   }
   return poolRuntimeAttestationUserDataSchema.parse({
@@ -326,29 +371,52 @@ function poolUserData(
 
 function verifyPoolDocumentBindings(
   payload: NitroDocumentPayload,
-  evidence: EnclaveRuntimeEvidence,
   expected: PoolRuntimeAttestationExpectations,
-  userData: PoolRuntimeAttestationUserData,
 ): void {
-  const evidencePublicKey = Buffer.from(evidence.sessionPublicKey, 'base64');
-  const expectedPcrs = [
+  if (!bytesEqual(payload.nonce, expected.nonce)) {
+    throw new NitroAttestationError('runtime_binding_mismatch');
+  }
+  assertPcrs(payload, [
     [0, expected.pcr0],
     [3, derivePcr3FromRoleArn(expected.parentRoleArn)],
     [4, derivePcr4FromInstanceId(expected.instanceId)],
-  ] as const;
-  if (
-    !bytesEqual(payload.nonce, expected.nonce) ||
-    !bytesEqual(payload.userData, encodePoolRuntimeAttestationUserData(userData)) ||
-    !bytesEqual(payload.publicKey, evidencePublicKey)
-  ) {
+  ]);
+}
+
+function assertPoolDocumentIdentity(
+  payload: NitroDocumentPayload,
+  evidence: EnclaveRuntimeEvidence,
+  userData: PoolRuntimeAttestationUserData,
+): void {
+  if (!bytesEqual(payload.userData, encodePoolRuntimeAttestationUserData(userData))) {
     throw new NitroAttestationError('runtime_binding_mismatch');
   }
-  for (const [index, expectedPcr] of expectedPcrs) {
-    const actualPcr = payload.pcrs.get(index);
-    if (actualPcr === undefined || !bytesEqual(actualPcr, expectedPcr)) {
-      throw new NitroAttestationError('runtime_binding_mismatch');
-    }
+  if (!bytesEqual(payload.publicKey, Buffer.from(evidence.sessionPublicKey, 'base64'))) {
+    throw new NitroAttestationError('runtime_binding_mismatch');
   }
+}
+
+// Parses, chains and signature-checks a pool document, then binds its user_data and public_key.
+function verifiedPoolDocument(
+  rawEvidence: EnclaveRuntimeEvidence,
+  binding: PoolUserDataBinding,
+  trustedRootDer: Uint8Array,
+  verificationTime: (payload: NitroDocumentPayload) => Date,
+): VerifiedPoolDocument {
+  const evidence = enclaveRuntimeEvidenceSchema.parse(rawEvidence);
+  const userData = poolUserData(evidence, binding);
+  const document = Buffer.from(evidence.nitroDocument, 'base64');
+  const cose = parseNitroCoseSign1(document);
+  const payload = parseNitroDocumentPayload(cose.payload);
+  const leafKey = verifyCertificatePath({
+    leafDer: payload.certificate,
+    cabundle: payload.cabundle,
+    trustedRootDer,
+    verificationTime: verificationTime(payload),
+  });
+  verifyNitroCoseSignature(cose, leafKey);
+  assertPoolDocumentIdentity(payload, evidence, userData);
+  return { evidence, document, payload, userData };
 }
 
 function verifyPoolHealth(
@@ -485,19 +553,13 @@ export function verifyPoolRuntimeAttestationWithTrustAnchor(
 ): PoolRuntimeAttestationResult {
   try {
     validatePoolExpectations(expected);
-    const evidence = enclaveRuntimeEvidenceSchema.parse(rawEvidence);
-    const userData = poolUserData(evidence, expected);
-    const document = Buffer.from(evidence.nitroDocument, 'base64');
-    const cose = parseNitroCoseSign1(document);
-    const payload = parseNitroDocumentPayload(cose.payload);
-    const leafKey = verifyCertificatePath({
-      leafDer: payload.certificate,
-      cabundle: payload.cabundle,
+    const { evidence, document, payload, userData } = verifiedPoolDocument(
+      rawEvidence,
+      expected,
       trustedRootDer,
-      verificationTime: expected.serverTime,
-    });
-    verifyNitroCoseSignature(cose, leafKey);
-    verifyPoolDocumentBindings(payload, evidence, expected, userData);
+      () => expected.serverTime,
+    );
+    verifyPoolDocumentBindings(payload, expected);
     verifyTimes(payload, expected);
     verifyPoolHealth(document, payload, evidence, expected, userData);
     return {
@@ -518,4 +580,61 @@ export function verifyPoolRuntimeAttestation(
 ): PoolRuntimeAttestationResult {
   const trustedRootDer = new X509Certificate(loadAwsNitroRoot()).raw;
   return verifyPoolRuntimeAttestationWithTrustAnchor(evidence, expected, trustedRootDer);
+}
+
+function validatePoolSessionKeyExpectations(expected: PoolSessionKeyDocumentExpectations): void {
+  if (
+    !isValidPoolBinding(expected) ||
+    !Number.isSafeInteger(expected.assignmentGeneration) ||
+    !Number.isFinite(expected.serverTime.getTime())
+  ) {
+    throw new NitroAttestationError('runtime_binding_mismatch');
+  }
+}
+
+function verifyPoolSessionKeyDocumentAge(
+  payload: NitroDocumentPayload,
+  expected: PoolSessionKeyDocumentExpectations,
+): void {
+  const serverTime = expected.serverTime.getTime();
+  if (
+    payload.timestamp < serverTime - SESSION_KEY_DOCUMENT_MAX_AGE_MS ||
+    payload.timestamp > serverTime + CLOCK_SKEW_MS
+  ) {
+    throw new NitroAttestationError('runtime_binding_mismatch');
+  }
+}
+
+function verifyPoolSessionKeyDocument(
+  rawEvidence: EnclaveRuntimeEvidence,
+  expected: PoolSessionKeyDocumentExpectations,
+  trustedRootDer: Uint8Array,
+): VerifiedPoolSessionKeyDocument {
+  validatePoolSessionKeyExpectations(expected);
+  const { payload } = verifiedPoolDocument(
+    rawEvidence,
+    expected,
+    trustedRootDer,
+    (document) => new Date(document.timestamp),
+  );
+  assertPcrs(payload, [
+    [0, expected.pcr0],
+    [3, derivePcr3FromRoleArn(expected.parentRoleArn)],
+  ]);
+  verifyPoolSessionKeyDocumentAge(payload, expected);
+  return { sessionPublicKey: Uint8Array.from(payload.publicKey) };
+}
+
+// No nonce, PCR4 or health check, and only a day's freshness. Not verifyPoolRuntimeAttestation.
+export function verifyPoolSessionKeyDocumentAtIssue(
+  rawEvidence: EnclaveRuntimeEvidence,
+  expected: PoolSessionKeyDocumentExpectations,
+  trustedRootDer: Uint8Array = new X509Certificate(loadAwsNitroRoot()).raw,
+): VerifiedPoolSessionKeyDocument {
+  try {
+    return verifyPoolSessionKeyDocument(rawEvidence, expected, trustedRootDer);
+  } catch (error: unknown) {
+    if (error instanceof NitroAttestationError) throw error;
+    throw new NitroAttestationError('malformed_document');
+  }
 }
