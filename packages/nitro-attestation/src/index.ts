@@ -226,11 +226,13 @@ export type {
 } from './verified-enclave-release.js';
 export type { VerifiedEnclaveRelease, VerifiedEnclaveReleaseIdentityV1 } from '@folklore/contracts';
 export {
+  GENERATION_HIGH_WATER_GENESIS_DOMAIN,
   GENERATION_HIGH_WATER_SIGNING_DOMAIN,
   decodeGenerationHighWaterLogEntryV1,
   encodeGenerationHighWaterLogEntryV1,
   generationHighWaterCheckpointDigestV1,
   generationHighWaterEntryDigestV1,
+  generationHighWaterGenesisPredecessorDigestV1,
   generationHighWaterSignatureInputV1,
   generationHighWaterSigningMaterial,
   GenerationHighWaterCanonicalError,

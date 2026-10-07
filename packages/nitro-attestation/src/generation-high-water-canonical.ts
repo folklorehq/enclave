@@ -11,6 +11,8 @@ import {
 } from '@folklore/contracts';
 
 export const GENERATION_HIGH_WATER_SIGNING_DOMAIN = 'folklore.generation-high-water.v1' as const;
+export const GENERATION_HIGH_WATER_GENESIS_DOMAIN =
+  'folklore.generation-high-water.genesis.v1' as const;
 
 export class GenerationHighWaterCanonicalError extends Error {
   readonly code:
@@ -93,6 +95,16 @@ export function generationHighWaterCheckpointDigestV1(
   const parsed = highWaterLogCheckpointV1Schema.parse(checkpoint);
   const { checkpointDigest: _checkpointDigest, ...unsigned } = parsed;
   return createHash('sha256').update(encode(unsigned, rfc8949EncodeOptions)).digest('hex');
+}
+
+// A first checkpoint has no prior checkpoint, so its predecessor binds the context the chain is opened for.
+export function generationHighWaterGenesisPredecessorDigestV1(
+  context: GenerationContextV1,
+): string {
+  return createHash('sha256')
+    .update(`${GENERATION_HIGH_WATER_GENESIS_DOMAIN}\0`, 'utf8')
+    .update(encode(generationContextV1Schema.parse(context), rfc8949EncodeOptions))
+    .digest('hex');
 }
 
 export function generationHighWaterSignatureInputV1(entry: HighWaterLogEntryV1): Uint8Array {
