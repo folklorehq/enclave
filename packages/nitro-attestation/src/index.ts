@@ -237,3 +237,10 @@ export {
 } from './generation-high-water-canonical.js';
 export type { GenerationHighWaterSigningMaterial } from './generation-high-water-canonical.js';
 export { decodeGenerationHighWaterCandidateV1 } from './generation-high-water-canonical.js';
+export {
+  SelfSignedCertificateError,
+  buildSelfSignedEcdsaCertificate,
+  buildSelfSignedEcdsaCertificateTbs,
+  type SelfSignedCertificateErrorCode,
+  type SelfSignedEcdsaCertificateInput,
+} from './self-signed-ecdsa-certificate.js';
