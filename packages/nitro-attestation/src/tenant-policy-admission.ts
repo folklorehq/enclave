@@ -64,6 +64,35 @@ export function deriveGeneralAdmissionWindowV1(trustedTime: Date | number): numb
   return Math.floor(time / TENANT_POLICY_ADMISSION_MAX_LIFETIME_MS);
 }
 
+// A policy lives for an epoch, longer than the admission window, so an epoch's admissions agree.
+export const ACTIVE_POLICY_EPOCH_MS = 12 * 60 * 60 * 1_000;
+export const ACTIVE_POLICY_VALIDITY_MS = 2 * ACTIVE_POLICY_EPOCH_MS;
+export const ACTIVE_POLICY_EPOCH_ORIGIN_MS = Date.UTC(2026, 9, 1);
+
+export interface ActivePolicyEpochV1 {
+  readonly policyGeneration: number;
+  readonly establishedAtMs: number;
+  readonly expiresAtMs: number;
+}
+
+/** The policy generation and lifetime of the epoch holding an admission window's start. */
+export function deriveActivePolicyEpochV1(
+  admissionWindowStart: Date | number,
+): ActivePolicyEpochV1 {
+  const time =
+    admissionWindowStart instanceof Date ? admissionWindowStart.getTime() : admissionWindowStart;
+  if (!Number.isFinite(time) || time < ACTIVE_POLICY_EPOCH_ORIGIN_MS) {
+    throw new Error('active_policy_epoch_invalid');
+  }
+  const epochIndex = Math.floor((time - ACTIVE_POLICY_EPOCH_ORIGIN_MS) / ACTIVE_POLICY_EPOCH_MS);
+  const establishedAtMs = ACTIVE_POLICY_EPOCH_ORIGIN_MS + epochIndex * ACTIVE_POLICY_EPOCH_MS;
+  return {
+    policyGeneration: epochIndex + 1,
+    establishedAtMs,
+    expiresAtMs: establishedAtMs + ACTIVE_POLICY_VALIDITY_MS,
+  };
+}
+
 export function deriveGeneralAdmissionWindowStartV1(admissionWindow: number): Date {
   if (!Number.isSafeInteger(admissionWindow) || admissionWindow < 0) {
     throw new Error('general_admission_window_invalid');
