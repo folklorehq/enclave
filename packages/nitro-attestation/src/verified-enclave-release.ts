@@ -204,11 +204,14 @@ type VerifyBundle = (bundle: Bundle, options: VerifyOptions) => Promise<unknown>
 export class SigstoreEnclaveProvenanceVerifier implements EnclaveProvenanceVerifier {
   constructor(
     private readonly verifyBundle: VerifyBundle = (bundle, options) => verify(bundle, options),
+    // Sigstore's default TUF cache is under $HOME, which a read-only runtime (Lambda) cannot create.
+    private readonly tufCachePath?: string,
   ) {}
 
   async verify(bundleValue: string, subjectValue: string): Promise<VerifiedProvenanceSubject> {
     const envelope = releaseProvenanceEnvelopeSchema.parse(JSON.parse(bundleValue) as unknown);
     await this.verifyBundle(envelope.sigstore.bundle as Bundle, {
+      ...(this.tufCachePath === undefined ? {} : { tufCachePath: this.tufCachePath }),
       certificateIssuer: SIGSTORE_ISSUER,
       certificateIdentityURI: PROD_WORKFLOW_IDENTITY,
     });
