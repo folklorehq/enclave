@@ -4,13 +4,19 @@ import {
   highWaterLogEntryV1Schema,
   highWaterPointerV1Schema,
   type DurableGenerationHighWaterTransportContextV1,
+  type GenerationContextV1,
   type GenerationHighWaterRuntimeConfigV1,
   type HighWaterLogEntryV1,
 } from '@folklore/contracts';
 import {
+  classifyGenerationHighWaterProgressionV1,
+  generationHighWaterEntryContextV1,
   generationHighWaterEntryDigestV1,
   generationHighWaterGenesisPredecessorDigestV1,
+  generationHighWaterReleaseKeyV1,
+  generationHighWaterReleaseReenteredV1,
   generationHighWaterSignatureInputV1,
+  type GenerationHighWaterProgressionV1,
 } from '@folklore/nitro-attestation';
 import { decode, encode, rfc8949EncodeOptions } from 'cborg';
 import { createHash, createPublicKey, verify, type KeyObject } from 'node:crypto';
@@ -37,6 +43,16 @@ const POINTER_ATTRIBUTE_NAMES = [
   'pointerState',
   'updatedAtTrustedMs',
 ] as const;
+const PROGRESSION_ACCEPTED: ReadonlySet<GenerationHighWaterProgressionV1> = new Set([
+  'same-release',
+  'release-transition',
+]);
+const PROGRESSION_REFUSALS: ReadonlyMap<GenerationHighWaterProgressionV1, string> = new Map([
+  ['context-mismatch', 'high_water_sequence_context_invalid'],
+  ['lower-generation', 'high_water_generation_regressed'],
+  ['equal-generation-conflict', 'high_water_generation_conflict'],
+]);
+const UNKNOWN_PROGRESSION_REFUSAL = 'high_water_progression_invalid';
 
 export interface AwsDurableGenerationHighWaterTransportConfig {
   readonly config: GenerationHighWaterRuntimeConfigV1;
@@ -110,6 +126,7 @@ export class AwsDurableGenerationHighWaterTransport implements DurableGeneration
   ): Promise<readonly (DurableGenerationHighWaterEnvelopeV1 & { versionId: string })[]> {
     const versions = await this.listSequenceVersions(context);
     let previous: HighWaterLogEntryV1 | null = null;
+    const chain: GenerationContextV1[] = [];
     const tail: (DurableGenerationHighWaterEnvelopeV1 & { versionId: string })[] = [];
     let totalObjectBytes = 0;
     for (const version of versions) {
@@ -133,12 +150,41 @@ export class AwsDurableGenerationHighWaterTransport implements DurableGeneration
       const entry = this.decodeCanonicalEntry(bytes);
       this.assertChainEntry(context, entry, version.sequence, previous);
       this.verifyEntrySignature(entry);
+      chain.push(generationHighWaterEntryContextV1(entry));
       tail.push({ entry, bytes, versionId: version.versionId });
       if (tail.length > count) tail.shift();
       previous = entry;
     }
     if (tail.length === 0) throw new Error('high_water_sequence_missing');
-    return tail;
+    this.assertProgression(chain);
+    const headRelease = this.headRelease(context, chain);
+    // Only the head release's trailing segment is served, so no window spans a release change.
+    return tail.filter(
+      ({ entry }) => generationHighWaterReleaseKeyV1(entry.checkpoint) === headRelease,
+    );
+  }
+
+  private assertProgression(chain: readonly GenerationContextV1[]): void {
+    for (let index = 1; index < chain.length; index += 1) {
+      const verdict = classifyGenerationHighWaterProgressionV1(chain[index - 1]!, chain[index]!);
+      // Only named progressions pass; a verdict this reader does not know refuses.
+      if (PROGRESSION_ACCEPTED.has(verdict)) continue;
+      throw new Error(PROGRESSION_REFUSALS.get(verdict) ?? UNKNOWN_PROGRESSION_REFUSAL);
+    }
+  }
+
+  private headRelease(
+    context: DurableGenerationHighWaterTransportContextV1,
+    chain: readonly GenerationContextV1[],
+  ): string {
+    if (generationHighWaterReleaseReenteredV1(chain)) {
+      throw new Error('high_water_release_reentered');
+    }
+    const headRelease = generationHighWaterReleaseKeyV1(chain.at(-1)!);
+    if (headRelease !== generationHighWaterReleaseKeyV1(context)) {
+      throw new Error('high_water_sequence_context_invalid');
+    }
+    return headRelease;
   }
 
   private async listSequenceVersions(
@@ -222,10 +268,6 @@ export class AwsDurableGenerationHighWaterTransport implements DurableGeneration
       entry.logSequence !== sequence ||
       entry.checkpoint.orgId !== context.orgId ||
       entry.checkpoint.deploymentId !== context.deploymentId ||
-      entry.checkpoint.releaseId !== context.releaseId ||
-      entry.checkpoint.protectedSourceCommit !== context.protectedSourceCommit ||
-      entry.checkpoint.eifDigest !== context.eifDigest ||
-      entry.checkpoint.pcr0 !== context.pcr0 ||
       entry.checkpoint.bootRootDigest !== context.bootRootDigest ||
       entry.signerKeyId !== entry.checkpoint.signerKeyId
     ) {
@@ -248,23 +290,10 @@ export class AwsDurableGenerationHighWaterTransport implements DurableGeneration
     if (entry.previousEntryDigest !== null || entry.checkpoint.previousCheckpointDigest !== null) {
       throw new Error('high_water_sequence_gap');
     }
-    const checkpoint = entry.checkpoint;
-    const genesisPredecessor = generationHighWaterGenesisPredecessorDigestV1({
-      orgId: checkpoint.orgId,
-      deploymentId: checkpoint.deploymentId,
-      policyDigest: checkpoint.policyDigest,
-      policyGeneration: checkpoint.policyGeneration,
-      activationGeneration: checkpoint.activationGeneration,
-      configurationGeneration: checkpoint.configurationGeneration,
-      keysetEpoch: checkpoint.keysetEpoch,
-      keysetDigest: checkpoint.keysetDigest,
-      releaseId: checkpoint.releaseId,
-      protectedSourceCommit: checkpoint.protectedSourceCommit,
-      eifDigest: checkpoint.eifDigest,
-      pcr0: checkpoint.pcr0,
-      bootRootDigest: checkpoint.bootRootDigest,
-    });
-    if (checkpoint.predecessorDigest !== genesisPredecessor) {
+    const genesisPredecessor = generationHighWaterGenesisPredecessorDigestV1(
+      generationHighWaterEntryContextV1(entry),
+    );
+    if (entry.checkpoint.predecessorDigest !== genesisPredecessor) {
       throw new Error('high_water_sequence_fork');
     }
   }

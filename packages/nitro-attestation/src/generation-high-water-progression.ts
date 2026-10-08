@@ -1,4 +1,3 @@
-// no live caller yet in the enclave: it adopts this rule in a later change.
 import type { GenerationContextV1 } from '@folklore/contracts';
 
 export type GenerationHighWaterProgressionV1 =
