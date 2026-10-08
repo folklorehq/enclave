@@ -11,7 +11,11 @@ import {
   encodeActiveInferenceTrustPolicyV2,
   encodeActivePolicyAuthorizationEnvelopeV1,
 } from './canonical-cbor.js';
-import { domainSeparatedBytes, sha256Hex } from './model-provenance-canonical.js';
+import {
+  domainSeparatedBytes,
+  domainSeparatedDigest,
+  sha256Hex,
+} from './model-provenance-canonical.js';
 import { canonicalCbor } from './canonical-cbor.js';
 
 export const ACTIVE_POLICY_CARRIER_PAYLOAD_V1_DOMAIN = 'folklore.active-policy-carrier-payload.v1';
@@ -87,14 +91,14 @@ export function encodeActivePolicyCarrierPayloadV1(
   return canonicalCbor(activePolicyCarrierPayloadArrayV1(input));
 }
 
-// The exact bytes the carrier signer signs and the shared verifier checks: UTF8(domain) || 0x00 ||
-// canonicalCBOR(payloadArray).
+// Signs UTF8(domain) || 0x00 || SHA-256(canonicalCBOR(payload)): the payload embeds the whole
+// policy and outgrows the 4096-byte KMS Sign message limit, the digest never does.
 export function activePolicyCarrierPayloadSignatureInputV1(
   input: ActivePolicyCarrierPayloadV1,
 ): Uint8Array {
-  return domainSeparatedBytes(
+  return domainSeparatedDigest(
     ACTIVE_POLICY_CARRIER_PAYLOAD_V1_DOMAIN,
-    activePolicyCarrierPayloadArrayV1(input),
+    encodeActivePolicyCarrierPayloadV1(input),
   );
 }
 

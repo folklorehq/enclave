@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto';
 import type { ActivePolicyAuthorizationEnvelopeV1 } from '@folklore/contracts';
 import { encodeActivePolicyAuthorizationEnvelopeV1 } from './canonical-cbor.js';
+import { domainSeparatedDigest } from './model-provenance-canonical.js';
 
 export const ACTIVE_POLICY_AUTHORITY_SIGNATURE_DOMAIN =
   'folklore.inference-trust-policy-v2-authority-signature.v1';
@@ -20,14 +20,4 @@ export function activePolicyAuthorizationEnvelopeSignatureInputV1(
     ACTIVE_POLICY_AUTHORIZATION_ENVELOPE_SIGNATURE_DOMAIN,
     encodeActivePolicyAuthorizationEnvelopeV1(unsignedEnvelope),
   );
-}
-
-function domainSeparatedDigest(domain: string, bytes: Uint8Array): Uint8Array {
-  const domainBytes = Buffer.from(domain, 'utf8');
-  const digest = createHash('sha256').update(bytes).digest();
-  const input = new Uint8Array(domainBytes.byteLength + 1 + digest.byteLength);
-  input.set(domainBytes, 0);
-  input[domainBytes.byteLength] = 0;
-  input.set(digest, domainBytes.byteLength + 1);
-  return input;
 }
