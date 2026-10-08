@@ -16,7 +16,9 @@ import {
   type HighWaterLogEntryV1,
 } from '@folklore/contracts';
 import { ServiceUnavailableError } from '@folklore/errors';
+import { generationHighWaterCheckpointDigestV1 } from '@folklore/nitro-attestation';
 import { isDeepStrictEqual } from 'node:util';
+import type { ChainedGenerationHighWaterCheckpointV1 } from './ports.js';
 
 const MAX_HIGH_WATER_CANDIDATE_BYTES = 1_048_576;
 const GENERATION_HIGH_WATER_PURPOSE = 'generation-high-water' as const;
@@ -55,6 +57,10 @@ export interface DurableGenerationHighWaterTransport {
   read(
     context: DurableGenerationHighWaterTransportContextV1,
   ): Promise<DurableGenerationHighWaterEnvelopeV1>;
+  readRecent(
+    context: DurableGenerationHighWaterTransportContextV1,
+    count: number,
+  ): Promise<readonly DurableGenerationHighWaterEnvelopeV1[]>;
   commit(candidate: {
     context: DurableGenerationHighWaterTransportContextV1;
     entry: HighWaterLogEntryV1;
@@ -88,6 +94,29 @@ export class DurableGenerationHighWaterClient {
       const response = await this.transport.read({ ...normalizedContext });
       const envelope = await this.verifyEnvelope(normalizedContext, response, 'response');
       return checkpointFromEntry(envelope.entry);
+    } catch (error) {
+      if (isHighWaterFailure(error)) throw error;
+      throw failure('high_water_response_invalid', error);
+    }
+  }
+
+  async readRecent(
+    context: DurableGenerationHighWaterTransportContextV1,
+    count: number,
+  ): Promise<readonly ChainedGenerationHighWaterCheckpointV1[]> {
+    const normalizedContext = assertTransportContext(context);
+    if (!Number.isSafeInteger(count) || count < 1) throw failure('high_water_recent_count_invalid');
+    try {
+      const responses = await this.transport.readRecent({ ...normalizedContext }, count);
+      if (!Array.isArray(responses) || responses.length === 0 || responses.length > count) {
+        throw failure('high_water_response_invalid');
+      }
+      const envelopes: DurableGenerationHighWaterEnvelopeV1[] = [];
+      for (const response of responses) {
+        envelopes.push(await this.verifyEnvelope(normalizedContext, response, 'response'));
+      }
+      assertContiguousEntries(envelopes.map((envelope) => envelope.entry));
+      return envelopes.map((envelope) => checkpointFromEntry(envelope.entry));
     } catch (error) {
       if (isHighWaterFailure(error)) throw error;
       throw failure('high_water_response_invalid', error);
@@ -144,45 +173,6 @@ export class DurableGenerationHighWaterClient {
     }
     return { entry, bytes };
   }
-}
-
-// The canonical checkpoint array (digest excluded) in the exact GenerationContextV1 order.
-export function durableGenerationHighWaterCheckpointArrayV1(
-  checkpoint: Omit<DurableGenerationHighWaterCheckpointV1, 'checkpointDigest'>,
-): unknown[] {
-  return [
-    checkpoint.schema,
-    checkpoint.orgId,
-    checkpoint.deploymentId,
-    checkpoint.policyDigest,
-    checkpoint.policyGeneration,
-    checkpoint.activationGeneration,
-    checkpoint.configurationGeneration,
-    checkpoint.keysetEpoch,
-    checkpoint.keysetDigest,
-    checkpoint.releaseId,
-    checkpoint.protectedSourceCommit,
-    checkpoint.eifDigest,
-    checkpoint.pcr0,
-    checkpoint.bootRootDigest,
-    checkpoint.predecessorDigest,
-    checkpoint.signerKeyId,
-    checkpoint.signerPurpose,
-  ];
-}
-
-export function digestDurableGenerationHighWaterCheckpointV1(
-  checkpoint: Omit<DurableGenerationHighWaterCheckpointV1, 'checkpointDigest'>,
-): string {
-  const domainBytes = Buffer.from(
-    `${DURABLE_GENERATION_HIGH_WATER_CHECKPOINT_V1_SCHEMA}\u0000`,
-    'utf8',
-  );
-  const array = durableGenerationHighWaterCheckpointArrayV1(checkpoint);
-  const payload = encode(array, rfc8949EncodeOptions);
-  return createHash('sha256')
-    .update(Buffer.concat([domainBytes, Buffer.from(payload)]))
-    .digest('hex');
 }
 
 function parseEnvelope(
@@ -271,11 +261,8 @@ function assertCanonicalEntryBytes(
   if (createHash('sha256').update(unsignedBytes).digest('hex') !== parsed.entryDigest) {
     throw failure('high_water_entry_digest_mismatch');
   }
-  const { checkpointDigest: _checkpointDigest, ...unsignedCheckpoint } = parsed.checkpoint;
   if (
-    digestDurableGenerationHighWaterCheckpointV1(
-      unsignedCheckpoint as Omit<DurableGenerationHighWaterCheckpointV1, 'checkpointDigest'>,
-    ) !== parsed.checkpoint.checkpointDigest
+    generationHighWaterCheckpointDigestV1(parsed.checkpoint) !== parsed.checkpoint.checkpointDigest
   ) {
     throw failure('high_water_checkpoint_digest_mismatch');
   }
@@ -331,7 +318,24 @@ function assertTransportContext(
   }
 }
 
-function checkpointFromEntry(entry: HighWaterLogEntryV1): DurableGenerationHighWaterCheckpointV1 {
+function assertContiguousEntries(entries: readonly HighWaterLogEntryV1[]): void {
+  for (let index = 1; index < entries.length; index += 1) {
+    const previous = entries[index - 1];
+    const current = entries[index];
+    if (
+      !previous ||
+      !current ||
+      current.logSequence !== previous.logSequence + 1 ||
+      current.previousEntryDigest !== previous.entryDigest ||
+      current.checkpoint.predecessorDigest !== previous.entryDigest ||
+      current.checkpoint.previousCheckpointDigest !== previous.checkpoint.checkpointDigest
+    ) {
+      throw failure('high_water_fork');
+    }
+  }
+}
+
+function checkpointFromEntry(entry: HighWaterLogEntryV1): ChainedGenerationHighWaterCheckpointV1 {
   const checkpoint = entry.checkpoint;
   if (!/^[0-9a-f]{64}$/.test(checkpoint.predecessorDigest ?? '')) {
     throw failure('high_water_missing_predecessor');

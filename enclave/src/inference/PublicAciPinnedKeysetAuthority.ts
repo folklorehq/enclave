@@ -11,6 +11,7 @@ import {
 } from '@folklore/inference';
 import type { GenerationContextV1 } from '@folklore/contracts';
 import { digest64Schema, identifierSchema } from '@folklore/contracts';
+import { GENERATION_CONTEXT_FIELDS } from './renewal-grace.js';
 
 export interface PublicAciPinnedKeysetAuthorityOptions {
   readonly snapshot: VerifiedActivePolicySnapshotV1;
@@ -18,22 +19,6 @@ export interface PublicAciPinnedKeysetAuthorityOptions {
   readonly durable: DurableGenerationHighWaterClientPort;
   readonly trustedTimeContext: AciTrustContext;
 }
-
-const GENERATION_CONTEXT_KEYS: readonly (keyof GenerationContextV1)[] = [
-  'orgId',
-  'deploymentId',
-  'policyDigest',
-  'policyGeneration',
-  'activationGeneration',
-  'configurationGeneration',
-  'keysetEpoch',
-  'keysetDigest',
-  'releaseId',
-  'protectedSourceCommit',
-  'eifDigest',
-  'pcr0',
-  'bootRootDigest',
-];
 
 export class PublicAciPinnedKeysetAuthority implements AciKeysetHighWaterAuthorityPort {
   private readonly snapshot: VerifiedActivePolicySnapshotV1;
@@ -145,7 +130,7 @@ export class PublicAciPinnedKeysetAuthority implements AciKeysetHighWaterAuthori
     actual: GenerationContextV1,
     expected: GenerationContextV1,
   ): void {
-    for (const key of GENERATION_CONTEXT_KEYS) {
+    for (const key of GENERATION_CONTEXT_FIELDS) {
       if (actual[key] !== expected[key]) throw new Error('generation_context_mismatch');
     }
   }

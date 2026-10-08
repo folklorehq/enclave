@@ -130,9 +130,9 @@ import {
 import { DurableGenerationHighWaterClientAdapter } from './inference/DurableGenerationHighWaterClientAdapter.js';
 import { AwsDurableGenerationHighWaterTransport } from './inference/AwsDurableGenerationHighWaterTransport.js';
 import { BootBoundGenerationHighWaterVerifier } from './inference/BootBoundGenerationHighWaterVerifier.js';
+import type { RecentGenerationHighWaterPort } from './inference/ports.js';
 import {
   ActivePolicyCarrierVerifier,
-  type DurableGenerationHighWaterClientPort,
   VerifiedActivePolicySnapshotVerifier,
   type VerifiedActivePolicySnapshotV1,
   ActivePolicyModelProvenanceSource,
@@ -336,7 +336,7 @@ let apiContainer: ApiContainer | undefined;
 const drainerRef: { current?: QueueSetDrainer } = {};
 let verifiedPoolManifest: VerifiedAssignmentManifest | undefined;
 let verifiedBootGenerationContext: BootBoundGenerationContext | undefined;
-let durableGenerationHighWaterClient: DurableGenerationHighWaterClientPort | undefined;
+let durableGenerationHighWaterClient: RecentGenerationHighWaterPort | undefined;
 let activePolicyGeneration = 0;
 const runtimeDatabaseLease = new RuntimeDatabaseLease<ApiContainer, RuntimeDatabaseConnection>({
   requestRestart: (exitCode) => process.exit(exitCode),
@@ -1518,6 +1518,7 @@ function unavailableHighWaterTransport(): DurableGenerationHighWaterTransport {
     Promise.reject(new Error('high_water_transport_unavailable'));
   return {
     read: unavailable,
+    readRecent: unavailable,
     commit: unavailable,
   };
 }

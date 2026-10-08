@@ -21,6 +21,7 @@ import { PublicAciPinnedKeysetAuthority } from './PublicAciPinnedKeysetAuthority
 import { createPublicAciOperationBackend } from './PublicAciOperationBackend.js';
 import { createPinnedInferenceTransport } from '../egress/inference.js';
 import { assertPublicInferenceEmbeddingDimension } from './phala.js';
+import { installedSnapshotHighWater } from './renewal-grace.js';
 
 // Leave ten seconds of headroom below the NSM checkpoint maximum age.
 const PUBLIC_ACI_OPERATION_BUDGET_MS = 50_000;
@@ -145,7 +146,8 @@ export function createPublicAciRuntimeBackendFactory(
     const authority = new PublicAciPinnedKeysetAuthority({
       snapshot,
       expectedContext,
-      durable: options.freshness.highWater,
+      // Per-operation pin uses the same bounded renewal grace as the freshness refresh.
+      durable: installedSnapshotHighWater(options.freshness.highWater, snapshot.durableCheckpoint),
       trustedTimeContext,
     });
     remainingBudget();

@@ -1,14 +1,11 @@
+import type { GenerationContextV1 } from '@folklore/contracts';
 import type {
-  DurableGenerationHighWaterCheckpointV1,
-  GenerationContextV1,
-} from '@folklore/contracts';
-import type {
-  DurableGenerationHighWaterClientPort,
   InferenceModelRole,
   TrustedTimeAuthorityPort,
   TrustedTimeReadContext,
 } from '@folklore/inference';
 import type { Cache } from '@folklore/core';
+import { ServiceUnavailableError } from '@folklore/errors';
 import type { InferenceOperation, InferenceUsageSink } from '@folklore/inference';
 import type { ToolSpec } from '@folklore/inference';
 import {
@@ -20,13 +17,22 @@ import {
 import { inferenceModel, inferenceModelRevision } from './phala.js';
 import type { SynthesisInference } from './CachedInference.js';
 import { llmCacheKey } from './llm-cache.js';
+import type { RecentGenerationHighWaterPort } from './ports.js';
+import {
+  RENEWAL_GRACE_READ_COUNT,
+  assertGenerationContextEqual,
+  servingCheckpointForInstalled,
+} from './renewal-grace.js';
 
 const DEFAULT_REFRESH_TIMEOUT_MS = 5_000;
+const REFRESH_REASON_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
+const REFRESH_REASON_PREFIXES = ['active_policy_', 'high_water_', 'trusted_time_'] as const;
+const MAX_REFRESH_REASON_DEPTH = 8;
 
 export type TenantPolicySnapshotProvider = () => VerifiedActivePolicySnapshotV1 | undefined;
 
 export interface TenantPolicyFreshnessPort {
-  readonly highWater: DurableGenerationHighWaterClientPort;
+  readonly highWater: RecentGenerationHighWaterPort;
   readonly trustedTime: TrustedTimeAuthorityPort;
   readonly expectedContext: () => GenerationContextV1;
   readonly refreshIntervalMs: number;
@@ -78,6 +84,7 @@ export class TenantPolicyBoundInferenceError extends Error {
       | 'active_policy_role_binding_mismatch'
       | 'active_policy_snapshot_refresh_failed'
       | 'active_policy_snapshot_expired',
+    readonly reason?: string,
   ) {
     super(code);
     this.name = 'TenantPolicyBoundInferenceError';
@@ -390,18 +397,46 @@ export class TenantPolicyBoundInference implements SynthesisInference {
       }
       if (sample.trustedNow < this.trustedDeadline) return;
       const expected = freshness.expectedContext();
-      assertGenerationContext(snapshot.generationContext, expected);
-      const checkpoint = await this.withTimeout(
-        freshness.highWater.read(expected),
+      assertGenerationContextEqual(snapshot.generationContext, expected);
+      const recent = await this.withTimeout(
+        freshness.highWater.readRecent(expected, RENEWAL_GRACE_READ_COUNT),
         freshness.refreshTimeoutMs ?? DEFAULT_REFRESH_TIMEOUT_MS,
       );
-      assertCheckpointExact(checkpoint, expected, snapshot.durableCheckpoint);
+      servingCheckpointForInstalled(recent, expected, snapshot.durableCheckpoint);
       this.trustedDeadline = sample.trustedNow + freshness.refreshIntervalMs;
     } catch (error: unknown) {
       this.evictAfterRefreshFailure(freshness);
       if (error instanceof TenantPolicyBoundInferenceError) throw error;
-      throw new TenantPolicyBoundInferenceError('active_policy_snapshot_refresh_failed');
+      throw new TenantPolicyBoundInferenceError(
+        'active_policy_snapshot_refresh_failed',
+        this.refreshFailureReason(error),
+      );
     }
+  }
+
+  // Stops at the first error the enclave did not raise; host-shaped errors never name the reason.
+  private refreshFailureReason(error: unknown): string | undefined {
+    let reason: string | undefined;
+    let current: unknown = error;
+    for (
+      let depth = 0;
+      depth < MAX_REFRESH_REASON_DEPTH && this.isEnclaveFailureCode(current);
+      depth += 1
+    ) {
+      reason = current.message;
+      current = current.cause;
+    }
+    return reason;
+  }
+
+  private isEnclaveFailureCode(value: unknown): value is Error {
+    return (
+      value instanceof Error &&
+      (Object.getPrototypeOf(value) === Error.prototype ||
+        value instanceof ServiceUnavailableError) &&
+      REFRESH_REASON_PATTERN.test(value.message) &&
+      REFRESH_REASON_PREFIXES.some((prefix) => value.message.startsWith(prefix))
+    );
   }
 
   private evictAfterRefreshFailure(freshness: TenantPolicyFreshnessPort | undefined): void {
@@ -438,40 +473,3 @@ export class TenantPolicyBoundInference implements SynthesisInference {
 }
 
 const DIGEST_PATTERN = /^[0-9a-f]{64}$/;
-
-const GENERATION_CONTEXT_FIELDS = [
-  'orgId',
-  'deploymentId',
-  'policyDigest',
-  'policyGeneration',
-  'activationGeneration',
-  'configurationGeneration',
-  'keysetEpoch',
-  'keysetDigest',
-  'releaseId',
-  'protectedSourceCommit',
-  'eifDigest',
-  'pcr0',
-  'bootRootDigest',
-] as const;
-
-function assertGenerationContext(actual: GenerationContextV1, expected: GenerationContextV1): void {
-  for (const field of GENERATION_CONTEXT_FIELDS) {
-    if (actual[field] !== expected[field]) throw new Error('active_policy_generation_mismatch');
-  }
-}
-
-function assertCheckpointExact(
-  checkpoint: DurableGenerationHighWaterCheckpointV1,
-  expected: GenerationContextV1,
-  installed: DurableGenerationHighWaterCheckpointV1,
-): void {
-  assertGenerationContext(checkpoint, expected);
-  assertGenerationContext(checkpoint, installed);
-  if (
-    checkpoint.signerKeyId !== installed.signerKeyId ||
-    checkpoint.signerPurpose !== installed.signerPurpose
-  ) {
-    throw new Error('active_policy_signer_mismatch');
-  }
-}

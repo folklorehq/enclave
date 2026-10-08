@@ -7,6 +7,11 @@ import {
   type GenerationHighWaterRuntimeConfigV1,
   type HighWaterLogEntryV1,
 } from '@folklore/contracts';
+import {
+  generationHighWaterEntryDigestV1,
+  generationHighWaterGenesisPredecessorDigestV1,
+  generationHighWaterSignatureInputV1,
+} from '@folklore/nitro-attestation';
 import { decode, encode, rfc8949EncodeOptions } from 'cborg';
 import { createHash, createPublicKey, verify, type KeyObject } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -59,8 +64,21 @@ export class AwsDurableGenerationHighWaterTransport implements DurableGeneration
   async read(
     context: DurableGenerationHighWaterTransportContextV1,
   ): Promise<DurableGenerationHighWaterEnvelopeV1> {
+    const [head] = await this.readRecent(context, 1);
+    if (!head) throw new Error('high_water_sequence_missing');
+    return head;
+  }
+
+  async readRecent(
+    context: DurableGenerationHighWaterTransportContextV1,
+    count: number,
+  ): Promise<readonly DurableGenerationHighWaterEnvelopeV1[]> {
+    if (!Number.isSafeInteger(count) || count < 1)
+      throw new Error('high_water_recent_count_invalid');
     const pointer = await this.readPointer(context);
-    const authoritative = await this.readAuthoritativeEntry(context);
+    const recent = await this.readAuthoritativeTail(context, count);
+    const authoritative = recent.at(-1);
+    if (!authoritative) throw new Error('high_water_sequence_missing');
     if (pointer.logSequence > authoritative.entry.logSequence) {
       throw new Error('high_water_pointer_omission');
     }
@@ -75,7 +93,7 @@ export class AwsDurableGenerationHighWaterTransport implements DurableGeneration
     ) {
       throw new Error('high_water_pointer_object_mismatch');
     }
-    return { entry: authoritative.entry, bytes: authoritative.bytes };
+    return recent.map(({ entry, bytes }) => ({ entry, bytes }));
   }
 
   async commit(_input: {
@@ -86,12 +104,13 @@ export class AwsDurableGenerationHighWaterTransport implements DurableGeneration
     throw new Error('high_water_transport_read_only');
   }
 
-  private async readAuthoritativeEntry(
+  private async readAuthoritativeTail(
     context: DurableGenerationHighWaterTransportContextV1,
-  ): Promise<DurableGenerationHighWaterEnvelopeV1 & { versionId: string }> {
+    count: number,
+  ): Promise<readonly (DurableGenerationHighWaterEnvelopeV1 & { versionId: string })[]> {
     const versions = await this.listSequenceVersions(context);
     let previous: HighWaterLogEntryV1 | null = null;
-    let highest: (DurableGenerationHighWaterEnvelopeV1 & { versionId: string }) | null = null;
+    const tail: (DurableGenerationHighWaterEnvelopeV1 & { versionId: string })[] = [];
     let totalObjectBytes = 0;
     for (const version of versions) {
       const response = await this.options.s3.send(
@@ -114,11 +133,12 @@ export class AwsDurableGenerationHighWaterTransport implements DurableGeneration
       const entry = this.decodeCanonicalEntry(bytes);
       this.assertChainEntry(context, entry, version.sequence, previous);
       this.verifyEntrySignature(entry);
-      highest = { entry, bytes, versionId: version.versionId };
+      tail.push({ entry, bytes, versionId: version.versionId });
+      if (tail.length > count) tail.shift();
       previous = entry;
     }
-    if (!highest) throw new Error('high_water_sequence_missing');
-    return highest;
+    if (tail.length === 0) throw new Error('high_water_sequence_missing');
+    return tail;
   }
 
   private async listSequenceVersions(
@@ -212,29 +232,48 @@ export class AwsDurableGenerationHighWaterTransport implements DurableGeneration
       throw new Error('high_water_sequence_context_invalid');
     }
     if (previous === null) {
-      if (entry.previousEntryDigest !== null || entry.checkpoint.predecessorDigest !== null) {
-        throw new Error('high_water_sequence_gap');
-      }
+      this.assertGenesisEntry(entry);
       return;
     }
     if (
       entry.previousEntryDigest !== previous.entryDigest ||
-      entry.checkpoint.predecessorDigest !== previous.checkpoint.checkpointDigest ||
+      entry.checkpoint.predecessorDigest !== previous.entryDigest ||
       entry.checkpoint.previousCheckpointDigest !== previous.checkpoint.checkpointDigest
     ) {
       throw new Error('high_water_sequence_fork');
     }
   }
 
+  private assertGenesisEntry(entry: HighWaterLogEntryV1): void {
+    if (entry.previousEntryDigest !== null || entry.checkpoint.previousCheckpointDigest !== null) {
+      throw new Error('high_water_sequence_gap');
+    }
+    const checkpoint = entry.checkpoint;
+    const genesisPredecessor = generationHighWaterGenesisPredecessorDigestV1({
+      orgId: checkpoint.orgId,
+      deploymentId: checkpoint.deploymentId,
+      policyDigest: checkpoint.policyDigest,
+      policyGeneration: checkpoint.policyGeneration,
+      activationGeneration: checkpoint.activationGeneration,
+      configurationGeneration: checkpoint.configurationGeneration,
+      keysetEpoch: checkpoint.keysetEpoch,
+      keysetDigest: checkpoint.keysetDigest,
+      releaseId: checkpoint.releaseId,
+      protectedSourceCommit: checkpoint.protectedSourceCommit,
+      eifDigest: checkpoint.eifDigest,
+      pcr0: checkpoint.pcr0,
+      bootRootDigest: checkpoint.bootRootDigest,
+    });
+    if (checkpoint.predecessorDigest !== genesisPredecessor) {
+      throw new Error('high_water_sequence_fork');
+    }
+  }
+
   private verifyEntrySignature(entry: HighWaterLogEntryV1): void {
-    const { entryDigest: _entryDigest, signature: _signature, ...unsigned } = entry;
-    const unsignedBytes = encode(unsigned, rfc8949EncodeOptions);
-    const entryDigest = createHash('sha256').update(unsignedBytes).digest('hex');
-    if (entryDigest !== entry.entryDigest) throw new Error('high_water_entry_digest_mismatch');
-    const signingBytes = Buffer.concat([
-      Buffer.from('folklore.generation-high-water.v1\u0000', 'utf8'),
-      Buffer.from(entryDigest, 'hex'),
-    ]);
+    if (generationHighWaterEntryDigestV1(entry) !== entry.entryDigest) {
+      throw new Error('high_water_entry_digest_mismatch');
+    }
+    const signingBytes = generationHighWaterSignatureInputV1(entry);
     if (!verify(null, signingBytes, this.signerKey, Buffer.from(entry.signature, 'base64'))) {
       throw new Error('high_water_signature_invalid');
     }
