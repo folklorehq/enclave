@@ -2,6 +2,7 @@ import type { Logger } from '@folklore/core';
 import type {
   AssignmentApplyResult,
   NormalizedAssignmentManifestV1,
+  RecoveryKeyBindingV1,
   SignedActivePolicyCarrierV1,
   TenantAssignment,
   VersionedTenantAssignment,
@@ -27,7 +28,9 @@ import {
 export type BuildTenantContext = (identity: TenantIdentity) => Promise<TenantContext>;
 export type TenantPolicyAssignment = VersionedTenantAssignment & {
   readonly activePolicyCarrier?: SignedActivePolicyCarrierV1;
+  readonly recoveryKeyBinding?: RecoveryKeyBindingV1;
 };
+export type SignedRecoveryKeyFor = (assignment: TenantPolicyAssignment) => string | undefined;
 const TENANT_TEARDOWN_TIMEOUT_MS = 10_000;
 
 // Called for every replaced or dropped context before it is zeroized so co-resident subsystems can
@@ -47,6 +50,7 @@ export interface TenantPolicyAssignmentApplierOptions<TSnapshot extends TenantPo
   readonly snapshots: TenantPolicySnapshotRegistry<TSnapshot, TenantContext>;
   readonly build: BuildTenantContext;
   readonly verifyPolicy: (assignment: TenantPolicyAssignment) => Promise<TSnapshot>;
+  readonly signedRecoveryKey?: SignedRecoveryKeyFor;
   readonly logger: Logger;
   readonly onTornDown?: OnTenantTornDown;
   readonly onActivated?: OnTenantActivated;
@@ -184,12 +188,17 @@ export class TenantAssignmentApplier {
     const quiesced = new Set<string>();
     let published = false;
     try {
+      const signedRecoveryKeys = this.signedRecoveryKeysFor(
+        assignments,
+        this.policyMode.signedRecoveryKey,
+      );
       const verifiedSnapshots = new Map<string, TenantPolicySnapshotLike>();
       for (const assignment of assignments) {
         verifiedSnapshots.set(assignment.tenantId, await this.policyMode.verifyPolicy(assignment));
       }
       const stagedSnapshots = this.policyMode.snapshots.stage(verifiedSnapshots);
       for (const assignment of assignments) {
+        const signedRecoveryPubkey = signedRecoveryKeys.get(assignment.tenantId);
         const context = await this.build({
           tenantId: assignment.tenantId,
           deploymentId: assignment.deploymentId,
@@ -200,6 +209,7 @@ export class TenantAssignmentApplier {
           activeStorageKeyVersion: assignment.activeStorageKeyVersion,
           storageKeyHistory: assignment.storageKeyHistory,
           recoveryPubkey: assignment.recoveryPubkey,
+          ...(signedRecoveryPubkey ? { signedRecoveryPubkey } : {}),
           sealedBlobBucket: assignment.sealedBlobBucket,
           rawPayloadsBucket: assignment.rawPayloadsBucket,
           processedBucket: assignment.processedBucket,
@@ -271,6 +281,20 @@ export class TenantAssignmentApplier {
     }
   }
 
+  // Runs before any policy check or build, so one bad binding refuses the generation untouched.
+  private signedRecoveryKeysFor(
+    assignments: readonly TenantPolicyAssignment[],
+    signedRecoveryKey: SignedRecoveryKeyFor | undefined,
+  ): ReadonlyMap<string, string> {
+    const signedKeys = new Map<string, string>();
+    if (!signedRecoveryKey) return signedKeys;
+    for (const assignment of assignments) {
+      const signed = signedRecoveryKey(assignment);
+      if (signed) signedKeys.set(assignment.tenantId, signed);
+    }
+    return signedKeys;
+  }
+
   queueAssignments(): QueueAssignment[] {
     if (this.policyMode && this.activePolicyGeneration !== this.lastAcceptedGeneration) return [];
     return [...this.assigned.values()]
@@ -320,7 +344,7 @@ export class TenantAssignmentApplier {
     if (manifest.generation <= this.lastAcceptedGeneration) {
       return { applied: false, reason: 'stale' };
     }
-    if (!(await this.applyVersioned(manifest.assignments, true, manifest.generation))) {
+    if (!(await this.applyVersioned(manifest.assignments, manifest.generation))) {
       throw new Error('assignment_manifest_apply_failed');
     }
     if (!this.matchesAssignments(manifest.assignments)) {
@@ -335,13 +359,11 @@ export class TenantAssignmentApplier {
       assignments.map((assignment) =>
         toInitialStorageKeyVersion(assignment, this.defaultDeploymentId),
       ),
-      false,
     );
   }
 
   private async applyVersioned(
     assignments: readonly VersionedTenantAssignment[],
-    hasSignedRecoveryEvidence: boolean,
     generation?: number,
   ): Promise<boolean> {
     // A refresh that overlaps an in-flight apply is dropped, not queued: apply is idempotent and the
@@ -351,7 +373,7 @@ export class TenantAssignmentApplier {
     try {
       const desired = new Map(assignments.map((a) => [a.tenantId, a] as const));
       this.assertAssignmentTransitions(desired);
-      const staged = await this.buildReplacements(desired, hasSignedRecoveryEvidence);
+      const staged = await this.buildReplacements(desired);
       if (!staged) return false;
       try {
         await this.commit(desired, staged, generation);
@@ -367,7 +389,6 @@ export class TenantAssignmentApplier {
 
   private async buildReplacements(
     desired: Map<string, VersionedTenantAssignment>,
-    hasSignedRecoveryEvidence: boolean,
   ): Promise<Map<string, TenantContext> | null> {
     const staged = new Map<string, TenantContext>();
     for (const assignment of desired.values()) {
@@ -389,7 +410,6 @@ export class TenantAssignmentApplier {
           activeStorageKeyVersion: assignment.activeStorageKeyVersion,
           storageKeyHistory: assignment.storageKeyHistory,
           recoveryPubkey: assignment.recoveryPubkey,
-          ...(hasSignedRecoveryEvidence ? { signedRecoveryPubkey: assignment.recoveryPubkey } : {}),
           sealedBlobBucket: assignment.sealedBlobBucket,
           rawPayloadsBucket: assignment.rawPayloadsBucket,
           processedBucket: assignment.processedBucket,

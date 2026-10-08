@@ -82,8 +82,8 @@ export function assertRecoveryConfigured(hex: string, signed?: string): KeyObjec
 //
 // Deliberately not scoped to "a boot manifest was configured": the parent decides whether the
 // manifest env vars arrive at all, so gating on their presence would hand it the downgrade this
-// check exists to refuse. Shared pools receive this evidence only from their verified versioned
-// assignment manifest, never directly from an env assignment.
+// check exists to refuse.
+// A shared pool receives this evidence only from a binding the enclave re-derives from the tenant id.
 function requiresSignedRecoveryKey(): boolean {
   return process.env['NODE_ENV'] === 'production';
 }

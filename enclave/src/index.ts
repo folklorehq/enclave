@@ -19,6 +19,7 @@ import {
 } from './tenant/tenant-assignments.js';
 import { TenantAssignmentApplier } from './tenant/TenantAssignmentApplier.js';
 import type { TenantPolicyAssignment } from './tenant/TenantAssignmentApplier.js';
+import { signedRecoveryKeyFor } from './sealing/recovery-key-binding.js';
 import { TenantRequestQuiescer } from './tenant/TenantRequestQuiescer.js';
 import { TenantRequestQuiescenceMonitor } from './tenant/TenantRequestQuiescenceMonitor.js';
 import { TenantMessageRouter } from './tenant/tenant-message-router.js';
@@ -502,6 +503,7 @@ const policyAssignmentApplier = new TenantAssignmentApplier({
   generationRegistry,
   snapshots: policySnapshots,
   build: (identity) => tenantFactory.build(identity),
+  signedRecoveryKey: signedRecoveryKeyFor,
   verifyPolicy: async (assignment: TenantPolicyAssignment) => {
     const carrier = assignment.activePolicyCarrier;
     const bootContext = verifiedBootGenerationContext;
