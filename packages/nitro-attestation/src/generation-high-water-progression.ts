@@ -1,4 +1,4 @@
-// no live caller yet: the signer, control plane and enclave each adopt this rule in a later change.
+// no live caller yet in the signer or the enclave: each adopts this rule in a later change.
 import type { GenerationContextV1 } from '@folklore/contracts';
 
 export type GenerationHighWaterProgressionV1 =

@@ -248,6 +248,7 @@ export type {
   GenerationHighWaterProgressionV1,
   GenerationHighWaterReleaseFieldsV1,
 } from './generation-high-water-progression.js';
+export { generationHighWaterEntryContextV1 } from './generation-high-water-context.js';
 export {
   SelfSignedCertificateError,
   buildSelfSignedEcdsaCertificate,
