@@ -38,6 +38,7 @@ import {
   type SourceConnectionResolution,
 } from '../pull/source-connections-client.js';
 import { withInferenceReceiptContext } from '../inference/inference-receipt-context.js';
+import { boundGitHubInstallationId } from '../pull/github-installation-binding.js';
 import { CodebaseSelectionStore } from '../codebase/CodebaseSelectionStore.js';
 import { errorType } from '../logging/error-fields.js';
 
@@ -85,7 +86,11 @@ export interface RoutedResult {
   shouldAcknowledge: boolean;
   commitReplay?: () => Promise<void>;
   releaseReplay?: () => Promise<void>;
+  droppedCode?: typeof GITHUB_BINDING_MISMATCH;
 }
+
+const GITHUB_SOURCE = 'github';
+const GITHUB_BINDING_MISMATCH = 'github_installation_binding_mismatch';
 
 export interface TenantMessageRouterDeps {
   registry: TenantRegistry;
@@ -242,6 +247,19 @@ export class TenantMessageRouter {
     const canaryProof = raw.canary_authorization
       ? await this.createCanaryProof(raw.canary_authorization)
       : undefined;
+    // Canary bodies are synthetic and capability-bound; every real delivery must name the bound install.
+    if (raw.source === GITHUB_SOURCE && !raw.canary_authorization) {
+      if (!(await this.isBoundGitHubDelivery(context, plaintext))) {
+        plaintext.fill(0);
+        return {
+          context,
+          facts: [],
+          requiresDurablePersistence: false,
+          shouldAcknowledge: true,
+          droppedCode: GITHUB_BINDING_MISMATCH,
+        };
+      }
+    }
     if (raw.type === 'jira-oauth-envelope') {
       try {
         const result = await this.routeJiraOAuthEnvelope(raw, context, plaintext);
@@ -505,6 +523,56 @@ export class TenantMessageRouter {
     } catch (error) {
       await authenticated.releaseReplay();
       throw error;
+    }
+  }
+
+  // Routing follows a control-plane binding; only the installation sealed at connect is trusted.
+  private async isBoundGitHubDelivery(context: TenantContext, plaintext: Buffer): Promise<boolean> {
+    const installationId = this.deliveryInstallationId(plaintext);
+    if (!installationId) return false;
+    let resolution: SourceConnectionResolution;
+    try {
+      resolution = await getDecryptedConnectionForKind(
+        this.deps.controlPlaneUrl,
+        this.deps.deploymentId,
+        context.tenantDeploymentId ?? this.deps.deploymentId,
+        this.deps.agentToken(),
+        GITHUB_SOURCE,
+        context.tenantId,
+        context.crypto,
+        this.deps.controlPlaneFetch,
+      );
+    } catch (error) {
+      plaintext.fill(0);
+      throw new TenantMessageRouteError('pipeline', errorType(error));
+    }
+    if (resolution.outcome === 'not_processed') {
+      plaintext.fill(0);
+      throw new TenantMessageRouteError('pipeline', resolution.reason);
+    }
+    if (resolution.outcome !== 'connected') return false;
+    try {
+      boundGitHubInstallationId(resolution.connection.accessToken, installationId);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private deliveryInstallationId(plaintext: Buffer): string | null {
+    try {
+      const body: unknown = JSON.parse(plaintext.toString('utf8'));
+      const installation =
+        typeof body === 'object' && body !== null
+          ? (body as { installation?: unknown }).installation
+          : undefined;
+      const id =
+        typeof installation === 'object' && installation !== null
+          ? (installation as { id?: unknown }).id
+          : undefined;
+      return typeof id === 'number' && Number.isSafeInteger(id) ? String(id) : null;
+    } catch {
+      return null;
     }
   }
 

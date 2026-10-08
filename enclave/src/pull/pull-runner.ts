@@ -32,6 +32,7 @@ import {
 } from './source-connections-client.js';
 import type { JiraWebhookLifecycleService } from './JiraWebhookLifecycleService.js';
 import { S3PullCursorStore } from './S3PullCursorStore.js';
+import { boundGitHubInstallationId } from './github-installation-binding.js';
 
 export type { PullDueMessage };
 
@@ -360,6 +361,14 @@ async function mintGitHubInstallationTokenForPull(
   }
 }
 
+// The control plane's projection is only a claim; the mint uses the installation sealed at connect.
+function sealedInstallationId(
+  connection: Pick<DecryptedSourceConnection, 'accessToken' | 'installationId'>,
+): string | undefined {
+  if (!connection.installationId) return undefined;
+  return boundGitHubInstallationId(connection.accessToken, connection.installationId);
+}
+
 export async function resolveSourceToken(
   kind: string,
   connection: Pick<DecryptedSourceConnection, 'accessToken' | 'kind' | 'installationId'> &
@@ -377,7 +386,7 @@ export async function resolveSourceToken(
     throw new Error('github_connection_binding_missing');
   }
   const minted = await mintGitHubInstallationTokenForPull(
-    connection.installationId,
+    sealedInstallationId(connection),
     mintGitHubInstallationToken,
     {
       orgId: scope.orgId,
@@ -679,7 +688,7 @@ async function retryPullWithFreshGitHubToken(
 ) {
   if (!deps.mintGitHubInstallationToken || !connection.installationId) throw originalError;
   const minted = await mintGitHubInstallationTokenForPull(
-    connection.installationId,
+    sealedInstallationId(connection),
     deps.mintGitHubInstallationToken,
     {
       orgId: deps.orgId,

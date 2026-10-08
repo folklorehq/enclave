@@ -1,8 +1,7 @@
-import { eciesDecrypt } from '@folklore/crypto';
 import {
-  enclaveAuthorizationCodeGrantSchema,
   connectorOAuthMetadataUpdateSchema,
   type ConnectorOAuthMetadataUpdate,
+  type EnclaveAuthorizationCodeGrant,
   type SealedAuthorizationCodeSubmission,
 } from '@folklore/contracts/enclave';
 import {
@@ -12,24 +11,9 @@ import {
 import { createHash, type KeyObject } from 'node:crypto';
 import type { ProviderTokenClient, ProviderTokenResponse } from './ProviderTokenClient.js';
 import type { VerifiedProviderConfig } from '../egress/provider-token-fetch.js';
+import { SealedCodeGrantOpener } from './SealedCodeGrantOpener.js';
 
-interface AuthorizationGrant {
-  version: 1;
-  authorizationCode: string;
-  codeVerifier: string | null;
-  sourceKind: string;
-  orgId: string;
-  deploymentId: string;
-  connectionId?: string;
-  callbackUri: string;
-  attestationGeneration: string;
-  activationGeneration?: string;
-  stateBindingId: string;
-  issuedAt: string;
-  expiresAt: string;
-  accountId?: string;
-  memberEmail?: string;
-}
+type AuthorizationGrant = EnclaveAuthorizationCodeGrant;
 
 export interface OAuthStateGuard {
   consume(input: {
@@ -83,15 +67,19 @@ export class EnclaveOAuthRedemptionError extends Error {
 }
 
 export class EnclaveOAuthAuthorizationService {
+  private readonly grants: SealedCodeGrantOpener;
+
   constructor(
-    private readonly privateKey: KeyObject,
+    privateKey: KeyObject,
     private readonly states: OAuthStateGuard,
     private readonly sealer: CredentialSealer,
     private readonly persistence: SealedCredentialPersistence,
     private readonly provider: ProviderTokenClient,
     private readonly configFor: (sourceKind: string) => VerifiedProviderConfig | null,
     private readonly memberIdentityPersistence?: MemberIdentityLinkPersistencePort,
-  ) {}
+  ) {
+    this.grants = new SealedCodeGrantOpener(privateKey);
+  }
 
   async redeem(
     submission: SealedAuthorizationCodeSubmission,
@@ -247,26 +235,7 @@ export class EnclaveOAuthAuthorizationService {
 
   private decryptGrant(submission: SealedAuthorizationCodeSubmission): AuthorizationGrant {
     try {
-      if (this.hash(submission.encryptedCodeGrant) !== submission.ciphertextSha256) {
-        throw new Error('ciphertext_hash_mismatch');
-      }
-      const envelope = JSON.parse(submission.encryptedCodeGrant) as Parameters<
-        typeof eciesDecrypt
-      >[0];
-      const firstPlaintext = eciesDecrypt(envelope, this.privateKey);
-      const parsed: unknown = JSON.parse(firstPlaintext.toString('utf8'));
-      firstPlaintext.fill(0);
-      const grant = enclaveAuthorizationCodeGrantSchema.parse(parsed);
-      const aad = this.grantAad(grant);
-      const plaintext = eciesDecrypt(envelope, this.privateKey, aad);
-      const checked: unknown = JSON.parse(plaintext.toString('utf8'));
-      plaintext.fill(0);
-      if (
-        JSON.stringify(enclaveAuthorizationCodeGrantSchema.parse(checked)) !== JSON.stringify(grant)
-      ) {
-        throw new Error('grant_changed');
-      }
-      return grant;
+      return this.grants.open(submission);
     } catch {
       throw new EnclaveOAuthRedemptionError();
     }
@@ -295,21 +264,6 @@ export class EnclaveOAuthAuthorizationService {
   private requireActivationGeneration(grant: AuthorizationGrant): string {
     if (!grant.activationGeneration) throw new EnclaveOAuthRedemptionError();
     return grant.activationGeneration;
-  }
-
-  private grantAad(grant: AuthorizationGrant): string {
-    return [
-      'folklore.oauth-code-grant.v1',
-      grant.deploymentId,
-      grant.orgId,
-      grant.sourceKind,
-      grant.callbackUri,
-      grant.attestationGeneration,
-      grant.activationGeneration ?? '',
-      grant.stateBindingId,
-      grant.issuedAt,
-      grant.expiresAt,
-    ].join('|');
   }
 
   private validateResponse(response: ProviderTokenResponse): void {

@@ -1,9 +1,15 @@
 import { createSign } from 'node:crypto';
 import type { ProviderTokenClient, ProviderTokenResponse } from './ProviderTokenClient.js';
-import type { ProviderRefreshSecretLoader } from './EnclaveProviderRefreshSecretLoader.js';
+import type {
+  ProviderRefreshSecretLoader,
+  ProviderSecretMaterial,
+} from './EnclaveProviderRefreshSecretLoader.js';
 import {
   assertSupportedProvider,
   createProviderTokenFetch,
+  DEFAULT_PROVIDER_TIMEOUT_MS,
+  GITHUB_INSTALLATIONS_PAGE_SIZE,
+  GITHUB_LOGIN_PATTERN,
   refreshCapability as providerRefreshCapability,
   type ProviderRefreshCapability,
   type ProviderTokenRequest,
@@ -15,6 +21,9 @@ const TOKEN_MAX_BYTES = 512 * 1024;
 const TOKEN_VALUE_MAX_BYTES = 16 * 1024;
 const ID_MAX_BYTES = 256;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const GITHUB_INSTALLATIONS_MAX_PAGES = 10;
+const GITHUB_OWNERSHIP_DEADLINE_MS = 20_000;
+const GITHUB_REVOKE_MIN_MS = 2_000;
 
 /** Provider token exchange confined to the enclave's signed endpoint + proxy contract. */
 export class HttpProviderTokenClient implements ProviderTokenClient {
@@ -109,11 +118,195 @@ export class HttpProviderTokenClient implements ProviderTokenClient {
     return { accessToken, expiresAt };
   }
 
+  async userAdministersGitHubInstallation(input: {
+    config: VerifiedProviderConfig;
+    code: string;
+    installationId: string;
+  }): Promise<boolean> {
+    assertSupportedProvider(input.config.kind);
+    if (input.config.kind !== 'github') throw new Error('github_provider_not_configured');
+    const deadline = Date.now() + GITHUB_OWNERSHIP_DEADLINE_MS;
+    const secret = await this.secrets.load(input.config);
+    const credential = {
+      accessToken: await this.exchangeGitHubUserCode(input.config, secret, input.code),
+    };
+    try {
+      const installation = await this.findGitHubInstallation(
+        input.config,
+        credential,
+        input.installationId,
+        deadline,
+      );
+      if (!installation) return false;
+      return await this.administersGitHubAccount(input.config, credential, installation, deadline);
+    } finally {
+      await this.revokeGitHubUserToken(input.config, secret, credential, deadline);
+      credential.accessToken = '';
+    }
+  }
+
+  private async exchangeGitHubUserCode(
+    config: VerifiedProviderConfig,
+    secret: ProviderSecretMaterial,
+    code: string,
+  ): Promise<string> {
+    const response = await this.execute(config, {
+      operation: 'github_user_code',
+      clientId: secret.clientId,
+      clientSecret: secret.clientSecret,
+      code,
+    });
+    const parsed = await this.parse(response);
+    if (!isRecord(parsed)) throw new Error('provider_token_response_invalid');
+    try {
+      return this.requireToken(parsed['access_token']);
+    } finally {
+      parsed['access_token'] = '';
+      parsed['refresh_token'] = '';
+    }
+  }
+
+  private async findGitHubInstallation(
+    config: VerifiedProviderConfig,
+    credential: { accessToken: string },
+    installationId: string,
+    deadline: number,
+  ): Promise<Record<string, unknown> | null> {
+    for (let page = 1; page <= GITHUB_INSTALLATIONS_MAX_PAGES; page += 1) {
+      const response = await this.execute(
+        config,
+        { operation: 'github_user_installations', accessToken: credential.accessToken, page },
+        this.remainingMs(deadline),
+      );
+      const listing = this.installationPage(await this.parse(response));
+      const match = listing.installations.find((entry) => entry.id === installationId);
+      if (match) return match.raw;
+      if (
+        listing.installations.length < GITHUB_INSTALLATIONS_PAGE_SIZE ||
+        page * GITHUB_INSTALLATIONS_PAGE_SIZE >= listing.totalCount
+      ) {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  // Listing proves access only; binding needs the owner of the installation's account.
+  private async administersGitHubAccount(
+    config: VerifiedProviderConfig,
+    credential: { accessToken: string },
+    installation: Record<string, unknown>,
+    deadline: number,
+  ): Promise<boolean> {
+    const account = this.installationAccount(installation);
+    if (!account) return false;
+    if (account.kind === 'User') {
+      return (await this.resolveGitHubUser(config, credential, deadline)) === account.id;
+    }
+    const response = await this.execute(
+      config,
+      {
+        operation: 'github_user_org_membership',
+        accessToken: credential.accessToken,
+        organization: account.login,
+      },
+      this.remainingMs(deadline),
+    );
+    const membership = await this.parse(response);
+    return (
+      isRecord(membership) && membership['state'] === 'active' && membership['role'] === 'admin'
+    );
+  }
+
+  private installationAccount(
+    installation: Record<string, unknown>,
+  ): { kind: 'User' | 'Organization'; login: string; id: string } | null {
+    const account = installation['account'];
+    if (!isRecord(account)) return null;
+    const kind = installation['target_type'];
+    const { login, id, type } = account;
+    if ((kind !== 'User' && kind !== 'Organization') || type !== kind) return null;
+    if (typeof login !== 'string' || !GITHUB_LOGIN_PATTERN.test(login)) return null;
+    if (typeof id !== 'number' || !Number.isSafeInteger(id)) return null;
+    return { kind, login, id: String(id) };
+  }
+
+  private async resolveGitHubUser(
+    config: VerifiedProviderConfig,
+    credential: { accessToken: string },
+    deadline: number,
+  ): Promise<string> {
+    const response = await this.execute(
+      config,
+      { operation: 'identity', accessToken: credential.accessToken },
+      this.remainingMs(deadline),
+    );
+    const parsed = await this.parse(response);
+    if (!isRecord(parsed)) throw new Error('provider_identity_response_invalid');
+    return this.identityFrom(config, parsed).sourceUserId;
+  }
+
+  // Best effort: the proof already holds or failed, so a failed revoke changes neither outcome.
+  private async revokeGitHubUserToken(
+    config: VerifiedProviderConfig,
+    secret: ProviderSecretMaterial,
+    credential: { accessToken: string },
+    deadline: number,
+  ): Promise<void> {
+    try {
+      await this.execute(
+        config,
+        {
+          operation: 'github_user_token_revoke',
+          clientId: secret.clientId,
+          clientSecret: secret.clientSecret,
+          accessToken: credential.accessToken,
+        },
+        Math.max(this.remainingMs(deadline, false), GITHUB_REVOKE_MIN_MS),
+      );
+    } catch {
+      return;
+    }
+  }
+
+  private remainingMs(deadline: number, required = true): number {
+    const remaining = deadline - Date.now();
+    if (required && remaining <= 0) throw new Error('github_ownership_deadline_exceeded');
+    return remaining;
+  }
+
+  private installationPage(parsed: unknown): {
+    installations: Array<{ id: string; raw: Record<string, unknown> }>;
+    totalCount: number;
+  } {
+    if (!isRecord(parsed) || !Array.isArray(parsed['installations'])) {
+      throw new Error('github_installations_response_invalid');
+    }
+    const totalCount = parsed['total_count'];
+    if (typeof totalCount !== 'number' || !Number.isSafeInteger(totalCount) || totalCount < 0) {
+      throw new Error('github_installations_response_invalid');
+    }
+    const installations = parsed['installations'].map((installation: unknown) => {
+      const id = isRecord(installation) ? installation['id'] : undefined;
+      if (!isRecord(installation) || typeof id !== 'number' || !Number.isSafeInteger(id)) {
+        throw new Error('github_installations_response_invalid');
+      }
+      return { id: String(id), raw: installation };
+    });
+    return { installations, totalCount };
+  }
+
   private execute(
     config: VerifiedProviderConfig,
     request: ProviderTokenRequest,
+    timeoutMs?: number,
   ): Promise<Response> {
-    return createProviderTokenFetch(config, request, this.options)();
+    const perRequestMs = this.options.timeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS;
+    const options =
+      timeoutMs === undefined
+        ? this.options
+        : { ...this.options, timeoutMs: Math.min(timeoutMs, perRequestMs) };
+    return createProviderTokenFetch(config, request, options)();
   }
 
   private async parseTokenResponse(

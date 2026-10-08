@@ -31,4 +31,10 @@ export interface ProviderTokenClient {
     config: VerifiedProviderConfig;
     installationId: string;
   }): Promise<{ accessToken: string; expiresAt: string }>;
+  /** True only when the user behind the install-time code owns the installation's account. */
+  userAdministersGitHubInstallation(input: {
+    config: VerifiedProviderConfig;
+    code: string;
+    installationId: string;
+  }): Promise<boolean>;
 }

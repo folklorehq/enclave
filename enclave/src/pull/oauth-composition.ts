@@ -15,6 +15,7 @@ import { HttpOAuthLeaseResolver } from './HttpOAuthLeaseResolver.js';
 import { HttpOAuthPersistenceTransport } from './HttpOAuthPersistenceTransport.js';
 import { HttpOAuthStateGuard } from './HttpOAuthStateGuard.js';
 import { HttpProviderTokenClient } from './HttpProviderTokenClient.js';
+import { SealedCodeGrantOpener } from './SealedCodeGrantOpener.js';
 import { EnclaveProviderRefreshSecretLoader } from './EnclaveProviderRefreshSecretLoader.js';
 import { EGRESS_PROXY_PORT } from '../egress/proxy.js';
 import {
@@ -235,12 +236,14 @@ export function createOAuthRuntime(options: OAuthCompositionOptions): OAuthRunti
       ).redeemMemberIdentity(input, generation);
     },
     redeemGitHubInstallation: async (input, generation) => {
+      const tenant = options.resolveTenant(input.orgId);
       return new EnclaveGitHubInstallationTokenService(
         sealer,
         persistence,
         provider,
         (kind) => configs.get(kind) ?? null,
         stateGuard,
+        new SealedCodeGrantOpener(tenant.ingestPrivateKey),
       ).mint({
         ...input,
         generation,

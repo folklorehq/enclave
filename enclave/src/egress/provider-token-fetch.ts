@@ -9,7 +9,11 @@ export type ProviderTokenOperation =
   | 'refresh'
   | 'identity'
   | 'jira_resources'
-  | 'github_installation';
+  | 'github_installation'
+  | 'github_user_code'
+  | 'github_user_installations'
+  | 'github_user_org_membership'
+  | 'github_user_token_revoke';
 export type ProviderRefreshCapability = 'supported' | 'unsupported';
 
 export type ProviderTokenRequest =
@@ -33,6 +37,15 @@ export type ProviderTokenRequest =
       operation: 'github_installation';
       installationId: string;
       installationJwt: string;
+    }
+  | { operation: 'github_user_code'; clientId: string; clientSecret: string; code: string }
+  | { operation: 'github_user_installations'; accessToken: string; page: number }
+  | { operation: 'github_user_org_membership'; accessToken: string; organization: string }
+  | {
+      operation: 'github_user_token_revoke';
+      clientId: string;
+      clientSecret: string;
+      accessToken: string;
     };
 
 export interface VerifiedProviderConfig {
@@ -56,7 +69,7 @@ export interface ProviderTokenFetchOptions {
 
 const DEFAULT_MAX_REQUEST_BYTES = 64 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES = 512 * 1024;
-const DEFAULT_TIMEOUT_MS = 10_000;
+export const DEFAULT_PROVIDER_TIMEOUT_MS = 10_000;
 const SUPPORTED_PROVIDER_KINDS = new Set([
   'slack',
   'github',
@@ -72,10 +85,18 @@ const LINEAR_IDENTITY_QUERY = 'query FolkloreOAuthIdentity { viewer { id organiz
 const NOTION_API_VERSION = '2026-03-11';
 const JIRA_ACCESSIBLE_RESOURCES_ENDPOINT =
   'https://api.atlassian.com/oauth/token/accessible-resources';
+const GITHUB_USER_INSTALLATIONS_PATH = '/user/installations';
+const GITHUB_USER_ORG_MEMBERSHIP_PATH = '/user/memberships/orgs/';
+export const GITHUB_LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+const GITHUB_CLIENT_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+const GITHUB_MEDIA_TYPE = 'application/vnd.github+json';
+export const GITHUB_INSTALLATIONS_PAGE_SIZE = 100;
 
 interface ExecutableProviderRequest {
   endpoint: string;
-  method: 'GET' | 'POST';
+  query?: Readonly<Record<string, string>>;
+  method: 'GET' | 'POST' | 'DELETE';
+  acceptsNoContent?: boolean;
   headers: Record<string, string>;
   body?: string;
   allowedContentTypes: readonly string[];
@@ -100,12 +121,15 @@ export function createProviderTokenFetch(
 ): () => Promise<Response> {
   assertSupportedProvider(config.kind);
   const executable = buildProviderRequest(config, request);
-  const normalizedEndpoint = normalizeEndpoint(executable.endpoint, config.allowedHosts);
+  const normalizedEndpoint = withQuery(
+    normalizeEndpoint(executable.endpoint, config.allowedHosts),
+    executable.query,
+  );
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   const resolve = options.resolve ?? resolvePublicAddresses;
   const maxRequestBytes = options.maxRequestBytes ?? DEFAULT_MAX_REQUEST_BYTES;
   const maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS;
   const assertProxyResolution = options.assertProxyResolution;
 
   return () =>
@@ -142,6 +166,9 @@ async function executeProviderRequest(bound: BoundProviderRequest): Promise<Resp
       dispatcher: proxy,
       ...(bound.executable.body ? { body: bound.executable.body } : {}),
     } as RequestInit & { dispatcher: ProxyAgent });
+    if (bound.executable.acceptsNoContent && response.status === 204) {
+      return new Response(null, { status: 204 });
+    }
     const buffered = await bufferProviderResponse(
       response,
       bound.executable.allowedContentTypes,
@@ -227,11 +254,15 @@ function buildProviderRequest(
       ),
       method: 'POST',
       headers: {
-        accept: 'application/vnd.github+json',
+        accept: GITHUB_MEDIA_TYPE,
         authorization: `Bearer ${request.installationJwt}`,
       },
       allowedContentTypes: ['application/json'],
     };
+  }
+  if (isGitHubUserRequest(request)) {
+    if (config.kind !== 'github') throw new ProviderEgressError();
+    return gitHubUserRequest(config, request);
   }
   if (request.operation === 'identity') {
     return identityRequest(config, request.accessToken);
@@ -251,12 +282,112 @@ function buildProviderRequest(
   return tokenRequest(config, request);
 }
 
+// No redirect_uri: the install-time code is redeemed against the App's registered callback.
+function gitHubUserCodeRequest(
+  config: VerifiedProviderConfig,
+  request: Extract<ProviderTokenRequest, { operation: 'github_user_code' }>,
+): ExecutableProviderRequest {
+  return {
+    endpoint: config.tokenEndpoint,
+    method: 'POST',
+    headers: { accept: 'application/json', 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: request.clientId,
+      client_secret: request.clientSecret,
+      code: request.code,
+    }).toString(),
+    allowedContentTypes: ['application/json'],
+  };
+}
+
+function gitHubUserInstallationsRequest(
+  config: VerifiedProviderConfig,
+  request: Extract<ProviderTokenRequest, { operation: 'github_user_installations' }>,
+): ExecutableProviderRequest {
+  if (!Number.isSafeInteger(request.page) || request.page < 1) throw new ProviderEgressError();
+  return {
+    endpoint: new URL(GITHUB_USER_INSTALLATIONS_PATH, config.identityEndpoint).href,
+    query: { per_page: String(GITHUB_INSTALLATIONS_PAGE_SIZE), page: String(request.page) },
+    method: 'GET',
+    headers: {
+      accept: GITHUB_MEDIA_TYPE,
+      authorization: `Bearer ${request.accessToken}`,
+    },
+    allowedContentTypes: ['application/json'],
+  };
+}
+
+type GitHubUserRequest = Extract<ProviderTokenRequest, { operation: `github_user_${string}` }>;
+
+function isGitHubUserRequest(request: ProviderTokenRequest): request is GitHubUserRequest {
+  return request.operation.startsWith('github_user_');
+}
+
+function gitHubUserRequest(
+  config: VerifiedProviderConfig,
+  request: GitHubUserRequest,
+): ExecutableProviderRequest {
+  switch (request.operation) {
+    case 'github_user_code':
+      return gitHubUserCodeRequest(config, request);
+    case 'github_user_installations':
+      return gitHubUserInstallationsRequest(config, request);
+    case 'github_user_org_membership':
+      return gitHubUserOrgMembershipRequest(config, request);
+    case 'github_user_token_revoke':
+      return gitHubUserTokenRevokeRequest(config, request);
+  }
+}
+
+function gitHubUserOrgMembershipRequest(
+  config: VerifiedProviderConfig,
+  request: Extract<ProviderTokenRequest, { operation: 'github_user_org_membership' }>,
+): ExecutableProviderRequest {
+  if (!GITHUB_LOGIN_PATTERN.test(request.organization)) throw new ProviderEgressError();
+  return {
+    endpoint: new URL(
+      `${GITHUB_USER_ORG_MEMBERSHIP_PATH}${request.organization}`,
+      config.identityEndpoint,
+    ).href,
+    method: 'GET',
+    headers: { accept: GITHUB_MEDIA_TYPE, authorization: `Bearer ${request.accessToken}` },
+    allowedContentTypes: ['application/json'],
+  };
+}
+
+function gitHubUserTokenRevokeRequest(
+  config: VerifiedProviderConfig,
+  request: Extract<ProviderTokenRequest, { operation: 'github_user_token_revoke' }>,
+): ExecutableProviderRequest {
+  if (!GITHUB_CLIENT_ID_PATTERN.test(request.clientId)) throw new ProviderEgressError();
+  const basic = Buffer.from(`${request.clientId}:${request.clientSecret}`).toString('base64');
+  return {
+    endpoint: new URL(`/applications/${request.clientId}/token`, config.identityEndpoint).href,
+    method: 'DELETE',
+    headers: {
+      accept: GITHUB_MEDIA_TYPE,
+      authorization: `Basic ${basic}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ access_token: request.accessToken }),
+    allowedContentTypes: ['application/json'],
+    acceptsNoContent: true,
+  };
+}
+
+function withQuery(endpoint: string, query?: Readonly<Record<string, string>>): string {
+  if (!query) return endpoint;
+  const url = new URL(endpoint);
+  url.search = new URLSearchParams(query).toString();
+  return url.href;
+}
+
 function identityRequest(
   config: VerifiedProviderConfig,
   accessToken: string,
 ): ExecutableProviderRequest {
   const headers: Record<string, string> = {
-    accept: config.kind === 'github' ? 'application/vnd.github+json' : 'application/json',
+    accept: config.kind === 'github' ? GITHUB_MEDIA_TYPE : 'application/json',
     authorization: `Bearer ${accessToken}`,
   };
   if (config.kind === 'notion') headers['notion-version'] = NOTION_API_VERSION;

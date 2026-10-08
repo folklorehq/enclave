@@ -213,13 +213,21 @@ export class QueueSetDrainer {
         requiresDurablePersistence = true,
         shouldAcknowledge,
         commitReplay,
+        droppedCode,
       } = routed;
       phase = 'archive';
-      this.archive(
-        context.tenantId,
-        msg,
-        assignment.rawPayloadsBucket ?? this.deps.rawPayloadsBucket ?? '',
-      );
+      if (droppedCode) {
+        this.deps.logger.warn('ingest_message_dropped', {
+          tenant_id: context.tenantId,
+          code: droppedCode,
+        });
+      } else {
+        this.archive(
+          context.tenantId,
+          msg,
+          assignment.rawPayloadsBucket ?? this.deps.rawPayloadsBucket ?? '',
+        );
+      }
       phase = 'emit';
       await this.emitFacts(facts, assignment.assignmentGeneration);
       if (!shouldAcknowledge) {
