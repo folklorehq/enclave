@@ -1199,6 +1199,8 @@ try {
     // The box API serves reads for every assigned tenant; the verified JWT orgId must be in the
     // assigned set (else 403) — this gate runs before any handler touches a keyring (§4.2 step 2).
     isAssignedOrg: (orgId: string) => registry.has(orgId),
+    // A pool's ORG_ID names the pool, not a tenant, so it must never be written as an organization.
+    skipOrgBootstrap: isSharedPool,
     // The API reports activity only from behind its own auth gate: /api/* takes unauthenticated
     // traffic from anywhere, and a scanner hitting it must not be able to hold this host awake.
     onAuthenticatedRequest: () => activityMonitor.touch(),
