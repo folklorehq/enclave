@@ -240,6 +240,15 @@ export {
 export type { GenerationHighWaterSigningMaterial } from './generation-high-water-canonical.js';
 export { decodeGenerationHighWaterCandidateV1 } from './generation-high-water-canonical.js';
 export {
+  classifyGenerationHighWaterProgressionV1,
+  generationHighWaterReleaseKeyV1,
+  generationHighWaterReleaseReenteredV1,
+} from './generation-high-water-progression.js';
+export type {
+  GenerationHighWaterProgressionV1,
+  GenerationHighWaterReleaseFieldsV1,
+} from './generation-high-water-progression.js';
+export {
   SelfSignedCertificateError,
   buildSelfSignedEcdsaCertificate,
   buildSelfSignedEcdsaCertificateTbs,
