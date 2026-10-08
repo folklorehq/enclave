@@ -1,14 +1,14 @@
-import { timingSafeEqual } from 'node:crypto';
+import { timingSafeEqual, type KeyObject } from 'node:crypto';
 import { PutObjectCommand, type S3Client } from '@aws-sdk/client-s3';
 import AWS from 'aws-sdk';
 import { KmsKeyringNode } from '@aws-crypto/client-node';
-import { generateMasterKey } from '../sealing/keygen.js';
 import { awsV2ClientTransport } from '../aws/aws-transport.js';
 import { createRecipientKmsClient } from '../aws/RecipientKmsClient.js';
 import {
   decryptRecipientCiphertextWithKeyId,
-  sealMasterKey,
+  mintMasterKey,
   unsealMasterKey,
+  type MintedMasterKey,
 } from '../sealing/seal.js';
 import { readSealedBlob, writeSealedBlob } from '../sealing/sealed-blob-store.js';
 import { assertRecoveryConfigured, sealRecoveryMnemonic } from '../sealing/recovery.js';
@@ -51,11 +51,7 @@ export interface TenantIdentity {
   processedBucket?: string;
 }
 
-export type SealMasterKeyFn = (
-  masterKey: Buffer,
-  kmsKeyId: string,
-  tenantId: string,
-) => Promise<Buffer>;
+export type MintMasterKeyFn = (kmsKeyId: string, tenantId: string) => Promise<MintedMasterKey>;
 
 export type UnsealMasterKeyFn = (
   blob: Buffer,
@@ -74,7 +70,7 @@ export interface TenantContextFactoryDeps {
   kmsClientProvider?: (region?: string) => AWS.KMS;
   sealedBlobBucket: string;
   processedOutputsBucket: string;
-  sealMasterKey?: SealMasterKeyFn;
+  mintMasterKey?: MintMasterKeyFn;
   unsealMasterKey?: UnsealMasterKeyFn;
   activePolicySnapshotFor?: (tenantId: string) => ReturnType<TenantContext['activePolicySnapshot']>;
   enforceTenantPolicy?: boolean;
@@ -275,26 +271,34 @@ export class TenantContextFactory {
       identity.recoveryPubkey,
       identity.signedRecoveryPubkey ?? this.deps.signedRecoveryPubkey?.(),
     );
-    const masterKey = generateMasterKey();
+    const { masterKey, sealedBlob } = await this.mint(identity);
     try {
-      const recoveryBox = sealRecoveryMnemonic(masterKey, recoveryKey);
-      await this.deps.s3.send(
-        new PutObjectCommand({
-          Bucket: sealedBlobBucket,
-          Key: this.recoveryBlobKey(identity.tenantId),
-          Body: JSON.stringify(recoveryBox),
-          ContentType: 'application/json',
-        }),
-      );
-
-      const blob = await this.seal(masterKey, identity);
-      await this.verifyFirstBootRoundTrip(blob, masterKey, identity);
-      await writeSealedBlob(this.deps.s3, sealedBlobBucket, identity.tenantId, blob);
+      if (masterKey.length !== MASTER_KEY_BYTES) throw new Error(VERIFIED_BOOT_PROOF_ERROR);
+      await this.writeRecoveryBox(masterKey, recoveryKey, sealedBlobBucket, identity.tenantId);
+      await this.verifyFirstBootRoundTrip(sealedBlob, masterKey, identity);
+      await writeSealedBlob(this.deps.s3, sealedBlobBucket, identity.tenantId, sealedBlob);
       return masterKey;
     } catch (error) {
       masterKey.fill(0);
       throw error;
     }
+  }
+
+  private async writeRecoveryBox(
+    masterKey: Buffer,
+    recoveryKey: KeyObject,
+    sealedBlobBucket: string,
+    tenantId: string,
+  ): Promise<void> {
+    const recoveryBox = sealRecoveryMnemonic(masterKey, recoveryKey);
+    await this.deps.s3.send(
+      new PutObjectCommand({
+        Bucket: sealedBlobBucket,
+        Key: this.recoveryBlobKey(tenantId),
+        Body: JSON.stringify(recoveryBox),
+        ContentType: 'application/json',
+      }),
+    );
   }
 
   private resolveBucket(identityBucket: string, fallbackBucket: string): string {
@@ -303,12 +307,8 @@ export class TenantContextFactory {
     return bucket;
   }
 
-  private async seal(masterKey: Buffer, identity: TenantIdentity): Promise<Buffer> {
-    return (this.deps.sealMasterKey ?? sealMasterKey)(
-      masterKey,
-      identity.kmsKeyId,
-      identity.tenantId,
-    );
+  private async mint(identity: TenantIdentity): Promise<MintedMasterKey> {
+    return (this.deps.mintMasterKey ?? mintMasterKey)(identity.kmsKeyId, identity.tenantId);
   }
 
   private async verifyFirstBootRoundTrip(

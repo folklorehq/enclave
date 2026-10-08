@@ -1,12 +1,6 @@
 import { DecryptCommand } from '@aws-sdk/client-kms';
 import { GetParameterCommand, type GetParameterCommandOutput } from '@aws-sdk/client-ssm';
-import {
-  createHash,
-  constants,
-  generateKeyPairSync,
-  privateDecrypt,
-  type KeyObject,
-} from 'node:crypto';
+import { createHash, generateKeyPairSync, type KeyObject } from 'node:crypto';
 import {
   runtimeDatabaseCredentialReceiptSchema,
   runtimeDatabaseConfigSchema,
@@ -18,6 +12,7 @@ import {
   type RuntimeDatabaseCredentialReceipt,
 } from '@folklore/contracts/enclave-attestation';
 import { z } from 'zod';
+import { openKmsRecipientCiphertext } from '../aws/kms-recipient-ciphertext.js';
 
 const MAX_PARAMETER_BYTES = 131_072;
 const MAX_CIPHERTEXT_BYTES = 65_536;
@@ -276,14 +271,7 @@ export class KmsRecipientDecryptor implements RuntimeDatabaseRecipientDecryptor 
 
   private openRecipientCiphertext(privateKey: KeyObject, ciphertext: Uint8Array): Buffer {
     try {
-      return privateDecrypt(
-        {
-          key: privateKey,
-          padding: constants.RSA_PKCS1_OAEP_PADDING,
-          oaepHash: 'sha256',
-        },
-        Buffer.from(ciphertext),
-      );
+      return openKmsRecipientCiphertext(privateKey, ciphertext);
     } catch {
       throw new RuntimeDatabaseCredentialError('runtime_database_kms_response_invalid');
     }

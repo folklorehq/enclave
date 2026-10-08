@@ -1,10 +1,9 @@
 import { type Command, Ed25519CommandAuthorizer } from '@folklore/control-plane';
 import { resealForSharedParamsSchema } from '@folklore/contracts';
-import { resealMasterKey, type ResealDeps } from '../../sealing/reseal.js';
+import { resealMasterKey } from '../../sealing/reseal.js';
 
 export interface ResealForSharedHandlerDeps {
   authorizer: Ed25519CommandAuthorizer;
-  reseal: ResealDeps;
   // Fail-closed: an org not assigned to this enclave resolves to undefined and is rejected before any key material is touched.
   resolveTenantCmk: (tenantId: string) => string | undefined;
 }
@@ -25,13 +24,10 @@ export class ResealForSharedHandler {
     const kmsKeyId = this.deps.resolveTenantCmk(params.tenantId);
     if (!kmsKeyId) throw new Error('reseal-for-shared: tenant not assigned to this enclave');
 
-    // the per-tenant CMK is unchanged; re-seal under the same key + tenant AAD so a pool
-    // enclave (same PCR0) can unseal it. The pool-role KMS grant is an infra op outside the enclave.
-    await resealMasterKey(this.deps.reseal, {
+    return resealMasterKey({
       tenantId: params.tenantId,
       sourceKmsKeyId: kmsKeyId,
       targetKmsKeyId: kmsKeyId,
     });
-    return { resealed: true };
   }
 }

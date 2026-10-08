@@ -1,7 +1,8 @@
 import { GetObjectCommand, NoSuchKey, PutObjectCommand, type S3Client } from '@aws-sdk/client-s3';
 
+// A v1 blob could have been sealed outside an attested enclave, so only the minted v2 blob is read.
 export function sealedBlobKey(tenantId: string): string {
-  return `sealed-keys/${tenantId}/master.blob`;
+  return `sealed-keys/${tenantId}/master.v2.blob`;
 }
 
 export async function readSealedBlob(

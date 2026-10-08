@@ -265,7 +265,7 @@ const idleSsmPath = isSharedPool
   : `/folklore/${bootAssignments[0]!.tenantId}/idle`;
 
 // Dev-only: localstack KMS can't do the Nitro Recipient decrypt, so ENCLAVE_DEV_KMS_STUB swaps in
-// AES-GCM seal/unseal with DATA_KEK. devMasterKeySealers fails closed outside development/test.
+// AES-GCM mint/unseal with DATA_KEK. devMasterKeySealers fails closed outside development/test.
 const devKmsStub = process.env['ENCLAVE_DEV_KMS_STUB'] === 'true';
 
 // Set once the boot manifest is verified, which happens after this factory is constructed but

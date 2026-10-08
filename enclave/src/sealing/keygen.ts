@@ -1,10 +1,5 @@
 import { hkdfSync, createPrivateKey, createPublicKey, KeyObject } from 'crypto';
 import { entropyToMnemonic } from 'bip39';
-import { getEntropy } from './nsm.js';
-
-export function generateMasterKey(): Buffer {
-  return getEntropy(32);
-}
 
 export function deriveKey(masterKey: Buffer, purpose: string, length = 32): Buffer {
   return Buffer.from(hkdfSync('sha256', masterKey, Buffer.alloc(0), purpose, length));
