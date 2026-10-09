@@ -179,9 +179,11 @@ import {
   Ed25519EnclaveOutputAuthenticator,
 } from '@folklore/crypto';
 import { EnclaveBootStatus } from './boot/EnclaveBootStatus.js';
+import { bootModuleLoadGuard } from './boot/boot-module-load-guard.js';
 
 const bootStatus = new EnclaveBootStatus();
 bootStatus.installFatalMonitor();
+bootModuleLoadGuard.release();
 bootStatus.reach('node_started');
 
 // route external egress through the parent CONNECT proxy — before any client is

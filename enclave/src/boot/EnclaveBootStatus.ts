@@ -1,19 +1,23 @@
 import { writeFileSync } from 'node:fs';
 import type { EnclaveBootPhase } from '@folklore/control-plane';
+import { ENCLAVE_BOOT_STATUS_PATH } from './boot-status-path.js';
 import { errorClassCode, guardFailureCode } from './guard-failure-code.js';
 
-// Lock-step with BOOT_STATUS_FILE in enclave/entrypoint.sh, which relays this line to the parent.
-export const ENCLAVE_BOOT_STATUS_PATH = '/run/folklore-boot-status';
 const BOOT_FAILED = 'boot_failed';
 const RUNTIME_FAILED = 'runtime_failed';
+const PROCESS_EXIT = 'process_exit';
+const CLEAN_EXIT_CODE = 0;
+const MAX_EXIT_STATUS = 255;
 
 interface FatalMonitorTarget {
   on(event: 'uncaughtExceptionMonitor', listener: (error: unknown) => void): unknown;
+  on(event: 'exit', listener: (code: number) => void): unknown;
 }
 
 /** Leaves the boot phase and, on a crash, its guard code where the entrypoint relays them off-host. */
 export class EnclaveBootStatus {
   private phase: EnclaveBootPhase = 'node_started';
+  private failed = false;
 
   constructor(private readonly path: string = ENCLAVE_BOOT_STATUS_PATH) {}
 
@@ -23,11 +27,20 @@ export class EnclaveBootStatus {
   }
 
   fail(error: unknown): void {
+    this.failed = true;
     this.record(`phase=${this.phase} fatal=${this.failureCode(error)}`);
   }
 
   installFatalMonitor(target: FatalMonitorTarget = process): void {
     target.on('uncaughtExceptionMonitor', (error) => this.fail(error));
+    target.on('exit', (code) => this.recordExit(code));
+  }
+
+  // An explicit process.exit raises no exception, so without this it left a phase and no code.
+  private recordExit(code: number): void {
+    if (this.failed || code === CLEAN_EXIT_CODE) return;
+    const named = Number.isInteger(code) && code > 0 && code <= MAX_EXIT_STATUS;
+    this.record(`phase=${this.phase} fatal=${named ? `${PROCESS_EXIT}_${code}` : PROCESS_EXIT}`);
   }
 
   // Past boot, a throw can come from a content path, where even a slug-shaped message may be a value.

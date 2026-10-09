@@ -1,6 +1,8 @@
 import { randomBytes } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { decode } from 'cborg';
 
+const require = createRequire(import.meta.url);
 const STUB = process.env['NSM_STUB'] === '1';
 const REQUEST_MAX_BYTES = 512;
 const RESPONSE_MAX_BYTES = 16 * 1024;
@@ -210,7 +212,6 @@ function callNative(request: Uint8Array): Uint8Array {
 }
 
 function requireNative(): { call(request: Buffer): Buffer } {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
   return require('../native/nsm.node') as { call(request: Buffer): Buffer };
 }
 
