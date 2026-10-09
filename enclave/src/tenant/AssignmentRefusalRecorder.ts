@@ -4,7 +4,8 @@ import {
   poolAssignmentRefusalKey,
   type AssignmentRefusal,
 } from '@folklore/contracts';
-import { guardFailureCode } from '../boot/guard-failure-code.js';
+import { errorClassCode, guardFailureCode } from '../boot/guard-failure-code.js';
+import { isUnlistedRuntimeDatabaseCode } from '../runtime-database/runtime-database-failure-codes.js';
 
 const UNNAMED_REFUSAL_CODE = 'assignment_refresh_failed';
 
@@ -13,6 +14,7 @@ export class AssignmentRefusalRecorder {
   constructor(
     private readonly cache: Pick<Cache, 'set' | 'del'>,
     private readonly poolId: string,
+    private readonly isPastBoot: () => boolean = () => false,
   ) {}
 
   async record(
@@ -42,7 +44,15 @@ export class AssignmentRefusalRecorder {
       poolId: this.poolId,
       generation: manifest.generation,
       digest: manifest.digest,
-      code: guardFailureCode(error, UNNAMED_REFUSAL_CODE),
+      code: this.code(error),
     });
+  }
+
+  // Past boot the runtime database codes are closed, matching the boot status line.
+  private code(error: unknown): string {
+    const code = guardFailureCode(error, UNNAMED_REFUSAL_CODE);
+    return this.isPastBoot() && isUnlistedRuntimeDatabaseCode(code)
+      ? errorClassCode(error, UNNAMED_REFUSAL_CODE)
+      : code;
   }
 }

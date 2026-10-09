@@ -2,12 +2,15 @@ import { writeFileSync } from 'node:fs';
 import type { EnclaveBootPhase } from '@folklore/control-plane';
 import { ENCLAVE_BOOT_STATUS_PATH } from './boot-status-path.js';
 import type { EnclaveBootStep } from './boot-steps.js';
+import { isRuntimeDatabaseActivationFailureCode } from '../runtime-database/runtime-database-failure-codes.js';
 import { errorClassCode, guardFailureCode } from './guard-failure-code.js';
 
 const BOOT_FAILED = 'boot_failed';
 const RUNTIME_FAILED = 'runtime_failed';
 const STEP_FAILED_SUFFIX = '_failed';
 const PROCESS_EXIT = 'process_exit';
+const READY_PHASE: EnclaveBootPhase = 'ready';
+const API_DEGRADED_FALLBACK = 'api_start_failed';
 const CLEAN_EXIT_CODE = 0;
 const MAX_EXIT_STATUS = 255;
 
@@ -21,13 +24,31 @@ export class EnclaveBootStatus {
   private phase: EnclaveBootPhase = 'node_started';
   private step: EnclaveBootStep | undefined;
   private failed = false;
+  private degradation: string | undefined;
 
   constructor(private readonly path: string = ENCLAVE_BOOT_STATUS_PATH) {}
 
   reach(phase: EnclaveBootPhase): void {
     this.phase = phase;
     this.step = undefined;
-    this.record(`phase=${phase}`);
+    this.recordPhase();
+  }
+
+  // The box API can fail while boot carries on, so its code rides every later phase line.
+  degrade(error: unknown): void {
+    if (this.failed) return;
+    this.degradation = this.degradationCode(error);
+    this.recordPhase();
+  }
+
+  recover(): void {
+    if (this.failed || this.degradation === undefined) return;
+    this.degradation = undefined;
+    this.recordPhase();
+  }
+
+  isReady(): boolean {
+    return this.phase === READY_PHASE;
   }
 
   // A background rejection that lands while a step runs is named by that step too.
@@ -54,12 +75,25 @@ export class EnclaveBootStatus {
 
   // Past boot, a throw can come from a content path, where even a slug-shaped message may be a value.
   private failureCode(error: unknown): string {
-    return this.phase === 'ready'
+    return this.isReady()
       ? errorClassCode(error, RUNTIME_FAILED)
       : guardFailureCode(
           error,
           this.step === undefined ? BOOT_FAILED : `${this.step}${STEP_FAILED_SUFFIX}`,
         );
+  }
+
+  // Past boot only a fixed runtime database code is relayed by message, matching failureCode.
+  private degradationCode(error: unknown): string {
+    if (!this.isReady()) return guardFailureCode(error, API_DEGRADED_FALLBACK);
+    return error instanceof Error && isRuntimeDatabaseActivationFailureCode(error.message)
+      ? error.message
+      : errorClassCode(error, API_DEGRADED_FALLBACK);
+  }
+
+  private recordPhase(): void {
+    const degraded = this.degradation === undefined ? '' : ` fatal=${this.degradation}`;
+    this.record(`phase=${this.phase}${degraded}`);
   }
 
   private record(line: string): void {

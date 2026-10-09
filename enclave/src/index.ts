@@ -165,6 +165,10 @@ import {
   type RuntimeDatabaseConnection,
 } from './runtime-database/RuntimeDatabaseCredentialConsumer.js';
 import { RuntimeDatabaseLease } from './runtime-database/RuntimeDatabaseLease.js';
+import {
+  RUNTIME_DATABASE_API_UNAVAILABLE,
+  RUNTIME_DATABASE_SIGNED_CONFIG_UNAVAILABLE,
+} from './runtime-database/runtime-database-failure-codes.js';
 import { PoolRuntimeAttestationService } from './attestation/pool/PoolRuntimeAttestationService.js';
 import { RuntimeAttestationServer } from './attestation/RuntimeAttestationServer.js';
 import { NodeRuntimeAttestationListener } from './attestation/NodeRuntimeAttestationListener.js';
@@ -821,7 +825,9 @@ if (!DEPLOYMENT_ID || !REDIS_URL) {
   throw new Error('halt_gate_unavailable');
 }
 const haltCache = new RedisCache(REDIS_URL);
-const assignmentRefusals = new AssignmentRefusalRecorder(haltCache, POOL_ID);
+const assignmentRefusals = new AssignmentRefusalRecorder(haltCache, POOL_ID, () =>
+  bootStatus.isReady(),
+);
 const storageCanaryProof = new StorageCanaryProof({
   async put(bucket, key, body) {
     await s3.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: body }));
@@ -940,7 +946,7 @@ async function refreshAssignments(): Promise<void> {
     if (!result.applied) return;
     const policyState = isV4 && 'state' in result ? result.state : undefined;
     if (process.env['NODE_ENV'] === 'production' && !verified.runtimeDatabase) {
-      throw new Error('runtime_database_signed_config_unavailable');
+      throw new Error(RUNTIME_DATABASE_SIGNED_CONFIG_UNAVAILABLE);
     }
     if (process.env['NODE_ENV'] === 'production' && verified.runtimeDatabase) {
       const recovery = await runtimeDatabaseLease.reconcile(verified.runtimeDatabase);
@@ -1278,24 +1284,32 @@ try {
         recipientDecryptor: new KmsRecipientDecryptor(kms, getAttestationDoc),
         createDatabase: createRuntimeDatabaseConnection,
         readiness: createRuntimeDatabaseReadiness(async (database) => {
-          candidate = createContainer({ ...apiOptions, database });
+          const started = createContainer({ ...apiOptions, database });
+          candidate = started;
+          let health: 'start_failed' | 'unhealthy' = 'start_failed';
           try {
-            await candidate.start();
-            const response = await candidate.app.request('/health');
-            if (response.status === 200) return true;
+            await started.start();
+            health = 'unhealthy';
+            const response = await Promise.resolve().then(() => started.app.request('/health'));
+            if (response.status === 200) return 'healthy';
           } catch {
-            await candidate.close().catch(() => undefined);
-            candidate = undefined;
-            return false;
+            // Every failure falls through to close, so a retry never meets a bound port.
           }
-          await candidate.close().catch(() => undefined);
+          await started.close().catch(() => undefined);
           candidate = undefined;
-          return false;
+          return health;
         }),
-      }).consume(config, registry.all()[0]?.tenantId ?? config.envelope.poolDeploymentId);
+      })
+        .consume(config, registry.all()[0]?.tenantId ?? config.envelope.poolDeploymentId)
+        .catch(async (error: unknown) => {
+          // A healthy candidate whose receipt then fails must not keep its ports for the retry.
+          await candidate?.close().catch(() => undefined);
+          candidate = undefined;
+          throw error;
+        });
       if (!candidate) {
         await consumed.database.close();
-        throw new Error('runtime_database_api_unavailable');
+        throw new Error(RUNTIME_DATABASE_API_UNAVAILABLE);
       }
       runtimeDatabaseLease.activate(config, consumed.receipt, candidate, consumed.database);
       apiContainer = runtimeDatabaseLease.api();
@@ -1310,10 +1324,19 @@ try {
       const clearActivation = (): void => {
         if (runtimeDatabaseActivation === activation) runtimeDatabaseActivation = undefined;
       };
-      void activation.then(clearActivation, clearActivation);
+      void activation.then(
+        () => {
+          if (runtimeDatabaseLease.api()) bootStatus.recover();
+          clearActivation();
+        },
+        (error: unknown) => {
+          bootStatus.degrade(error);
+          clearActivation();
+        },
+      );
       return activation;
     };
-    if (!signedRuntimeDatabase) throw new Error('runtime_database_signed_config_unavailable');
+    if (!signedRuntimeDatabase) throw new Error(RUNTIME_DATABASE_SIGNED_CONFIG_UNAVAILABLE);
     await activateRuntimeDatabase(signedRuntimeDatabase);
   } else {
     apiContainer = createContainer(apiOptions);
@@ -1323,6 +1346,7 @@ try {
   // Degraded, not silent: the SPA still serves but /api/* returns 503 and /health reports
   // api:unavailable so the outage is observable, rather than a crash-looping boot.
   logger.error('BOX_API_DEGRADED', { err });
+  bootStatus.degrade(err);
 }
 
 // The API container is the single source of the collab port it binds; absent it, there is none to reach.

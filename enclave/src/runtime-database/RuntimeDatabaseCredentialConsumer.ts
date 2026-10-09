@@ -7,11 +7,13 @@ import {
   runtimeDatabaseBinding,
   runtimeDatabaseBindingSchema,
   encodeRuntimeDatabaseBinding,
+  isRuntimeDatabaseReadinessFailureCode,
   type RuntimeDatabaseBinding,
   type RuntimeDatabaseConfig,
   type RuntimeDatabaseCredentialReceipt,
 } from '@folklore/contracts/enclave-attestation';
 import { z } from 'zod';
+import type { RuntimeDatabaseCredentialErrorCode } from './runtime-database-failure-codes.js';
 import { openKmsRecipientCiphertext } from '../aws/kms-recipient-ciphertext.js';
 
 const MAX_PARAMETER_BYTES = 131_072;
@@ -35,13 +37,7 @@ const credentialSchema = z
   })
   .strict();
 
-export type RuntimeDatabaseCredentialErrorCode =
-  | 'runtime_database_config_invalid'
-  | 'runtime_database_parameter_unavailable'
-  | 'runtime_database_envelope_invalid'
-  | 'runtime_database_kms_response_invalid'
-  | 'runtime_database_credential_invalid'
-  | 'runtime_database_readiness_failed';
+export type { RuntimeDatabaseCredentialErrorCode };
 
 export class RuntimeDatabaseCredentialError extends Error {
   constructor(code: RuntimeDatabaseCredentialErrorCode) {
@@ -138,7 +134,7 @@ export class RuntimeDatabaseCredentialConsumer<TDatabase extends RuntimeDatabase
     } catch (error: unknown) {
       await database?.close().catch(() => undefined);
       if (error instanceof RuntimeDatabaseCredentialError) throw error;
-      throw this.failure('runtime_database_readiness_failed');
+      throw this.failure(this.readinessFailureCode(error));
     } finally {
       plaintext.fill(0);
     }
@@ -223,6 +219,12 @@ export class RuntimeDatabaseCredentialConsumer<TDatabase extends RuntimeDatabase
 
   private databaseUrl(config: RuntimeDatabaseConfig, password: string): string {
     return `postgresql://folklore_app:${encodeURIComponent(password)}@127.0.0.1:${config.endpoint.port}/${encodeURIComponent(config.database)}?sslmode=verify-full`;
+  }
+
+  // Only a code from the closed readiness set is relayed; the message is never read.
+  private readinessFailureCode(error: unknown): RuntimeDatabaseCredentialErrorCode {
+    const code: unknown = error instanceof Error && 'code' in error ? error.code : undefined;
+    return isRuntimeDatabaseReadinessFailureCode(code) ? code : 'runtime_database_readiness_failed';
   }
 
   private hash(value: string | Uint8Array): string {
