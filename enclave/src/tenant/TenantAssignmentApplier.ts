@@ -176,7 +176,7 @@ export class TenantAssignmentApplier {
       }
       throw new Error('assignment_manifest_generation_conflict');
     }
-    if (generation !== expectedGeneration + 1) {
+    if (generation < expectedGeneration) {
       throw new Error('assignment_manifest_generation_mismatch');
     }
     const previous = this.policyMode.generationRegistry.read();

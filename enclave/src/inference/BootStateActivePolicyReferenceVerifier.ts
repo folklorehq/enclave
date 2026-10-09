@@ -41,8 +41,7 @@ export class BootStateActivePolicyReferenceVerifier implements ActivePolicyCarri
   }
 }
 
-const BOOT_BOUND_GENERATION_FIELDS = [
-  'configurationGeneration',
+const RELEASE_BOUND_GENERATION_FIELDS = [
   'releaseId',
   'protectedSourceCommit',
   'eifDigest',
@@ -50,23 +49,37 @@ const BOOT_BOUND_GENERATION_FIELDS = [
   'bootRootDigest',
 ] as const;
 
-export type BootBoundGenerationContext = Pick<
+export type ReleaseBoundGenerationContext = Pick<
   GenerationContextV1,
-  | 'configurationGeneration'
-  | 'releaseId'
-  | 'protectedSourceCommit'
-  | 'eifDigest'
-  | 'pcr0'
-  | 'bootRootDigest'
+  (typeof RELEASE_BOUND_GENERATION_FIELDS)[number]
 >;
 
-export function buildV4ExpectedGenerationContext(input: {
-  readonly bootContext: BootBoundGenerationContext;
+export type BootBoundGenerationContext = ReleaseBoundGenerationContext &
+  Pick<GenerationContextV1, 'configurationGeneration'>;
+
+interface V4GenerationContextInput<TBootContext> {
+  readonly bootContext: TBootContext;
   readonly carrierContext: GenerationContextV1;
   readonly tenantId: string;
   readonly deploymentId: string;
-}): GenerationContextV1 {
-  for (const field of BOOT_BOUND_GENERATION_FIELDS) {
+}
+
+/** The boot carrier's context: its configuration generation is the boot manifest's own. */
+export function buildV4ExpectedGenerationContext(
+  input: V4GenerationContextInput<BootBoundGenerationContext>,
+): GenerationContextV1 {
+  if (input.carrierContext.configurationGeneration !== input.bootContext.configurationGeneration) {
+    throw new Error('active_policy_boot_context_mismatch');
+  }
+  return buildV4AssignmentGenerationContext(input);
+}
+
+// A pool assignment carrier's configuration generation is the tenant's placement generation, which
+// the pool's boot generation does not track; the durable high-water checkpoint is its floor.
+export function buildV4AssignmentGenerationContext(
+  input: V4GenerationContextInput<ReleaseBoundGenerationContext>,
+): GenerationContextV1 {
+  for (const field of RELEASE_BOUND_GENERATION_FIELDS) {
     if (input.carrierContext[field] !== input.bootContext[field]) {
       throw new Error('active_policy_boot_context_mismatch');
     }
@@ -78,14 +91,19 @@ export function buildV4ExpectedGenerationContext(input: {
     throw new Error('active_policy_assignment_context_mismatch');
   }
   return {
-    ...input.bootContext,
     orgId: input.tenantId,
     deploymentId: input.deploymentId,
     policyDigest: input.carrierContext.policyDigest,
     policyGeneration: input.carrierContext.policyGeneration,
     activationGeneration: input.carrierContext.activationGeneration,
+    configurationGeneration: input.carrierContext.configurationGeneration,
     keysetEpoch: input.carrierContext.keysetEpoch,
     keysetDigest: input.carrierContext.keysetDigest,
+    releaseId: input.bootContext.releaseId,
+    protectedSourceCommit: input.bootContext.protectedSourceCommit,
+    eifDigest: input.bootContext.eifDigest,
+    pcr0: input.bootContext.pcr0,
+    bootRootDigest: input.bootContext.bootRootDigest,
   };
 }
 

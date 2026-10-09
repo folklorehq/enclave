@@ -80,7 +80,8 @@ export class TenantGenerationRegistry<TContext = unknown, TSnapshot = unknown> {
     if (this.current.generation !== expectedGeneration) {
       throw new Error('tenant_generation_compare_and_set_failed');
     }
-    if (!Number.isSafeInteger(nextGeneration) || nextGeneration !== expectedGeneration + 1) {
+    // Each signed manifest is a complete set, so skipping generations is safe; only going back is not.
+    if (!Number.isSafeInteger(nextGeneration) || nextGeneration <= expectedGeneration) {
       throw new Error('tenant_generation_invalid');
     }
     const entries = [...nextState].map(

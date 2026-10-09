@@ -18,6 +18,7 @@ import {
   parseAssignmentManifestWire,
 } from './tenant/tenant-assignments.js';
 import { TenantAssignmentApplier } from './tenant/TenantAssignmentApplier.js';
+import { AssignmentRefusalRecorder } from './tenant/AssignmentRefusalRecorder.js';
 import type { TenantPolicyAssignment } from './tenant/TenantAssignmentApplier.js';
 import { signedRecoveryKeyFor } from './sealing/recovery-key-binding.js';
 import { TenantRequestQuiescer } from './tenant/TenantRequestQuiescer.js';
@@ -119,7 +120,7 @@ import {
 } from './attestation/VerifiedBootPolicyStateLoader.js';
 import {
   BootStateActivePolicyReferenceVerifier,
-  buildV4ExpectedGenerationContext,
+  buildV4AssignmentGenerationContext,
   type BootBoundGenerationContext,
   loadEnclaveActivePolicyTrust,
 } from './inference/BootStateActivePolicyReferenceVerifier.js';
@@ -513,7 +514,7 @@ const policyAssignmentApplier = new TenantAssignmentApplier({
     const carrierContext = carrier.payload.generationContext;
     const snapshot = await liveActivePolicySnapshotVerifier.verifyCarrier({
       carrier,
-      expectedContext: buildV4ExpectedGenerationContext({
+      expectedContext: buildV4AssignmentGenerationContext({
         bootContext,
         carrierContext,
         tenantId: assignment.tenantId,
@@ -801,6 +802,7 @@ if (!DEPLOYMENT_ID || !REDIS_URL) {
   );
 }
 const haltCache = new RedisCache(REDIS_URL);
+const assignmentRefusals = new AssignmentRefusalRecorder(haltCache, POOL_ID);
 const storageCanaryProof = new StorageCanaryProof({
   async put(bucket, key, body) {
     await s3.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: body }));
@@ -857,6 +859,7 @@ const beginTenantRequest = async (tenantId: string) => {
 // re-read reconverges to the latest assignment. Dedicated boxes have no POOL_ID and no manifest.
 async function refreshAssignments(): Promise<void> {
   if (!isSharedPool) return;
+  let refusalTarget: NormalizedAssignmentManifestV1 | undefined;
   try {
     const manifest = await haltCache.get(poolAssignmentsKey(POOL_ID));
     if (!manifest) return;
@@ -891,6 +894,7 @@ async function refreshAssignments(): Promise<void> {
         ASSIGNMENT_MANIFEST_PUBLIC_KEY,
       ),
     );
+    refusalTarget = parsed;
     assertInferenceAttestationEcho(verified.inferenceAttestation, parsed.wire);
     const isV4 = parsed.wire === 'SignedAssignmentManifestV4';
     if (isV4 && !liveActivePolicySnapshotVerifier) {
@@ -1004,6 +1008,7 @@ async function refreshAssignments(): Promise<void> {
       }
     } catch (error: unknown) {
       if (error instanceof Error && error.message === 'runtime_attestation_not_ready') {
+        await assignmentRefusals.record(parsed, error);
         return;
       }
       throw error;
@@ -1016,6 +1021,7 @@ async function refreshAssignments(): Promise<void> {
       },
     });
     await haltCache.set(poolAssignmentAckKey(POOL_ID), acknowledgment);
+    await assignmentRefusals.clear();
     if (isV4) {
       if (!policyState) throw new Error('active_policy_generation_unavailable');
       policyAssignmentApplier.activateGeneration(parsed.generation);
@@ -1031,6 +1037,7 @@ async function refreshAssignments(): Promise<void> {
       pool_id: POOL_ID,
       error: err instanceof Error ? err.name : 'unknown',
     });
+    if (refusalTarget) await assignmentRefusals.record(refusalTarget, err);
   }
 }
 
