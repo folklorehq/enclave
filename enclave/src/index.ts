@@ -149,12 +149,13 @@ import type { JiraWebhookLifecycleService } from './pull/JiraWebhookLifecycleSer
 import type { JiraWebhookAuthenticator } from './ingest/JiraWebhookAuthenticator.js';
 import type { WebhookLifecycleDelivery } from '@folklore/contracts/enclave';
 import { BootManifestSecretLoader } from './attestation/BootManifestSecretLoader.js';
+import { AgentTokenLoader } from './attestation/AgentTokenLoader.js';
+import { attestedRecipientDecryptor } from './attestation/attested-recipient-decryptor.js';
 import {
   AwsBootManifestSecretsManager,
   AwsBootManifestSsmParameters,
 } from './attestation/boot-manifest-secret-clients.js';
 import { getAttestationDoc } from './sealing/nsm.js';
-import { decryptRecipientCiphertextWithKeyId } from './sealing/seal.js';
 import { deriveIngestKeypair } from './sealing/keygen.js';
 import { devMasterKeySealers } from './sealing/dev-master-key-sealers.js';
 import {
@@ -242,16 +243,17 @@ async function loadInferenceKey(): Promise<void> {
   }
 }
 
+// The token's key releases it only to an attested enclave, so SSM cannot decrypt it for us; a
+// failed read stops the boot with its code, because without the token nothing reaches the control plane.
 async function loadAgentToken(): Promise<void> {
   if (!AGENT_TOKEN_SSM_PATH || process.env['AGENT_TOKEN']) return;
-  try {
-    const resp = await ssm.send(
-      new GetParameterCommand({ Name: AGENT_TOKEN_SSM_PATH, WithDecryption: true }),
-    );
-    if (resp.Parameter?.Value) process.env['AGENT_TOKEN'] = resp.Parameter.Value;
-  } catch (err) {
-    logger.error('failed to load agent token from SSM', { err });
-  }
+  process.env['AGENT_TOKEN'] = await new AgentTokenLoader(
+    new AwsBootManifestSsmParameters(ssm),
+    attestedRecipientDecryptor,
+  ).load({
+    manifest: verifiedBootManifest,
+    envPath: AGENT_TOKEN_SSM_PATH,
+  });
 }
 
 // A shared pool (POOL_ID set) learns its assigned tenants from the content-free manifest on the
@@ -554,13 +556,7 @@ let runtimeAttestation =
     secretLoader: new BootManifestSecretLoader(
       new AwsBootManifestSecretsManager(secretsManager),
       new AwsBootManifestSsmParameters(ssm),
-      {
-        recipientDecryptor: {
-          decryptForRecipient: async ({ ciphertext, keyId, encryptionContext }) =>
-            (await decryptRecipientCiphertextWithKeyId(ciphertext, keyId, encryptionContext))
-              .plaintext,
-        },
-      },
+      { recipientDecryptor: attestedRecipientDecryptor },
     ),
     nsm: { attest: getAttestationDoc },
     s3,

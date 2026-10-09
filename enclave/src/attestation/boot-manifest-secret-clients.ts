@@ -24,10 +24,10 @@ export class AwsBootManifestSecretsManager implements SecretsManagerSecretValueP
 export class AwsBootManifestSsmParameters implements SsmParameterValuePort {
   constructor(private readonly client: SSMClient) {}
 
-  async getParameter(input: { name: string; version: number; withDecryption?: boolean }) {
+  async getParameter(input: { name: string; version?: number; withDecryption?: boolean }) {
     const response = await this.client.send(
       new GetParameterCommand({
-        Name: `${input.name}:${input.version}`,
+        Name: input.version === undefined ? input.name : `${input.name}:${input.version}`,
         WithDecryption: input.withDecryption ?? true,
       }),
     );

@@ -2,6 +2,7 @@ import {
   bootManifestSecretReferenceSchema,
   type BootManifestSecretReference,
 } from '@folklore/contracts/enclave-attestation';
+import { AttestedSsmParameterReader } from './AttestedSsmParameterReader.js';
 import type { VerifiedBootManifest } from './BootManifestVerifier.js';
 import { readFailureCode } from './read-failure-code.js';
 
@@ -10,6 +11,7 @@ const DEFAULT_MAX_SECRET_VALUE_BYTES = 64 * 1024;
 export const bootManifestSecretLoadErrors = {
   reference: 'boot_manifest_secret_reference_invalid',
   missing: 'boot_manifest_secret_missing',
+  accessDenied: 'boot_manifest_secret_access_denied',
   identity: 'boot_manifest_secret_identity_invalid',
   version: 'boot_manifest_secret_version_invalid',
   value: 'boot_manifest_secret_value_invalid',
@@ -27,7 +29,7 @@ export interface SecretsManagerSecretValuePort {
 }
 
 export interface SsmParameterValuePort {
-  getParameter(input: { name: string; version: number; withDecryption?: boolean }): Promise<{
+  getParameter(input: { name: string; version?: number; withDecryption?: boolean }): Promise<{
     name?: string;
     version?: number;
     value?: string;
@@ -37,8 +39,9 @@ export interface SsmParameterValuePort {
 export interface AttestedSecretDecryptorPort {
   decryptForRecipient(input: {
     ciphertext: Buffer;
-    keyId: string;
+    keyId?: string;
     encryptionContext: Record<string, string>;
+    refusedKeyIds?: readonly string[];
   }): Promise<Buffer>;
 }
 
@@ -133,7 +136,13 @@ export class BootManifestSecretLoader {
         versionId: reference.versionId,
       });
     } catch (error) {
-      throw new Error(readFailureCode(error, bootManifestSecretLoadErrors.missing));
+      throw new Error(
+        readFailureCode(
+          error,
+          bootManifestSecretLoadErrors.missing,
+          bootManifestSecretLoadErrors.accessDenied,
+        ),
+      );
     }
   }
 
@@ -161,29 +170,17 @@ export class BootManifestSecretLoader {
     ) {
       throw new Error(bootManifestSecretLoadErrors.reference);
     }
-    const response = await this.readSsm(reference, false);
-    if (response.name !== reference.path) throw new Error(bootManifestSecretLoadErrors.identity);
-    if (response.version !== reference.version)
-      throw new Error(bootManifestSecretLoadErrors.version);
-    if (typeof response.value !== 'string' || response.value.length === 0) {
-      throw new Error(bootManifestSecretLoadErrors.value);
-    }
-    const ciphertext = Buffer.from(response.value, 'base64');
-    if (ciphertext.length === 0 || ciphertext.toString('base64') !== response.value) {
-      throw new Error(bootManifestSecretLoadErrors.value);
-    }
-    let plaintext: Buffer;
-    try {
-      plaintext = await this.#recipientDecryptor.decryptForRecipient({
-        ciphertext,
-        keyId: manifest.enclaveOutputKeyKmsKeyArn,
-        encryptionContext: {
-          PARAMETER_ARN: `arn:aws:ssm:${manifest.awsRegion}:${manifest.awsAccountId}:parameter${reference.path}`,
-        },
-      });
-    } catch (error) {
-      throw new Error(readFailureCode(error, bootManifestSecretLoadErrors.decrypt));
-    }
+    const plaintext = await new AttestedSsmParameterReader(
+      this.ssm,
+      this.#recipientDecryptor,
+      bootManifestSecretLoadErrors,
+    ).read({
+      path: reference.path,
+      version: reference.version,
+      keyId: manifest.enclaveOutputKeyKmsKeyArn,
+      awsAccountId: manifest.awsAccountId,
+      awsRegion: manifest.awsRegion,
+    });
     try {
       const value = this.validValue(plaintext.toString('utf8'));
       return Object.freeze({ id: reference.id, store: reference.store, value });
@@ -194,16 +191,17 @@ export class BootManifestSecretLoader {
 
   private async readSsm(
     reference: Extract<BootManifestSecretReference, { store: 'ssm' }>,
-    withDecryption?: boolean,
   ): ReturnType<SsmParameterValuePort['getParameter']> {
     try {
-      return await this.ssm.getParameter(
-        withDecryption === undefined
-          ? { name: reference.path, version: reference.version }
-          : { name: reference.path, version: reference.version, withDecryption },
-      );
+      return await this.ssm.getParameter({ name: reference.path, version: reference.version });
     } catch (error) {
-      throw new Error(readFailureCode(error, bootManifestSecretLoadErrors.missing));
+      throw new Error(
+        readFailureCode(
+          error,
+          bootManifestSecretLoadErrors.missing,
+          bootManifestSecretLoadErrors.accessDenied,
+        ),
+      );
     }
   }
 

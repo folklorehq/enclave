@@ -131,9 +131,17 @@ export async function decryptRecipientCiphertextWithKeyId(
   return decryptWithContextAndKeyId(ciphertext, kmsKeyId, encryptionContext);
 }
 
+// An SSM SecureString names its own key; SSM bound it to the parameter ARN when it encrypted.
+export async function decryptParameterForRecipient(
+  ciphertext: Buffer,
+  parameterArn: string,
+): Promise<{ keyId: string; plaintext: Buffer }> {
+  return decryptWithContextAndKeyId(ciphertext, undefined, { PARAMETER_ARN: parameterArn });
+}
+
 async function decryptWithContextAndKeyId(
   ciphertext: Buffer,
-  kmsKeyId: string,
+  kmsKeyId: string | undefined,
   encryptionContext: Record<string, string>,
 ): Promise<{ keyId: string; plaintext: Buffer }> {
   // Dev-only: localstack KMS cannot perform the Nitro Recipient decrypt (it returns no
@@ -147,7 +155,7 @@ async function decryptWithContextAndKeyId(
     assertDevKmsStubAllowed(process.env['NODE_ENV'] ?? '');
     const devResponse = await kmsClient().send(
       new DecryptCommand({
-        KeyId: kmsKeyId,
+        ...(kmsKeyId === undefined ? {} : { KeyId: kmsKeyId }),
         CiphertextBlob: ciphertext,
         EncryptionContext: encryptionContext,
       }),
@@ -160,7 +168,7 @@ async function decryptWithContextAndKeyId(
   const { recipient, privateKey } = attestedRecipient();
   const response = await kmsClient().send(
     new DecryptCommand({
-      KeyId: kmsKeyId,
+      ...(kmsKeyId === undefined ? {} : { KeyId: kmsKeyId }),
       CiphertextBlob: ciphertext,
       EncryptionContext: encryptionContext,
       Recipient: recipient,
