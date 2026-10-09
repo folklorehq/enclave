@@ -5,6 +5,7 @@ import { NitroAttestationError } from './failures.js';
 
 const PROTECTED_ES384_HEADER = Uint8Array.from([0xa1, 0x01, 0x38, 0x22]);
 const ES384_P1363_SIGNATURE_BYTES = 96;
+const COSE_SIGN1_TAG = 18;
 
 const decodeOptions = {
   strict: true,
@@ -14,7 +15,10 @@ const decodeOptions = {
   allowUndefined: false,
   allowBigInt: false,
   tags: {
-    18: (decodeTagged: () => unknown): unknown => ({ tag: 18, value: decodeTagged() }),
+    [COSE_SIGN1_TAG]: (decodeTagged: () => unknown): TaggedValue => ({
+      tag: COSE_SIGN1_TAG,
+      value: decodeTagged(),
+    }),
   },
 } as const;
 
@@ -37,23 +41,29 @@ export interface NitroCoseSign1 {
   signature: Uint8Array;
 }
 
-function decodeCose(document: Uint8Array): TaggedValue {
+function decodeCose(document: Uint8Array): unknown {
   try {
-    return decode(document, decodeOptions) as TaggedValue;
+    return decode(document, decodeOptions) as unknown;
   } catch {
     throw new NitroAttestationError('malformed_document');
   }
+}
+
+// AWS NSM emits untagged COSE_Sign1, and the tag is outside the Sig_structure the signature covers.
+function coseSign1Values(decoded: unknown): unknown[] {
+  if (Array.isArray(decoded)) return decoded as unknown[];
+  const tagged = decoded as Partial<TaggedValue> | null;
+  if (tagged?.tag === COSE_SIGN1_TAG && Array.isArray(tagged.value)) {
+    return tagged.value as unknown[];
+  }
+  throw new NitroAttestationError('invalid_cose_profile');
 }
 
 export function parseNitroCoseSign1(document: Uint8Array): NitroCoseSign1 {
   if (document.byteLength === 0 || document.byteLength > NITRO_ATTESTATION_DOCUMENT_MAX_BYTES) {
     throw new NitroAttestationError('malformed_document');
   }
-  const decoded = decodeCose(document);
-  if (decoded.tag !== 18 || !Array.isArray(decoded.value)) {
-    throw new NitroAttestationError('invalid_cose_profile');
-  }
-  const values = decoded.value as unknown[];
+  const values = coseSign1Values(decodeCose(document));
   if (values.length !== 4) {
     throw new NitroAttestationError('invalid_cose_profile');
   }

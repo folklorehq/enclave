@@ -114,8 +114,7 @@ export class NsmTrustedTimeSource implements NsmTrustedTimeSourcePort {
   }
 
   private readDocument(document: Uint8Array): ParsedNsmDocument {
-    const cose = this.decodeCose(document);
-    const payload = cose.value[2];
+    const payload = this.decodeCose(document)[2];
     if (!(payload instanceof Uint8Array)) throw new Error('invalid');
     const fields = this.decodeMap(payload);
     const expectedFields = new Set([
@@ -169,20 +168,26 @@ export class NsmTrustedTimeSource implements NsmTrustedTimeSourcePort {
     };
   }
 
-  private decodeCose(document: Uint8Array): TaggedCoseDocument {
-    const decoded = decode(document, decodeOptions);
+  private decodeCose(document: Uint8Array): readonly unknown[] {
+    const values = this.coseValues(decode(document, decodeOptions));
     if (
-      !this.isTaggedCoseDocument(decoded) ||
-      decoded.value.length !== 4 ||
-      !(decoded.value[0] instanceof Uint8Array) ||
-      !(decoded.value[1] instanceof Map) ||
-      decoded.value[1].size !== 0 ||
-      !(decoded.value[2] instanceof Uint8Array) ||
-      !(decoded.value[3] instanceof Uint8Array)
+      values.length !== 4 ||
+      !(values[0] instanceof Uint8Array) ||
+      !(values[1] instanceof Map) ||
+      values[1].size !== 0 ||
+      !(values[2] instanceof Uint8Array) ||
+      !(values[3] instanceof Uint8Array)
     ) {
       throw new Error('invalid');
     }
-    return decoded;
+    return values;
+  }
+
+  // NSM emits untagged COSE_Sign1; the tag is outside the signed Sig_structure, so both forms are accepted.
+  private coseValues(decoded: unknown): readonly unknown[] {
+    if (Array.isArray(decoded)) return decoded as unknown[];
+    if (this.isTaggedCoseDocument(decoded)) return decoded.value;
+    throw new Error('invalid');
   }
 
   private decodeMap(value: Uint8Array): Map<unknown, unknown> {
