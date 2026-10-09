@@ -1339,12 +1339,18 @@ try {
     if (!signedRuntimeDatabase) throw new Error(RUNTIME_DATABASE_SIGNED_CONFIG_UNAVAILABLE);
     await activateRuntimeDatabase(signedRuntimeDatabase);
   } else {
-    apiContainer = createContainer(apiOptions);
-    await apiContainer.start();
+    const startingContainer = createContainer(apiOptions);
+    try {
+      await startingContainer.start();
+    } catch (err) {
+      await startingContainer.close().catch(() => undefined);
+      throw err;
+    }
+    apiContainer = startingContainer;
   }
 } catch (err) {
-  // Degraded, not silent: the SPA still serves but /api/* returns 503 and /health reports
-  // api:unavailable so the outage is observable, rather than a crash-looping boot.
+  // Degraded, not silent: no container is attached, so the SPA still serves but /api/* returns 503
+  // and /health reports api:unavailable, making the outage observable rather than a crash-looping boot.
   logger.error('BOX_API_DEGRADED', { err });
   bootStatus.degrade(err);
 }
