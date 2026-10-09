@@ -2,7 +2,7 @@ import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { KMSClient } from '@aws-sdk/client-kms';
 import { SQSClient } from '@aws-sdk/client-sqs';
-import { SSMClient, PutParameterCommand, GetParameterCommand } from '@aws-sdk/client-ssm';
+import { SSMClient, PutParameterCommand } from '@aws-sdk/client-ssm';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { awsClientTransport } from './aws/aws-transport.js';
 import { TenantContextFactory } from './tenant/TenantContextFactory.js';
@@ -181,11 +181,13 @@ import {
 } from '@folklore/crypto';
 import { EnclaveBootStatus } from './boot/EnclaveBootStatus.js';
 import { bootModuleLoadGuard } from './boot/boot-module-load-guard.js';
+import { InferenceApiKeyLoader } from './boot/InferenceApiKeyLoader.js';
 
 const bootStatus = new EnclaveBootStatus();
 bootStatus.installFatalMonitor();
 bootModuleLoadGuard.release();
 bootStatus.reach('node_started');
+bootStatus.begin('boot_compose');
 
 // route external egress through the parent CONNECT proxy — before any client is
 // built, so undici SDKs pick up the dispatcher (loopback bypasses it, keeping AWS/inference).
@@ -231,16 +233,12 @@ const ssm = new SSMClient({ region: REGION, ...awsClientTransport() });
 const kms = new KMSClient({ region: REGION, ...awsClientTransport() });
 const secretsManager = new SecretsManagerClient({ region: REGION, ...awsClientTransport() });
 
+// A failed read stops the boot by name: logged inside the enclave, it surfaced later as an unnamed crash.
 async function loadInferenceKey(): Promise<void> {
   if (!TEE_API_KEY_SSM_PATH || process.env['TEE_API_KEY']) return;
-  try {
-    const resp = await ssm.send(
-      new GetParameterCommand({ Name: TEE_API_KEY_SSM_PATH, WithDecryption: true }),
-    );
-    if (resp.Parameter?.Value) process.env['TEE_API_KEY'] = resp.Parameter.Value;
-  } catch (err) {
-    logger.error('failed to load inference key from SSM', { err });
-  }
+  process.env['TEE_API_KEY'] = await new InferenceApiKeyLoader(
+    new AwsBootManifestSsmParameters(ssm),
+  ).load(TEE_API_KEY_SSM_PATH);
 }
 
 // The token's key releases it only to an attested enclave, so SSM cannot decrypt it for us; a
@@ -570,9 +568,11 @@ let runtimeAttestation =
     logger: logger.child({ component: 'attestation' }),
   }) ?? null;
 bootStatus.reach('attestation_configured');
+bootStatus.begin('attestation_prepare');
 runtimeAttestation = await initializeRuntimeAttestationForBoot(
   runtimeAttestation,
   async (prepared) => {
+    bootStatus.begin('boot_policy_load');
     verifiedBootManifest = prepared?.verifiedManifest();
     const bootManifest = verifiedBootManifest;
     if (isSharedPool && process.env['NODE_ENV'] === 'production') {
@@ -649,6 +649,7 @@ runtimeAttestation = await initializeRuntimeAttestationForBoot(
         ASSIGNMENT_MANIFEST_PUBLIC_KEY,
       );
     }
+    bootStatus.begin('boot_assignments_apply');
     await assignmentApplier.apply(bootAssignments);
   },
   logger.child({ component: 'attestation' }),
@@ -678,7 +679,9 @@ const poolRuntimeAttestationServer = poolRuntimeAttestation
   : undefined;
 console.log('tenant contexts assigned', { count: registry.size });
 
+bootStatus.begin('inference_key_read');
 await loadInferenceKey();
+bootStatus.begin('inference_configure');
 if (verifiedBootManifest?.providerInferenceTrustPolicy) {
   setPublicInferenceTrustPolicy(verifiedBootManifest.providerInferenceTrustPolicy);
 } else {
@@ -686,8 +689,10 @@ if (verifiedBootManifest?.providerInferenceTrustPolicy) {
 }
 assertInferenceConfigured();
 bootStatus.reach('inference_configured');
+bootStatus.begin('agent_token_load');
 await loadAgentToken();
 
+bootStatus.begin('output_signer_load');
 const outputAuthenticator = createEnclaveOutputAuthenticator();
 
 function outputAssignmentGeneration(): number {
@@ -725,6 +730,7 @@ let jiraWebhookAuthenticator: JiraWebhookAuthenticator | undefined;
 let recordJiraWebhookDelivery:
   | ((input: WebhookLifecycleDelivery) => Promise<'updated' | 'stale' | 'invalid_submission'>)
   | undefined;
+bootStatus.begin('oauth_ingress_setup');
 if (OAUTH_PROVIDER_CONFIG_JSON) {
   throw new Error('oauth_ingress_disabled_untrusted_boot_manifest');
 }
@@ -795,6 +801,7 @@ if (enabledOAuthProviders.length > 0) {
   recordJiraWebhookDelivery = runtime.recordJiraWebhookDelivery;
 }
 
+bootStatus.begin('halt_gate_setup');
 const boxServer = new BoxServer(undefined, {
   httpPort: Number(process.env['ENCLAVE_HTTP_PORT'] ?? '') || undefined,
   ...(oauthIngress ? { oauthIngress: oauthIngress.fetch } : {}),
@@ -803,9 +810,7 @@ const boxServer = new BoxServer(undefined, {
 // the break-glass halt and billing suspension gate every dequeue. Without a
 // halt gate the loop would drain/decrypt fail-open, so refuse to boot rather than run ungated.
 if (!DEPLOYMENT_ID || !REDIS_URL) {
-  throw new Error(
-    'refusing to start: halt gate unavailable (DEPLOYMENT_ID and REDIS_URL required)',
-  );
+  throw new Error('halt_gate_unavailable');
 }
 const haltCache = new RedisCache(REDIS_URL);
 const assignmentRefusals = new AssignmentRefusalRecorder(haltCache, POOL_ID);
@@ -1047,10 +1052,13 @@ async function refreshAssignments(): Promise<void> {
   }
 }
 
+bootStatus.begin('assignments_load');
 await refreshAssignments();
 bootStatus.reach('assignments_loaded');
 void tenantRequestQuiescence.runForever();
+bootStatus.begin('inference_configure');
 assertInferenceConfigured();
+bootStatus.begin('ops_telemetry_setup');
 const ASSIGNMENT_REFRESH_INTERVAL_MS = 30_000;
 // Bound how long shutdown waits for an in-flight synth to settle so a hung inference can't starve
 // the fact-index save; on timeout we proceed WITHOUT freeing a still-pinned index (shred at exit).
@@ -1139,6 +1147,7 @@ function createCodebaseSettingsPort() {
 
 // the box API is composed and served in-process. Every /api/* request
 // reads decrypted content over the in-enclave Postgres proxy and never leaves.
+bootStatus.begin('api_start');
 try {
   // search is served by the in-enclave retriever — embed, ANN over the loaded
   // index, decrypt, and audience-gate, all in-process. The retriever resolves its tenant's
@@ -1312,6 +1321,7 @@ try {
 if (apiContainer) boxServer.attachApi(apiContainer.app.fetch, apiContainer.collabPort);
 await boxServer.start().catch((err) => logger.error('BOX_SERVER_START_FAILED', { err }));
 bootStatus.reach('api_started');
+bootStatus.begin('attestation_listener_start');
 // A co-editing session can sit open for hours between requests, so it is a pin, not a touch.
 // Keyed off connections that cleared `onAuthenticate` (not BoxServer's pre-auth relay counter) -
 // the ALB accepts /collab upgrades from anywhere with no WAF, so a pre-auth counter would let an
@@ -1333,6 +1343,7 @@ if (poolRuntimeAttestationServer && poolRuntimeAttestationListener) {
   logger.info('pool runtime attestation listener started');
   bootStatus.reach('attestation_listening');
 }
+bootStatus.begin('workers_start');
 
 // One consumer serves every assigned tenant: it resolves each request's keyring/crypto from the
 // message's own orgId (§4.2/§2.2), so wiki + theme synthesis run for the whole pool, not just N=1.

@@ -506,11 +506,16 @@ export function resolveBaseUrl(): string {
   throw new Error('signed inference attestation unavailable');
 }
 
+// Guard slugs, so a boot that stops here is named off-host rather than reported by error class.
+export const inferenceConfigurationErrors = {
+  trustPolicy: 'inference_trust_policy_unavailable',
+  apiKey: 'inference_api_key_unavailable',
+  transport: 'inference_transport_unconfigured',
+} as const;
+
 export function assertInferenceConfigured(): void {
   if (_publicInferenceTrustPolicy) {
-    if (!apiKey()) {
-      throw new Error('inference not configured: set TEE_API_KEY');
-    }
+    if (!apiKey()) throw new Error(inferenceConfigurationErrors.apiKey);
     resolveBaseUrl();
     return;
   }
@@ -519,14 +524,16 @@ export function assertInferenceConfigured(): void {
     return;
   }
 
-  if (!_inferenceTrustPolicy && !(_inferencePolicy && allowsUnverifiedInference())) {
-    currentInferenceTrustPolicy();
+  // Legacy pins alone are not a trust policy: only the signed commissioning marker stages them.
+  if (
+    !_inferenceTrustPolicy &&
+    !(_inferencePolicy && allowsUnverifiedInference()) &&
+    !isTestOnlyUnverifiedInference()
+  ) {
+    throw new Error(inferenceConfigurationErrors.trustPolicy);
   }
-  if (!PROXY_PORT && !apiKey()) {
-    throw new Error('inference not configured: set VSOCK_INFERENCE_PROXY_PORT or TEE_API_KEY');
-  }
+  if (!PROXY_PORT && !apiKey()) throw new Error(inferenceConfigurationErrors.transport);
   resolveBaseUrl();
-  if (_inferenceTrustPolicy) currentInferenceTrustPolicy();
 }
 
 function currentInferenceTrustPolicy(): InferenceTrustPolicyV1 {
