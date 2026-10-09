@@ -33,6 +33,7 @@ import type { NsmAttestationPort } from '../sealing/nsm.js';
 import { verifySignedBootManifestKeyset } from '@folklore/nitro-attestation';
 import type { RecoveryRootInstallationReportV1 } from '@folklore/nitro-attestation';
 import type { GatewayEvidenceComposition } from '../inference/GatewayEvidenceComposition.js';
+import { bootPrepareStepCode } from './boot-prepare-failure.js';
 
 import type { TrustedTimeBindingV1 } from '@folklore/contracts';
 import { GenerationHighWaterTrustedTimeRecordProducer } from '../gate-a/GenerationHighWaterTrustedTimeRecordProducer.js';
@@ -42,6 +43,7 @@ import type {
 } from '../gate-a/GenerationHighWaterTrustedTimeRecordProducer.js';
 
 export const DEFAULT_ENCLAVE_ATTESTATION_PORT = 8101;
+const RUNTIME_ATTESTATION_PREPARE_FAILED = 'runtime_attestation_prepare_failed';
 
 type RuntimeAttestationEnv = Partial<Record<string, string | undefined>>;
 
@@ -266,8 +268,12 @@ async function prepareRuntimeAttestation(
     await composition.prepare();
     return composition;
   } catch (error) {
-    logger.error('RUNTIME_ATTESTATION_PREPARE_FAILED', { errorName: errorName(error) });
-    throw new Error('runtime_attestation_prepare_failed');
+    const code = bootPrepareStepCode(error, RUNTIME_ATTESTATION_PREPARE_FAILED);
+    logger.error('RUNTIME_ATTESTATION_PREPARE_FAILED', {
+      errorName: errorName(error),
+      errorCode: code,
+    });
+    throw new Error(code);
   }
 }
 

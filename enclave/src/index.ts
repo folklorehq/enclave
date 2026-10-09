@@ -178,6 +178,11 @@ import {
   DEVELOPMENT_ENCLAVE_OUTPUT_KEY,
   Ed25519EnclaveOutputAuthenticator,
 } from '@folklore/crypto';
+import { EnclaveBootStatus } from './boot/EnclaveBootStatus.js';
+
+const bootStatus = new EnclaveBootStatus();
+bootStatus.installFatalMonitor();
+bootStatus.reach('node_started');
 
 // route external egress through the parent CONNECT proxy — before any client is
 // built, so undici SDKs pick up the dispatcher (loopback bypasses it, keeping AWS/inference).
@@ -566,6 +571,7 @@ let runtimeAttestation =
     getRuntimeDatabaseReceipt: () => runtimeDatabaseLease.receipt(),
     logger: logger.child({ component: 'attestation' }),
   }) ?? null;
+bootStatus.reach('attestation_configured');
 runtimeAttestation = await initializeRuntimeAttestationForBoot(
   runtimeAttestation,
   async (prepared) => {
@@ -649,6 +655,7 @@ runtimeAttestation = await initializeRuntimeAttestationForBoot(
   },
   logger.child({ component: 'attestation' }),
 );
+bootStatus.reach('attestation_prepared');
 const poolRuntimeAttestation = isSharedPool
   ? new PoolRuntimeAttestationService(
       () => ({
@@ -680,6 +687,7 @@ if (verifiedBootManifest?.providerInferenceTrustPolicy) {
   setInferenceTrustPolicy(verifiedBootManifest?.inferenceTrustPolicy);
 }
 assertInferenceConfigured();
+bootStatus.reach('inference_configured');
 await loadAgentToken();
 
 const outputAuthenticator = createEnclaveOutputAuthenticator();
@@ -1042,6 +1050,7 @@ async function refreshAssignments(): Promise<void> {
 }
 
 await refreshAssignments();
+bootStatus.reach('assignments_loaded');
 void tenantRequestQuiescence.runForever();
 assertInferenceConfigured();
 const ASSIGNMENT_REFRESH_INTERVAL_MS = 30_000;
@@ -1304,6 +1313,7 @@ try {
 // The API container is the single source of the collab port it binds; absent it, there is none to reach.
 if (apiContainer) boxServer.attachApi(apiContainer.app.fetch, apiContainer.collabPort);
 await boxServer.start().catch((err) => logger.error('BOX_SERVER_START_FAILED', { err }));
+bootStatus.reach('api_started');
 // A co-editing session can sit open for hours between requests, so it is a pin, not a touch.
 // Keyed off connections that cleared `onAuthenticate` (not BoxServer's pre-auth relay counter) -
 // the ALB accepts /collab upgrades from anywhere with no WAF, so a pre-auth counter would let an
@@ -1323,6 +1333,7 @@ if (!isSharedPool) {
 if (poolRuntimeAttestationServer && poolRuntimeAttestationListener) {
   await poolRuntimeAttestationServer.start(poolRuntimeAttestationListener);
   logger.info('pool runtime attestation listener started');
+  bootStatus.reach('attestation_listening');
 }
 
 // One consumer serves every assigned tenant: it resolves each request's keyring/crypto from the
@@ -1523,6 +1534,7 @@ process.on('SIGTERM', () => void shutdown());
 process.on('SIGINT', () => void shutdown());
 
 void drainerRef.current.runForever();
+bootStatus.reach('ready');
 
 function unavailableHighWaterTransport(): DurableGenerationHighWaterTransport {
   const unavailable = (): Promise<never> =>

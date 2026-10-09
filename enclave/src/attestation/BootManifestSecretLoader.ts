@@ -3,6 +3,7 @@ import {
   type BootManifestSecretReference,
 } from '@folklore/contracts/enclave-attestation';
 import type { VerifiedBootManifest } from './BootManifestVerifier.js';
+import { readFailureCode } from './read-failure-code.js';
 
 const DEFAULT_MAX_SECRET_VALUE_BYTES = 64 * 1024;
 
@@ -13,6 +14,7 @@ export const bootManifestSecretLoadErrors = {
   version: 'boot_manifest_secret_version_invalid',
   value: 'boot_manifest_secret_value_invalid',
   bound: 'boot_manifest_secret_value_too_large',
+  decrypt: 'boot_manifest_secret_decrypt_failed',
 } as const;
 
 export interface SecretsManagerSecretValuePort {
@@ -130,8 +132,8 @@ export class BootManifestSecretLoader {
         secretId: reference.arn,
         versionId: reference.versionId,
       });
-    } catch {
-      throw new Error(bootManifestSecretLoadErrors.missing);
+    } catch (error) {
+      throw new Error(readFailureCode(error, bootManifestSecretLoadErrors.missing));
     }
   }
 
@@ -179,8 +181,8 @@ export class BootManifestSecretLoader {
           PARAMETER_ARN: `arn:aws:ssm:${manifest.awsRegion}:${manifest.awsAccountId}:parameter${reference.path}`,
         },
       });
-    } catch {
-      throw new Error(bootManifestSecretLoadErrors.missing);
+    } catch (error) {
+      throw new Error(readFailureCode(error, bootManifestSecretLoadErrors.decrypt));
     }
     try {
       const value = this.validValue(plaintext.toString('utf8'));
@@ -200,8 +202,8 @@ export class BootManifestSecretLoader {
           ? { name: reference.path, version: reference.version }
           : { name: reference.path, version: reference.version, withDecryption },
       );
-    } catch {
-      throw new Error(bootManifestSecretLoadErrors.missing);
+    } catch (error) {
+      throw new Error(readFailureCode(error, bootManifestSecretLoadErrors.missing));
     }
   }
 

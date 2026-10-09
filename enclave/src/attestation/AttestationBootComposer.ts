@@ -9,6 +9,7 @@ import type {
   RuntimeAttestationListener,
   RuntimeAttestationServerOptions,
 } from './RuntimeAttestationServer.js';
+import { bootPrepareStepCode } from './boot-prepare-failure.js';
 
 export const attestationBootComposerErrors = {
   prepareFailed: 'attestation_boot_prepare_failed',
@@ -45,8 +46,8 @@ export class AttestationBootComposer {
     this.enabledGeneration = undefined;
     try {
       return (await this.bootState.prepareManifest(signedInput, runtimeIdentity)).manifest;
-    } catch {
-      throw new Error(attestationBootComposerErrors.prepareFailed);
+    } catch (error) {
+      throw new Error(bootPrepareStepCode(error, attestationBootComposerErrors.prepareFailed));
     }
   }
 

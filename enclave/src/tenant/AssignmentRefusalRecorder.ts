@@ -1,9 +1,10 @@
-import { contentFreeErrorType, isFailureCodeSlug, type Cache } from '@folklore/core';
+import type { Cache } from '@folklore/core';
 import {
   assignmentRefusalSchema,
   poolAssignmentRefusalKey,
   type AssignmentRefusal,
 } from '@folklore/contracts';
+import { guardFailureCode } from '../boot/guard-failure-code.js';
 
 const UNNAMED_REFUSAL_CODE = 'assignment_refresh_failed';
 
@@ -41,16 +42,7 @@ export class AssignmentRefusalRecorder {
       poolId: this.poolId,
       generation: manifest.generation,
       digest: manifest.digest,
-      code: this.code(error),
+      code: guardFailureCode(error, UNNAMED_REFUSAL_CODE),
     });
-  }
-
-  // A message is relayed only when it is already a guard slug; anything else may echo a value.
-  private code(error: unknown): string {
-    if (!(error instanceof Error)) return UNNAMED_REFUSAL_CODE;
-    if (isFailureCodeSlug(error.message)) return error.message;
-    const errorType = contentFreeErrorType(error);
-    const named = errorType === null ? null : `${UNNAMED_REFUSAL_CODE}_${errorType}`;
-    return isFailureCodeSlug(named) ? named : UNNAMED_REFUSAL_CODE;
   }
 }

@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import type { BootManifestCoordinatorResult } from './BootManifestCoordinator.js';
 import type { LoadedBootManifestSecret } from './BootManifestSecretLoader.js';
 import type { BootManifestRuntimeIdentity, VerifiedBootManifest } from './BootManifestVerifier.js';
+import { ATTESTATION_BOOT_CHECKPOINT_STORE_CODES } from './checkpoint-store-codes.js';
+import { readFailureCode } from './read-failure-code.js';
 
 type DeepReadonly<T> = T extends (...args: never[]) => unknown
   ? T
@@ -11,12 +13,16 @@ type DeepReadonly<T> = T extends (...args: never[]) => unknown
       ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
       : T;
 
+const checkpointStoreCodes = new Set<string>(ATTESTATION_BOOT_CHECKPOINT_STORE_CODES);
+
 export const attestationBootStateErrors = {
   notVerified: 'attestation_boot_not_verified',
   kmsNotReady: 'attestation_boot_kms_not_ready',
   checkpointInvalid: 'attestation_boot_checkpoint_invalid',
   checkpointSuperseded: 'attestation_boot_checkpoint_superseded',
   checkpointConflict: 'attestation_boot_checkpoint_conflict',
+  checkpointReadFailed: 'attestation_boot_checkpoint_read_failed',
+  checkpointWriteFailed: 'attestation_boot_checkpoint_write_failed',
 } as const;
 
 type AttestationBootStateError =
@@ -147,8 +153,8 @@ export class AttestationBootState {
     let checkpoint: unknown;
     try {
       checkpoint = await this.store.read();
-    } catch {
-      throw this.failure(attestationBootStateErrors.checkpointInvalid);
+    } catch (error) {
+      throw this.storeFailure(error, attestationBootStateErrors.checkpointReadFailed);
     }
     if (checkpoint === null) return null;
     try {
@@ -161,8 +167,8 @@ export class AttestationBootState {
   private async writeCheckpoint(checkpoint: AttestationBootCheckpoint): Promise<void> {
     try {
       await this.store.write(checkpoint);
-    } catch {
-      throw this.failure(attestationBootStateErrors.checkpointInvalid);
+    } catch (error) {
+      throw this.storeFailure(error, attestationBootStateErrors.checkpointWriteFailed);
     }
   }
 
@@ -322,6 +328,14 @@ export class AttestationBootState {
 
   private failure(code: AttestationBootStateError): Error {
     return new Error(code);
+  }
+
+  // The store's own guards are a closed set; any other failure is named only by the step it hit.
+  private storeFailure(error: unknown, fallback: AttestationBootStateError): Error {
+    if (error instanceof Error && checkpointStoreCodes.has(error.message)) {
+      return new Error(error.message);
+    }
+    return new Error(readFailureCode(error, fallback));
   }
 }
 
