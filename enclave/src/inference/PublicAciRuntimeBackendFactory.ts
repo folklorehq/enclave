@@ -149,6 +149,7 @@ export function createPublicAciRuntimeBackendFactory(
       // Per-operation pin uses the same bounded renewal grace as the freshness refresh.
       durable: installedSnapshotHighWater(options.freshness.highWater, snapshot.durableCheckpoint),
       trustedTimeContext,
+      providerPolicyGeneration: policy.generation,
     });
     remainingBudget();
     const transport = makeTransport({

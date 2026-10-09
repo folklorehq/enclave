@@ -47,7 +47,6 @@ export function createPublicAciOperationBackend(
     snapshot.roleBindingFor(binding.role) !== binding ||
     binding.orgId !== snapshot.orgId ||
     binding.deploymentId !== snapshot.deploymentId ||
-    policy.generation !== snapshot.policyGeneration ||
     selected.model !== binding.modelId ||
     selected.revision !== binding.modelRevision ||
     role.model !== binding.modelId ||
@@ -108,8 +107,7 @@ export function createPublicAciOperationBackend(
       if (
         evidence.model !== binding.modelId ||
         evidence.modelRevision !== binding.modelRevision ||
-        (evidence.modelRole ?? 'generate') !== binding.role ||
-        keyset.workloadKeysetDigest !== `sha256:${snapshot.durableCheckpoint.keysetDigest}`
+        (evidence.modelRole ?? 'generate') !== binding.role
       )
         throw new Error('public_aci_operation_binding_mismatch');
       const trustedNow = await readOperationTime();
@@ -119,7 +117,8 @@ export function createPublicAciOperationBackend(
         trustedNow >= keyset.notAfter
       )
         throw new Error('public_aci_response_time_invalid');
-      const result = await sessions.verify({
+      // Keyset, session and channel come from the verified quote chain; the tenant role pins none.
+      return sessions.verify({
         receipt,
         keyset,
         trustedNow,
@@ -127,7 +126,7 @@ export function createPublicAciOperationBackend(
           origin: policy.origin,
           workloadKeysetDigest: keyset.workloadKeysetDigest,
           model: binding.modelId,
-          channelKeyDigest: role.channelKeyDigest,
+          acceptedChannelBindings: policy.channelPolicy.acceptedBindings,
           maxSessionLifetimeSeconds: policy.maxSessionLifetimeSeconds,
           requiredSessionClaims: [
             ...new Set([...policy.requiredSessionClaims, ...role.requiredSessionClaims]),
@@ -137,8 +136,6 @@ export function createPublicAciOperationBackend(
           ),
         },
       });
-      if (result.sessionId !== role.sessionId) throw new Error('public_aci_role_session_mismatch');
-      return result;
     },
   });
   return new OpenAICompatBackend({

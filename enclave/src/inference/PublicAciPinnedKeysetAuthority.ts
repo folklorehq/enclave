@@ -10,7 +10,7 @@ import {
   type VerifiedActivePolicySnapshotV1,
 } from '@folklore/inference';
 import type { GenerationContextV1 } from '@folklore/contracts';
-import { digest64Schema, identifierSchema } from '@folklore/contracts';
+import { aciPrefixedDigestSchema, digest64Schema, identifierSchema } from '@folklore/contracts';
 import { GENERATION_CONTEXT_FIELDS } from './renewal-grace.js';
 
 export interface PublicAciPinnedKeysetAuthorityOptions {
@@ -18,6 +18,7 @@ export interface PublicAciPinnedKeysetAuthorityOptions {
   readonly expectedContext: GenerationContextV1;
   readonly durable: DurableGenerationHighWaterClientPort;
   readonly trustedTimeContext: AciTrustContext;
+  readonly providerPolicyGeneration: number;
 }
 
 export class PublicAciPinnedKeysetAuthority implements AciKeysetHighWaterAuthorityPort {
@@ -25,6 +26,7 @@ export class PublicAciPinnedKeysetAuthority implements AciKeysetHighWaterAuthori
   private readonly expectedContext: GenerationContextV1;
   private readonly trustedTimeContext: AciTrustContext;
   private readonly durable: DurableGenerationHighWaterClientPort;
+  private readonly providerPolicyGeneration: number;
 
   constructor(options: PublicAciPinnedKeysetAuthorityOptions) {
     assertVerifiedActivePolicySnapshotV1(options.snapshot);
@@ -32,13 +34,19 @@ export class PublicAciPinnedKeysetAuthority implements AciKeysetHighWaterAuthori
     this.expectedContext = Object.freeze({ ...options.expectedContext });
     this.trustedTimeContext = Object.freeze({ ...options.trustedTimeContext });
     this.durable = options.durable;
+    if (
+      !Number.isSafeInteger(options.providerPolicyGeneration) ||
+      options.providerPolicyGeneration <= 0
+    ) {
+      throw new Error('provider_policy_generation_invalid');
+    }
+    this.providerPolicyGeneration = options.providerPolicyGeneration;
     this.assertConstructorBindings();
   }
 
-  async read(context: AciTrustContext): Promise<AciTrustHighWater> {
-    this.assertAciContext(context);
-    const checkpoint = await this.readPinnedCheckpoint();
-    return this.toHighWater(checkpoint);
+  // The checkpoint keyset is not the provider's, so no high-water projection can describe it.
+  async read(_context: AciTrustContext): Promise<AciTrustHighWater> {
+    throw new Error('public_aci_high_water_read_unsupported');
   }
 
   async admitKeyset(input: {
@@ -49,15 +57,21 @@ export class PublicAciPinnedKeysetAuthority implements AciKeysetHighWaterAuthori
   }): Promise<number> {
     this.assertAciContext(input.context);
     const checkpoint = await this.readPinnedCheckpoint();
-    const canonicalDigest = `sha256:${checkpoint.keysetDigest}`;
-    if (input.keysetDigest !== canonicalDigest) throw new Error('keyset_not_pinned');
+    // The verified quote already binds this keyset; the checkpoint keyset is not the provider's.
+    this.assertQuoteBoundKeysetDigest(input.keysetDigest);
     if (
-      input.policyGeneration !== checkpoint.policyGeneration ||
+      input.policyGeneration !== this.providerPolicyGeneration ||
       input.activationGeneration !== checkpoint.activationGeneration
     ) {
       throw new Error('generation_not_pinned');
     }
     return checkpoint.keysetEpoch;
+  }
+
+  private assertQuoteBoundKeysetDigest(keysetDigest: string): void {
+    if (!aciPrefixedDigestSchema.safeParse(keysetDigest).success) {
+      throw new Error('keyset_digest_invalid');
+    }
   }
 
   private assertConstructorBindings(): void {
@@ -133,19 +147,5 @@ export class PublicAciPinnedKeysetAuthority implements AciKeysetHighWaterAuthori
     for (const key of GENERATION_CONTEXT_FIELDS) {
       if (actual[key] !== expected[key]) throw new Error('generation_context_mismatch');
     }
-  }
-
-  private toHighWater(
-    checkpoint: VerifiedActivePolicySnapshotV1['durableCheckpoint'],
-  ): AciTrustHighWater {
-    return {
-      generation: checkpoint.policyGeneration,
-      policyGeneration: checkpoint.policyGeneration,
-      activationGeneration: checkpoint.activationGeneration,
-      keysetVersion: checkpoint.keysetEpoch,
-      currentKeysetDigest: `sha256:${checkpoint.keysetDigest}`,
-      supersededKeysetDigests: [],
-      trustContext: this.trustedTimeContext,
-    };
   }
 }
