@@ -11,6 +11,7 @@ import {
   type MintedMasterKey,
 } from '../sealing/seal.js';
 import { readSealedBlob, writeSealedBlob } from '../sealing/sealed-blob-store.js';
+import { canonicalKmsKeyArn, type KmsKeyScope } from '../sealing/kms-key-arn.js';
 import { assertRecoveryConfigured, sealRecoveryMnemonic } from '../sealing/recovery.js';
 import { HnswStore } from '../hnsw/index.js';
 import { Pipeline } from '../pipeline/index.js';
@@ -66,6 +67,8 @@ export interface TenantContextFactoryDeps {
   signedRecoveryPubkey?: () => string | undefined;
   /** The tenant's storage key ARN from the verified boot manifest; the identity's env value must agree. */
   signedStorageKeyArn?: () => string | undefined;
+  /** The account and region of the verified boot manifest; a bare tenant key id resolves only there. */
+  signedKmsScope?: () => KmsKeyScope | undefined;
   /** Test seam: replaces the AWS SDK v2 KMS client constructor the ESDK keyring uses. */
   kmsClientProvider?: (region?: string) => AWS.KMS;
   sealedBlobBucket: string;
@@ -95,7 +98,8 @@ const VERIFIED_BOOT_PROOF_ERROR = 'verified boot proof failed';
 export class TenantContextFactory {
   constructor(private readonly deps: TenantContextFactoryDeps) {}
 
-  async build(identity: TenantIdentity): Promise<TenantContext> {
+  async build(assignedIdentity: TenantIdentity): Promise<TenantContext> {
+    const identity = this.withKmsKeyArns(assignedIdentity);
     const sealedBlobBucket = this.resolveBucket(
       identity.sealedBlobBucket ?? '',
       this.deps.sealedBlobBucket,
@@ -299,6 +303,18 @@ export class TenantContextFactory {
         ContentType: 'application/json',
       }),
     );
+  }
+
+  private withKmsKeyArns(identity: TenantIdentity): TenantIdentity {
+    const scope = this.deps.signedKmsScope?.();
+    return {
+      ...identity,
+      kmsKeyId: canonicalKmsKeyArn(identity.kmsKeyId, scope),
+      storageKeyHistory: identity.storageKeyHistory.map((entry) => ({
+        version: entry.version,
+        storageKeyId: canonicalKmsKeyArn(entry.storageKeyId, scope),
+      })),
+    };
   }
 
   private resolveBucket(identityBucket: string, fallbackBucket: string): string {

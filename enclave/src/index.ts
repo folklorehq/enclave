@@ -324,6 +324,13 @@ const tenantFactory = new TenantContextFactory({
   processedOutputsBucket: PROCESSED_OUTPUTS_BUCKET,
   signedRecoveryPubkey: () => (isSharedPool ? undefined : verifiedBootManifest?.recoveryPubkey),
   signedStorageKeyArn: () => (isSharedPool ? undefined : verifiedBootManifest?.storageKeyArn),
+  signedKmsScope: () =>
+    verifiedBootManifest
+      ? {
+          awsAccountId: verifiedBootManifest.awsAccountId,
+          awsRegion: verifiedBootManifest.awsRegion,
+        }
+      : undefined,
   activePolicySnapshotFor: (tenantId) => activePolicySnapshotFor(tenantId),
   enforceTenantPolicy: isSharedPool,
   activePolicyFreshnessFor: (tenantId) => activePolicyFreshnessFor(tenantId),
