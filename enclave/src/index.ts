@@ -180,6 +180,7 @@ import {
   Ed25519EnclaveOutputAuthenticator,
 } from '@folklore/crypto';
 import { EnclaveBootStatus } from './boot/EnclaveBootStatus.js';
+import { enclaveOutputSignerFailureCode } from './boot/enclave-output-signer-failure-code.js';
 import { bootModuleLoadGuard } from './boot/boot-module-load-guard.js';
 import { InferenceApiKeyLoader } from './boot/InferenceApiKeyLoader.js';
 
@@ -1534,8 +1535,8 @@ function createEnclaveOutputAuthenticator(): Ed25519EnclaveOutputAuthenticator {
       publicKeySpki: key.publicKeySpki,
       privateKeyPkcs8: runtimeAttestation.secretValue(key.privateKeySecretReferenceId),
     });
-  } catch {
-    throw new Error('enclave_output_signer_invalid');
+  } catch (error) {
+    throw new Error(enclaveOutputSignerFailureCode(error));
   }
 }
 
