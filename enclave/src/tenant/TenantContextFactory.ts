@@ -27,6 +27,7 @@ import {
   type InferenceModel,
 } from '../inference/CachedInference.js';
 import { S3LlmCache } from '../inference/S3LlmCache.js';
+import type { LlmCacheNamer } from '../inference/llm-cache.js';
 import {
   TenantPolicyBoundInference,
   type TenantPolicyFreshnessPort,
@@ -121,8 +122,12 @@ export class TenantContextFactory {
         keyring,
         processedBucket,
         identity.tenantId,
-        this.buildInference(keyring, identity.tenantId, processedBucket, () =>
-          context.current?.activePolicySnapshot(),
+        this.buildInference(
+          keyring,
+          identity.tenantId,
+          processedBucket,
+          () => context.current?.activePolicySnapshot(),
+          this.lateBoundNamer(context),
         ),
       );
       const tenantContext = new TenantContext(
@@ -153,12 +158,14 @@ export class TenantContextFactory {
     tenantId: string,
     processedBucket: string,
     snapshotProvider: TenantPolicySnapshotProvider,
+    namer: LlmCacheNamer,
   ): InferenceModel {
     const cache = new S3LlmCache({
       s3: this.deps.s3,
       crypto: new EnclaveCrypto(keyring, singleVersionSealedContentKeyring(keyring)),
       bucket: processedBucket,
       orgId: tenantId,
+      namer,
     });
     const cached = new CachedInference(phalaInference, cache, {
       embedModel: inferenceModel('embed'),
@@ -177,6 +184,16 @@ export class TenantContextFactory {
       backendForVerifiedBinding: this.deps.activePolicyBackendFor?.(tenantId),
       requireBindingForwarding: true,
     });
+  }
+
+  // The pipeline is built before its context, so names resolve through it at call time, fail-closed.
+  private lateBoundNamer(context: { current?: TenantContext }): LlmCacheNamer {
+    return {
+      llmCacheName: (cacheKey) => {
+        if (!context.current) throw new Error('llm_cache_namer_unbound');
+        return context.current.llmCacheName(cacheKey);
+      },
+    };
   }
 
   // The content keyring is built from the tenant's STORAGE key, never the master key: the master

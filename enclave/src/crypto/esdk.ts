@@ -53,12 +53,10 @@ export interface WikiFeedbackRef {
   blockId: string;
 }
 
-// Content-addressed LLM-output cache (determinism #1): outputs are decrypted-content-derived, so
-// the blob is sealed to the fact key bound to (org, cacheKey) — the cacheKey is the content-hash S3
-// suffix, so a blob relocated/overwritten onto another key fails to decrypt.
+// The ESDK header is plaintext, so the binding carries the tenant-keyed name, never the input digest.
 export interface LlmCacheRef {
   orgId: string;
-  cacheKey: string;
+  objectName: string;
 }
 
 // The `code` connector's per-repo pull cursor carries raw file paths (content-derived), so it is
@@ -413,7 +411,7 @@ export class EnclaveCrypto {
   encryptLlmCache(plaintext: Buffer, ref: LlmCacheRef): Promise<Buffer> {
     return this.seal(plaintext, {
       orgId: ref.orgId,
-      cacheKey: ref.cacheKey,
+      cacheKey: ref.objectName,
       purpose: LLM_CACHE_PURPOSE,
     });
   }
@@ -421,7 +419,7 @@ export class EnclaveCrypto {
   decryptLlmCache(ciphertext: Buffer, expected: LlmCacheRef): Promise<Buffer> {
     return this.open(ciphertext, LLM_CACHE_PURPOSE, {
       orgId: expected.orgId,
-      cacheKey: expected.cacheKey,
+      cacheKey: expected.objectName,
     });
   }
 

@@ -1,8 +1,15 @@
 import { hkdfSync, createPrivateKey, createPublicKey, KeyObject } from 'crypto';
 import { entropyToMnemonic } from 'bip39';
 
+const LLM_CACHE_NAME_KEY_PURPOSE = 'llm-cache-name-v1';
+
 export function deriveKey(masterKey: Buffer, purpose: string, length = 32): Buffer {
   return Buffer.from(hkdfSync('sha256', masterKey, Buffer.alloc(0), purpose, length));
+}
+
+// Keys the cache object names so a host that can list the bucket cannot test guesses against them.
+export function deriveLlmCacheNameKey(masterKey: Buffer): Buffer {
+  return deriveKey(masterKey, LLM_CACHE_NAME_KEY_PURPOSE);
 }
 
 // BIP39 24-word recovery phrase; sealed to the customer's key at first boot, never held by Folklore.

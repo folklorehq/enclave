@@ -4,7 +4,8 @@ import type { KmsKeyringNode } from '@aws-crypto/client-node';
 import { EnclaveCrypto, type SealedContentKeyringConfig } from '../crypto/esdk.js';
 import type { HnswStore } from '../hnsw/index.js';
 import type { Pipeline } from '../pipeline/index.js';
-import { deriveIngestKeypair } from '../sealing/keygen.js';
+import { llmCacheObjectName, type LlmCacheNamer } from '../inference/llm-cache.js';
+import { deriveIngestKeypair, deriveLlmCacheNameKey } from '../sealing/keygen.js';
 
 // Thrown when a torn-down tenant's key material is touched — a removed co-tenant fails closed rather
 // than decrypting with wiped material (shared-tier design §2.2 point 5). Content-free: id only.
@@ -19,9 +20,10 @@ export class TenantContextZeroizedError extends Error {
 // Every crypto/storage op takes its tenant from an explicit context like this rather than a
 // process-global, and each context owns a single-CMK keyring — never a union keyring — so tenant
 // A's ciphertext can never decrypt under tenant B's key material.
-export class TenantContext {
+export class TenantContext implements LlmCacheNamer {
   private cryptoOrNull: EnclaveCrypto | null;
   private ingestKeyOrNull: KeyObject | null;
+  private llmCacheNameKeyOrNull: Buffer | null;
   private keyringOrNull: KmsKeyringNode | null;
   private hnswOrNull: HnswStore | null;
   private pipelineOrNull: Pipeline | null;
@@ -48,6 +50,7 @@ export class TenantContext {
     this.pipelineOrNull = pipeline;
     this.cryptoOrNull = new EnclaveCrypto(keyring, sealedContentKeyrings);
     this.ingestKeyOrNull = deriveIngestKeypair(masterKey).privateKey;
+    this.llmCacheNameKeyOrNull = deriveLlmCacheNameKey(masterKey);
   }
 
   get crypto(): EnclaveCrypto {
@@ -58,6 +61,11 @@ export class TenantContext {
   get ingestPrivateKey(): KeyObject {
     if (!this.ingestKeyOrNull) throw new TenantContextZeroizedError(this.tenantId);
     return this.ingestKeyOrNull;
+  }
+
+  llmCacheName(cacheKey: string): string {
+    if (!this.llmCacheNameKeyOrNull) throw new TenantContextZeroizedError(this.tenantId);
+    return llmCacheObjectName(this.llmCacheNameKeyOrNull, cacheKey);
   }
 
   get keyring(): KmsKeyringNode {
@@ -99,15 +107,11 @@ export class TenantContext {
     return { crypto: this.crypto, bucket: this.processedOutputsBucket, deploymentId };
   }
 
-  // §2.2 point 5 (crypto-shred boundary): teardown wipes the decrypted master secret from RAM,
-  // frees the HNSW index (its decrypted embeddings are content, invariant #2), and drops every
-  // key-bearing handle — crypto, ingest key, keyring, hnsw, pipeline — behind a fail-closed getter.
-  // So after zeroize NO path on the context can encrypt/decrypt or expose the tenant's content, not
-  // even a retained object reference; the pipeline/keyring carry their own EnclaveCrypto, so it is
-  // not enough to null crypto alone. KeyObject/KMS keyring hold no zeroable plaintext (dropping is
-  // all that is possible); the raw master secret is the one plaintext buffer we own, and it is filled.
+  // §2.2 point 5: fill owned key buffers and null every key-bearing handle behind its getter.
   zeroize(): void {
     this.masterKey.fill(0);
+    this.llmCacheNameKeyOrNull?.fill(0);
+    this.llmCacheNameKeyOrNull = null;
     const hnsw = this.hnswOrNull;
     this.cryptoOrNull = null;
     this.ingestKeyOrNull = null;

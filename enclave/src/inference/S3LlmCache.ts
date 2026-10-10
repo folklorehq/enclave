@@ -2,26 +2,27 @@ import { GetObjectCommand, NoSuchKey, PutObjectCommand, type S3Client } from '@a
 import type { Cache } from '@folklore/core';
 import { InProcessCache } from '@folklore/cache';
 import type { EnclaveCrypto } from '../crypto/esdk.js';
+import type { LlmCacheNamer } from './llm-cache.js';
 
 export interface S3LlmCacheDeps {
   s3: S3Client;
   crypto: EnclaveCrypto;
   bucket: string;
   orgId: string;
+  namer: LlmCacheNamer;
   // Bound on close() waiting out in-flight old-key ops; on expiry close still shreds the RAM front
   // and rejects so teardown propagates fail-closed (replacement assignment refused).
   closeQuiesceTimeoutMs?: number;
 }
 
 const LLM_CACHE_PREFIX = 'llm-cache/';
+// Keyed names live under v2/; purging the unread legacy objects is not yet wired.
+const KEYED_NAME_SEGMENT = 'v2/';
 // ~4096-dim embedding JSON (~40KB) × this bound caps the run-local RAM front near 40MB per org.
 const RAM_MAX_ENTRIES = 1000;
 const CLOSE_QUIESCE_TIMEOUT_MS = 30_000;
 
-// Durable, per-org LLM-output cache: ESDK-sealed in S3 exactly like `facts/`/`hnsw/`, bound to
-// (org, cacheKey) so a blob relocated to another org or overwritten onto another key fails to
-// decrypt. A run-local RAM LRU keyed by the org-namespaced object key fronts S3, so a
-// shared-pool instance can't serve org A's value to org B even in RAM.
+// Objects are named by the tenant's keyed HMAC, so a host that lists the bucket sees no input digest.
 export class S3LlmCache implements Cache {
   private readonly ram = new InProcessCache(RAM_MAX_ENTRIES);
   private isClosed = false;
@@ -38,11 +39,12 @@ export class S3LlmCache implements Cache {
   async get<T>(key: string): Promise<T | null> {
     return this.withLease(async () => {
       this.assertOpen();
-      const objectKey = this.objectKey(key);
+      const name = this.deps.namer.llmCacheName(key);
+      const objectKey = this.objectKey(name);
       const cached = await this.ram.get<string>(objectKey);
       this.assertOpen();
       if (cached !== null) return cached as T;
-      const blob = await this.fetch(key);
+      const blob = await this.fetch(name);
       this.assertOpen();
       if (blob === null) return null;
       await this.ram.set(objectKey, blob);
@@ -54,17 +56,18 @@ export class S3LlmCache implements Cache {
     await this.withLease(async () => {
       this.assertOpen();
       const text = value as string;
-      await this.ram.set(this.objectKey(key), text);
+      const name = this.deps.namer.llmCacheName(key);
+      await this.ram.set(this.objectKey(name), text);
       this.assertOpen();
       const ciphertext = await this.deps.crypto.encryptLlmCache(Buffer.from(text, 'utf8'), {
         orgId: this.deps.orgId,
-        cacheKey: key,
+        objectName: name,
       });
       this.assertOpen();
       await this.deps.s3.send(
         new PutObjectCommand({
           Bucket: this.deps.bucket,
-          Key: this.objectKey(key),
+          Key: this.objectKey(name),
           Body: ciphertext.toString('base64'),
           ContentType: 'text/plain',
         }),
@@ -80,7 +83,7 @@ export class S3LlmCache implements Cache {
   async del(...keys: string[]): Promise<number> {
     return this.withLease(async () => {
       this.assertOpen();
-      return this.ram.del(...keys.map((key) => this.objectKey(key)));
+      return this.ram.del(...keys.map((key) => this.objectKey(this.deps.namer.llmCacheName(key))));
     });
   }
 
@@ -97,10 +100,10 @@ export class S3LlmCache implements Cache {
     await this.ram.close();
   }
 
-  private async fetch(key: string): Promise<string | null> {
+  private async fetch(name: string): Promise<string | null> {
     try {
       const obj = await this.deps.s3.send(
-        new GetObjectCommand({ Bucket: this.deps.bucket, Key: this.objectKey(key) }),
+        new GetObjectCommand({ Bucket: this.deps.bucket, Key: this.objectKey(name) }),
       );
       this.assertOpen();
       const raw = await obj.Body!.transformToByteArray();
@@ -108,7 +111,7 @@ export class S3LlmCache implements Cache {
       const ciphertext = Buffer.from(Buffer.from(raw).toString('utf8'), 'base64');
       const plaintext = await this.deps.crypto.decryptLlmCache(ciphertext, {
         orgId: this.deps.orgId,
-        cacheKey: key,
+        objectName: name,
       });
       this.assertOpen();
       return plaintext.toString('utf8');
@@ -118,8 +121,8 @@ export class S3LlmCache implements Cache {
     }
   }
 
-  private objectKey(key: string): string {
-    return `${LLM_CACHE_PREFIX}${this.deps.orgId}/${key}`;
+  private objectKey(name: string): string {
+    return `${LLM_CACHE_PREFIX}${this.deps.orgId}/${KEYED_NAME_SEGMENT}${name}`;
   }
 
   private assertOpen(): void {

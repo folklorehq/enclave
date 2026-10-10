@@ -5,6 +5,7 @@ import { SQSClient } from '@aws-sdk/client-sqs';
 import { SSMClient, PutParameterCommand } from '@aws-sdk/client-ssm';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { awsClientTransport } from './aws/aws-transport.js';
+import { TenantInferenceMemo } from './tenant/TenantInferenceMemo.js';
 import { TenantContextFactory } from './tenant/TenantContextFactory.js';
 import { TenantRegistry } from './tenant/tenant-registry.js';
 import { TenantGenerationRegistry } from './tenant/TenantGenerationRegistry.js';
@@ -64,7 +65,6 @@ import {
   CachedInference,
   type InferenceModel,
 } from './inference/CachedInference.js';
-import { S3LlmCache } from './inference/S3LlmCache.js';
 import {
   TenantPolicyBoundInference,
   type TenantPolicyFreshnessPort,
@@ -374,7 +374,8 @@ const assignmentApplier = new TenantAssignmentApplier(
     const teardown = [
       drainerRef.current?.evictTenant(tenantId),
       synthesisConsumer?.evictTenant(tenantId),
-      evictAnswerInference?.(tenantId),
+      // Answers admitted before the fence can memoize again; evict after the drain.
+      requestDrain.then(() => evictAnswerInference?.(tenantId)),
       apiContainer?.evictCollabTenant(tenantId),
     ].filter((result): result is Promise<void> => result !== undefined);
     try {
@@ -402,7 +403,8 @@ const assignmentApplier = new TenantAssignmentApplier(
           requestDrain,
           drainerRef.current?.evictTenant(tenantId),
           synthesisConsumer?.evictTenant(tenantId),
-          evictAnswerInference?.(tenantId),
+          // Answers admitted before the fence can memoize again; evict after the drain.
+          requestDrain.then(() => evictAnswerInference?.(tenantId)),
           apiContainer?.evictCollabTenant(tenantId),
         ].filter((result): result is Promise<void> => result !== undefined),
       );
@@ -1180,28 +1182,19 @@ try {
   // a repeated question over an unchanged fact set replays without a fresh TEE call. Resolved PER
   // REQUEST from the answer's orgId (§4.2) — never a boot-time context — so the cache blob is sealed
   // and read under the requesting tenant's own key/orgId AAD and can't cross tenants. Memoized per
-  // org (each entry uses only that tenant's crypto), mirroring the synthesis workers' cache. The
-  // S3LlmCache reference is kept alongside the wrapper (not just the InferenceModel) so a tenant
-  // eviction can close its RAM front and drop the entry's hold on that tenant's crypto - see
-  // evictAnswerInference below.
-  const answerInferenceByOrg = new Map<string, { inference: InferenceModel; cache: S3LlmCache }>();
-  const answerInferenceFor = (orgId: string): InferenceModel => {
-    let entry = answerInferenceByOrg.get(orgId);
-    if (!entry) {
-      const tenant = resolveTenant(orgId); // fail-closed (403) on an unassigned org before any keyring
-      const cache = new S3LlmCache({
-        s3,
-        crypto: tenant.crypto,
-        bucket: tenant.processedOutputsBucket || PROCESSED_OUTPUTS_BUCKET,
-        orgId,
-      });
+  // org and rebuilt when the org resolves to a new context, mirroring the synthesis workers' cache.
+  const answerInference = new TenantInferenceMemo<InferenceModel>({
+    s3,
+    resolveTenant,
+    bucketFor: (_orgId, tenant) => tenant.processedOutputsBucket || PROCESSED_OUTPUTS_BUCKET,
+    build: (orgId, tenant, cache) => {
       const cached = new CachedInference(phalaInference, cache, {
         embedModel: inferenceModel('embed'),
         generateModel: inferenceModel('generate'),
         critiqueModel: inferenceModel('critique'),
         promptVersion: ANSWER_CACHE_VERSION,
       });
-      const inference = !POOL_ID
+      return !POOL_ID
         ? cached
         : new TenantPolicyBoundInference(orgId, () => tenant.activePolicySnapshot(), cached, {
             freshnessProvider: () => activePolicyFreshnessFor(orgId),
@@ -1214,19 +1207,12 @@ try {
             backendForVerifiedBinding: activePolicyBackendFor(orgId),
             requireBindingForwarding: true,
           });
-      entry = { inference, cache };
-      answerInferenceByOrg.set(orgId, entry);
-    }
-    return entry.inference;
-  };
+    },
+  });
+  const answerInferenceFor = (orgId: string): InferenceModel => answerInference.get(orgId);
   // A removed tenant's crypto/decrypted-answer RAM cache must not outlive its assignment: zeroize()
-  // only reaches the TenantContext's own handles, not this map's independently-held S3LlmCache.
-  evictAnswerInference = async (tenantId) => {
-    const entry = answerInferenceByOrg.get(tenantId);
-    if (!entry) return;
-    answerInferenceByOrg.delete(tenantId);
-    await entry.cache.close();
-  };
+  // only reaches the TenantContext's own handles, not this memo's independently-held S3LlmCache.
+  evictAnswerInference = (tenantId) => answerInference.evict(tenantId);
   const codebaseSettingsPort = createCodebaseSettingsPort();
   const apiOptions: CreateContainerOptions = {
     // content-touching enclave opens no data-carrying egress — box-API telemetry inert by composition, not by omitting POSTHOG_API_KEY.
