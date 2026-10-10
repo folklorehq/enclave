@@ -43,9 +43,9 @@ export interface NitroDocumentTrustPathPayload {
 
 /** cborg options for an AWS Nitro attestation payload; shared by every decoder of it. */
 export const NITRO_PAYLOAD_DECODE_OPTIONS = {
-  // AWS NSM payload encoding is not minimal; the ES384 COSE signature and AWS chain carry authenticity.
-  strict: false,
-  allowIndefinite: false,
+  strict: true,
+  // AWS NSM emits indefinite-length payload items; the ES384 signature over the exact bytes carries authenticity.
+  allowIndefinite: true,
   allowUndefined: false,
   allowBigInt: false,
   useMaps: true,
