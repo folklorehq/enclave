@@ -51,8 +51,6 @@ import {
   assertInferenceAttestationEcho,
   configureInferenceAttestation,
   configureLocalInferencePolicy,
-  inferenceModel,
-  phalaInference,
   setInferenceTelemetry,
   setInferenceCommissioning,
   setInferenceTrustPolicy,
@@ -60,19 +58,16 @@ import {
   setVerifiedInferenceReceiptSink,
 } from './inference/phala.js';
 import { currentInferenceReceiptContext } from './inference/inference-receipt-context.js';
+import { type InferenceModel } from './inference/CachedInference.js';
 import {
-  ANSWER_CACHE_VERSION,
-  CachedInference,
-  type InferenceModel,
-} from './inference/CachedInference.js';
-import {
-  TenantPolicyBoundInference,
   type TenantPolicyFreshnessPort,
   type TenantPolicyRuntimeEvidencePort,
   type TenantPolicyVerifiedBindingForwarder,
   type TenantPolicyVerifiedBindingBackendFactory,
 } from './inference/TenantPolicyBoundInference.js';
 import { createPublicAciRuntimeBackendFactory } from './inference/PublicAciRuntimeBackendFactory.js';
+import { poolPolicyPortsFrom } from './inference/tenant-inference-builders.js';
+import { TenantPolicyWiring } from './tenant/TenantPolicyWiring.js';
 import { createOperationTrustedTime } from './inference/OperationTrustedTime.js';
 import { NsmTrustedTimeSource } from './inference/NsmTrustedTimeSource.js';
 import { installGlobalEgressDispatcher } from './egress/proxy.js';
@@ -289,16 +284,16 @@ let verifiedBootManifest: VerifiedBootManifest | undefined;
 type LiveTenantPolicySnapshot = TenantPolicySnapshotLike & VerifiedActivePolicySnapshotV1;
 let activePolicySnapshotFor: (tenantId: string) => LiveTenantPolicySnapshot | undefined = () =>
   undefined;
-const evictedPolicyTenants = new Set<string>();
 let activePolicyFreshnessFor: (tenantId: string) => TenantPolicyFreshnessPort | undefined = () =>
   undefined;
-let activePolicyRuntimeEvidenceFor: (
-  tenantId: string,
-) => TenantPolicyRuntimeEvidencePort | undefined = () => undefined;
 let activePolicyBindingForwarderFor: (
   tenantId: string,
 ) => TenantPolicyVerifiedBindingForwarder | undefined = () => undefined;
 const activePolicyProvenanceSource = new ActivePolicyModelProvenanceSource();
+
+function activePolicyRuntimeEvidenceFor(tenantId: string): TenantPolicyRuntimeEvidencePort {
+  return policyWiring.runtimeEvidenceFor(tenantId);
+}
 
 function activePolicyBackendFor(
   tenantId: string,
@@ -390,7 +385,6 @@ const assignmentApplier = new TenantAssignmentApplier(
   undefined,
   DEPLOYMENT_ID,
   (tenantId) => {
-    evictedPolicyTenants.delete(tenantId);
     drainerRef.current?.finishTenantEviction(tenantId);
     synthesisConsumer?.finishTenantEviction(tenantId);
     tenantRequests.activate(tenantId);
@@ -416,7 +410,6 @@ const assignmentApplier = new TenantAssignmentApplier(
     }
   },
   (tenantId) => {
-    evictedPolicyTenants.delete(tenantId);
     drainerRef.current?.finishTenantEviction(tenantId);
     synthesisConsumer?.finishTenantEviction(tenantId);
     tenantRequests.activate(tenantId);
@@ -430,13 +423,20 @@ let liveActivePolicySnapshotVerifier: VerifiedActivePolicySnapshotVerifier | und
 const policySnapshots = new TenantPolicySnapshotRegistry<LiveTenantPolicySnapshot, TenantContext>(
   generationRegistry,
 );
-activePolicySnapshotFor = (tenantId) =>
-  evictedPolicyTenants.has(tenantId) ? undefined : policySnapshots.get(tenantId);
+const policyWiring = new TenantPolicyWiring<LiveTenantPolicySnapshot>({
+  sharedPool: isSharedPool,
+  generations: generationRegistry,
+  snapshots: policySnapshots,
+  attestation: () => runtimeAttestation,
+  bootManifest: () => verifiedBootManifest,
+  bootContext: () => verifiedBootGenerationContext,
+});
+activePolicySnapshotFor = (tenantId) => policyWiring.snapshotFor(tenantId);
 activePolicyFreshnessFor = (tenantId) => {
   const snapshot = activePolicySnapshotFor(tenantId);
   const highWater = durableGenerationHighWaterClient;
   if (!snapshot || !highWater || !runtimeAttestation) return undefined;
-  const expectedContext = () => expectedFreshnessContextFor(tenantId, snapshot);
+  const expectedContext = () => policyWiring.expectedContextFor(tenantId, snapshot);
   const context = expectedContext();
   const trustedTime = createOperationTrustedTime(
     {
@@ -462,27 +462,8 @@ activePolicyFreshnessFor = (tenantId) => {
     trustedTime,
     expectedContext,
     refreshIntervalMs: snapshot.policy.lifetime.admissionLeaseLifetimeMs,
-    evict: () => {
-      evictedPolicyTenants.add(tenantId);
-    },
+    evict: policyWiring.evictFor(tenantId),
   };
-};
-activePolicyRuntimeEvidenceFor = (tenantId) => {
-  const attestation = runtimeAttestation;
-  if (!attestation || attestation.inferenceActivationState().inference !== 'available') {
-    return undefined;
-  }
-  try {
-    const composition = attestation.gatewayEvidenceComposition();
-    return {
-      assertSnapshot: (snapshot: VerifiedActivePolicySnapshotV1) => {
-        if (snapshot.orgId !== tenantId) throw new Error('runtime_evidence_tenant_mismatch');
-        composition.assertSnapshot(snapshot);
-      },
-    };
-  } catch {
-    return undefined;
-  }
 };
 activePolicyBindingForwarderFor = (tenantId) => async (binding, snapshot) => {
   if (snapshot.orgId !== tenantId || binding.orgId !== tenantId) {
@@ -492,34 +473,6 @@ activePolicyBindingForwarderFor = (tenantId) => async (binding, snapshot) => {
   if (forwarded.roleBinding !== binding) throw new Error('active_policy_binding_replaced');
 };
 
-function expectedFreshnessContextFor(
-  tenantId: string,
-  snapshot: LiveTenantPolicySnapshot,
-): ReturnType<TenantPolicyFreshnessPort['expectedContext']> {
-  const tenantContext = generationRegistry.get(tenantId)?.context;
-  const bootContext = verifiedBootGenerationContext;
-  if (!tenantContext || !bootContext)
-    throw new Error('active_policy_freshness_context_unavailable');
-  const deploymentId = tenantContext.tenantDeploymentId ?? tenantContext.deploymentId;
-  if (!deploymentId || tenantContext.tenantId !== tenantId) {
-    throw new Error('active_policy_freshness_context_mismatch');
-  }
-  return {
-    orgId: tenantId,
-    deploymentId,
-    policyDigest: snapshot.policyDigest,
-    policyGeneration: snapshot.policyGeneration,
-    activationGeneration: snapshot.activationGeneration,
-    configurationGeneration: snapshot.configurationGeneration,
-    keysetEpoch: snapshot.policy.minimumHighWater.keysetEpoch,
-    keysetDigest: snapshot.policy.minimumHighWater.keysetDigest,
-    releaseId: bootContext.releaseId,
-    protectedSourceCommit: bootContext.protectedSourceCommit,
-    eifDigest: bootContext.eifDigest,
-    pcr0: bootContext.pcr0,
-    bootRootDigest: bootContext.bootRootDigest,
-  };
-}
 const policyAssignmentApplier = new TenantAssignmentApplier({
   registry,
   generationRegistry,
@@ -1172,46 +1125,28 @@ try {
   const buildRetriever = (retrieverDeps: RetrieverDeps) =>
     new EnclaveFactRetriever({
       ...retrieverDeps,
-      embedQuery: (orgId, query) => answerInferenceFor(orgId).embed(query),
+      embedQuery: (orgId, query) => answerInference.get(orgId).embed(query),
       resolveTenant,
       s3,
       processedBucket: PROCESSED_OUTPUTS_BUCKET,
       processedBucketFor: (orgId) => resolveTenant(orgId).processedOutputsBucket,
     });
-  // Content-addressed, ESDK-sealed per-org LLM cache in front of phala (determinism #1):
-  // a repeated question over an unchanged fact set replays without a fresh TEE call. Resolved PER
-  // REQUEST from the answer's orgId (§4.2) — never a boot-time context — so the cache blob is sealed
-  // and read under the requesting tenant's own key/orgId AAD and can't cross tenants. Memoized per
-  // org and rebuilt when the org resolves to a new context, mirroring the synthesis workers' cache.
+  // Resolved per request from the answer's orgId, so each cache is sealed under that tenant's key
+  // and rebuilt when the org resolves to a new context.
   const answerInference = new TenantInferenceMemo<InferenceModel>({
     s3,
     resolveTenant,
     bucketFor: (_orgId, tenant) => tenant.processedOutputsBucket || PROCESSED_OUTPUTS_BUCKET,
-    build: (orgId, tenant, cache) => {
-      const cached = new CachedInference(phalaInference, cache, {
-        embedModel: inferenceModel('embed'),
-        generateModel: inferenceModel('generate'),
-        critiqueModel: inferenceModel('critique'),
-        promptVersion: ANSWER_CACHE_VERSION,
-      });
-      return !POOL_ID
-        ? cached
-        : new TenantPolicyBoundInference(orgId, () => tenant.activePolicySnapshot(), cached, {
-            freshnessProvider: () => activePolicyFreshnessFor(orgId),
-            operationCache: cache,
-            usageSink: recordTokenUsage,
-            requireFreshness: true,
-            runtimeEvidence: activePolicyRuntimeEvidenceFor(orgId),
-            requireRuntimeEvidence: true,
-            verifiedBindingForwarder: activePolicyBindingForwarderFor(orgId),
-            backendForVerifiedBinding: activePolicyBackendFor(orgId),
-            requireBindingForwarding: true,
-          });
-    },
+    build: policyWiring.answerInferenceBuilder(
+      poolPolicyPortsFrom({
+        activePolicyFreshnessFor: (id) => activePolicyFreshnessFor(id),
+        activePolicyRuntimeEvidenceFor: (id) => activePolicyRuntimeEvidenceFor(id),
+        activePolicyBindingForwarderFor: (id) => activePolicyBindingForwarderFor(id),
+        activePolicyBackendFor: (id) => activePolicyBackendFor(id),
+      }),
+      recordTokenUsage,
+    ),
   });
-  const answerInferenceFor = (orgId: string): InferenceModel => answerInference.get(orgId);
-  // A removed tenant's crypto/decrypted-answer RAM cache must not outlive its assignment: zeroize()
-  // only reaches the TenantContext's own handles, not this memo's independently-held S3LlmCache.
   evictAnswerInference = (tenantId) => answerInference.evict(tenantId);
   const codebaseSettingsPort = createCodebaseSettingsPort();
   const apiOptions: CreateContainerOptions = {
@@ -1240,7 +1175,7 @@ try {
       new EnclaveFactAnswerer(
         buildRetriever(retrieverDeps),
         (orgId, prompt, systemPrompt, shouldCache) =>
-          answerInferenceFor(orgId).generate(prompt, systemPrompt, undefined, shouldCache),
+          answerInference.get(orgId).generate(prompt, systemPrompt, undefined, shouldCache),
       ),
     // synthesized wiki text is ciphertext at rest; the read path decrypts audience-visible
     // blocks here, in-enclave, over the requesting tenant's sealed key (resolved from `ref.orgId`).

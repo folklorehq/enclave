@@ -22,9 +22,7 @@ export interface GatewayEvidenceCompositionDeps {
   keySession: EvidenceKeySession;
 }
 
-// The only constructor helper for the evidence recorder: a production recorder cannot be
-// built without trusted context, an anchor verifier, and a typed evidence session. The runtime
-// composition exposes this helper only after prepare() has produced a verified boot manifest.
+// UNWIRED: no production evidence key session or release-provenance producer exists; shared-pool inference binds SharedPoolRuntimeEvidence instead.
 export class GatewayEvidenceComposition {
   readonly #provider: TrustedEvidenceContextProvider;
   readonly #anchorVerifier: EvidenceAnchorVerifier;

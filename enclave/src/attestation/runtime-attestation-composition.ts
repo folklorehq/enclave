@@ -12,7 +12,7 @@ import {
 } from '@folklore/contracts/enclave-attestation';
 import { ConfigurationError } from '@folklore/errors';
 import { AttestationBootComposer } from './AttestationBootComposer.js';
-import { AttestationBootState } from './AttestationBootState.js';
+import { AttestationBootState, attestationBootStateErrors } from './AttestationBootState.js';
 import type { AttestationBootCheckpointStore } from './AttestationBootState.js';
 import { BootManifestCoordinator } from './BootManifestCoordinator.js';
 import type { BootManifestSecretLoaderPort } from './BootManifestCoordinator.js';
@@ -32,7 +32,7 @@ import type {
 import type { NsmAttestationPort } from '../sealing/nsm.js';
 import { verifySignedBootManifestKeyset } from '@folklore/nitro-attestation';
 import type { RecoveryRootInstallationReportV1 } from '@folklore/nitro-attestation';
-import type { GatewayEvidenceComposition } from '../inference/GatewayEvidenceComposition.js';
+import type { BootSessionState, RuntimeEvidenceSessionPort } from './ports.js';
 import { bootPrepareStepCode } from './boot-prepare-failure.js';
 
 import type { TrustedTimeBindingV1 } from '@folklore/contracts';
@@ -51,23 +51,11 @@ interface CloseableRuntimeAttestationListener extends RuntimeAttestationListener
   close?(): Promise<void>;
 }
 
-export interface RuntimeAttestationEvidenceDeps {
-  enabled: boolean;
-  composition: GatewayEvidenceComposition;
-}
-
 export interface GenerationHighWaterTrustedTimeWiringDeps {
   binding: TrustedTimeBindingV1;
   sampler: GenerationHighWaterTrustedTimeSamplePort;
   signer: GenerationHighWaterTrustedTimeSignerPort;
 }
-
-export type RuntimeAttestationActivationState = Readonly<{
-  boot: 'unverified' | 'verified';
-  evidence: 'unavailable' | 'wired';
-  trustedTime: 'unavailable' | 'wired';
-  inference: 'unavailable' | 'staged-unavailable' | 'available';
-}>;
 
 export interface RuntimeAttestationCompositionDeps {
   env: RuntimeAttestationEnv;
@@ -82,7 +70,6 @@ export interface RuntimeAttestationCompositionDeps {
   checkpointStore?: AttestationBootCheckpointStore;
   logger?: Pick<Logger, 'info' | 'warn'>;
   serverOptions?: RuntimeAttestationServerOptions;
-  evidence?: RuntimeAttestationEvidenceDeps;
   /** Enclave trusted-time record wiring for the vsock control channel. */
   trustedTime?: GenerationHighWaterTrustedTimeWiringDeps;
 }
@@ -96,7 +83,7 @@ interface RuntimeAttestationConfig {
   port: number;
 }
 
-export class RuntimeAttestationComposition {
+export class RuntimeAttestationComposition implements RuntimeEvidenceSessionPort {
   constructor(
     private readonly signedManifest: {
       wire: BootManifestWireName;
@@ -109,16 +96,12 @@ export class RuntimeAttestationComposition {
     private readonly listener: CloseableRuntimeAttestationListener,
     private readonly verifier: BootManifestVerifier,
     private readonly logger?: Pick<Logger, 'info'>,
-    evidence?: RuntimeAttestationEvidenceDeps,
     trustedTime?: GenerationHighWaterTrustedTimeWiringDeps,
   ) {
-    this.#evidenceComposition =
-      evidence?.enabled && evidence.composition ? evidence.composition : undefined;
     this.#trustedTimeWiring = trustedTime;
   }
 
   #verifiedManifest: VerifiedBootManifest | undefined;
-  readonly #evidenceComposition: GatewayEvidenceComposition | undefined;
   readonly #trustedTimeWiring: GenerationHighWaterTrustedTimeWiringDeps | undefined;
 
   async prepare(): Promise<void> {
@@ -128,16 +111,10 @@ export class RuntimeAttestationComposition {
     );
   }
 
-  inferenceActivationState(): RuntimeAttestationActivationState {
-    const boot = this.#verifiedManifest ? 'verified' : 'unverified';
-    const evidence = this.#evidenceComposition ? 'wired' : 'unavailable';
-    const trustedTime = this.#trustedTimeWiring ? 'wired' : 'unavailable';
-    // UNWIRED: inference remains unavailable until the evidence and trusted-time activation gates are complete.
-    const inference =
-      boot === 'verified' && evidence === 'wired' && trustedTime === 'wired'
-        ? 'staged-unavailable'
-        : 'unavailable';
-    return { boot, evidence, trustedTime, inference };
+  runtimeEvidenceSession(): BootSessionState {
+    if (!this.#verifiedManifest) throw new Error(attestationBootStateErrors.notVerified);
+    if (!this.bootState.isKmsUnsealed()) throw new Error(attestationBootStateErrors.kmsNotReady);
+    return this.verifier.bootSessionState();
   }
 
   verifiedManifest(): VerifiedBootManifest {
@@ -154,14 +131,7 @@ export class RuntimeAttestationComposition {
     return this.verifier.recoveryInstallationReport();
   }
 
-  /** The evidence recorder factory, exposed only after verified boot. */
-  gatewayEvidenceComposition(): GatewayEvidenceComposition {
-    if (!this.#evidenceComposition) throw new Error('evidence_unavailable');
-    if (!this.#verifiedManifest) throw new Error('runtime_attestation_not_prepared');
-    return this.#evidenceComposition;
-  }
-
-  /** UNWIRED: Trusted-time record production has no live caller while activation remains gated. */
+  /** UNWIRED: Trusted-time commissioning record production has no live caller. */
   gateATrustedTimeRecordProducer(): GenerationHighWaterTrustedTimeRecordProducer {
     if (!this.#verifiedManifest) throw new Error('runtime_attestation_not_prepared');
     if (!this.#trustedTimeWiring) throw new Error('trusted_time_wiring_unavailable');
@@ -173,7 +143,7 @@ export class RuntimeAttestationComposition {
   }
 
   /** Content-free boot session identity for the evidence seam. */
-  bootSessionState(): { sessionId: string; bootEpoch: number } {
+  bootSessionState(): BootSessionState {
     return this.verifier.bootSessionState();
   }
 
@@ -325,7 +295,6 @@ export function createRuntimeAttestationComposition(
     listener,
     verifier,
     deps.logger,
-    deps.evidence,
     deps.trustedTime,
   );
 }

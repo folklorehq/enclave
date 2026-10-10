@@ -50,6 +50,7 @@ class ReadonlyStateMap<T> implements ReadonlyMap<string, T> {
 }
 
 export class TenantGenerationRegistry<TContext = unknown, TSnapshot = unknown> {
+  private readonly replacedListeners: Array<() => void> = [];
   private current: TenantGenerationPointer<TContext, TSnapshot> = Object.freeze({
     generation: 0,
     entries: new ReadonlyStateMap<TenantGenerationEntry<TContext, TSnapshot>>([]),
@@ -69,6 +70,10 @@ export class TenantGenerationRegistry<TContext = unknown, TSnapshot = unknown> {
 
   read(): TenantGenerationPointer<TContext, TSnapshot> {
     return this.current;
+  }
+
+  onReplaced(listener: () => void): void {
+    this.replacedListeners.push(listener);
   }
 
   replaceGeneration(
@@ -99,6 +104,7 @@ export class TenantGenerationRegistry<TContext = unknown, TSnapshot = unknown> {
       ...(digest === undefined ? {} : { digest }),
       entries: new ReadonlyStateMap(entries),
     });
+    for (const listener of this.replacedListeners) listener();
     return this.current;
   }
 }

@@ -123,6 +123,10 @@ export class AttestationBootState {
     this.#kmsUnsealed = true;
   }
 
+  isKmsUnsealed(): boolean {
+    return this.#prepared !== undefined && this.#kmsUnsealed;
+  }
+
   async getReadiness(): Promise<AttestationBootReadinessSnapshot> {
     const checkpoint = await this.readCheckpoint();
     const prepared = this.#prepared;

@@ -26,8 +26,17 @@ import {
 
 const DEFAULT_REFRESH_TIMEOUT_MS = 5_000;
 const REFRESH_REASON_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
-const REFRESH_REASON_PREFIXES = ['active_policy_', 'high_water_', 'trusted_time_'] as const;
+const REFRESH_REASON_PREFIXES = [
+  'active_policy_',
+  'high_water_',
+  'trusted_time_',
+  'runtime_evidence_',
+] as const;
 const MAX_REFRESH_REASON_DEPTH = 8;
+const REFRESH_READ_ATTEMPTS = 2;
+const REFRESH_TIMEOUT_CODE = 'active_policy_refresh_timeout';
+const HIGH_WATER_CODE_PREFIX = 'high_water_';
+export const RUNTIME_EVIDENCE_BACKEND_UNAVAILABLE = 'runtime_evidence_backend_unavailable';
 
 export type TenantPolicySnapshotProvider = () => VerifiedActivePolicySnapshotV1 | undefined;
 
@@ -37,7 +46,8 @@ export interface TenantPolicyFreshnessPort {
   readonly expectedContext: () => GenerationContextV1;
   readonly refreshIntervalMs: number;
   readonly refreshTimeoutMs?: number;
-  readonly evict: () => void;
+  /** Withholds the snapshot the failed operation used; a missing snapshot evicts nothing installed. */
+  readonly evict: (snapshot?: VerifiedActivePolicySnapshotV1) => void;
 }
 
 export interface TenantPolicyRuntimeEvidencePort {
@@ -195,7 +205,7 @@ export class TenantPolicyBoundInference implements SynthesisInference {
       ? (await this.backendFor(binding, snapshot)).generateStructured
       : this.options.structured;
     if (!structured) {
-      this.evictAfterRefreshFailure(this.options.freshness ?? this.options.freshnessProvider?.());
+      this.evictAfterRefreshFailure(snapshot);
       throw new TenantPolicyBoundInferenceError('active_policy_snapshot_refresh_failed');
     }
     return structured(prompt, tool, systemPrompt);
@@ -284,28 +294,28 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     try {
       snapshot = this.snapshotProvider();
     } catch {
-      this.evictAfterRefreshFailure(this.options.freshness ?? this.options.freshnessProvider?.());
+      this.evictAfterRefreshFailure();
       throw new TenantPolicyBoundInferenceError('active_policy_snapshot_unavailable');
     }
     if (!snapshot) {
-      this.evictAfterRefreshFailure(this.options.freshness ?? this.options.freshnessProvider?.());
+      this.evictAfterRefreshFailure();
       throw new TenantPolicyBoundInferenceError('active_policy_snapshot_unavailable');
     }
     try {
       assertVerifiedActivePolicySnapshotV1(snapshot);
     } catch {
-      this.evictAfterRefreshFailure(this.options.freshness ?? this.options.freshnessProvider?.());
+      this.evictAfterRefreshFailure(snapshot);
       throw new TenantPolicyBoundInferenceError('active_policy_snapshot_unavailable');
     }
     if (snapshot.orgId !== this.tenantId || snapshot.tenantId !== this.tenantId) {
-      this.evictAfterRefreshFailure(this.options.freshness ?? this.options.freshnessProvider?.());
+      this.evictAfterRefreshFailure(snapshot);
       throw new TenantPolicyBoundInferenceError('active_policy_tenant_mismatch');
     }
     let binding: VerifiedActivePolicyRoleBindingV1;
     try {
       binding = this.roleBinding(snapshot, role);
     } catch (error: unknown) {
-      this.evictAfterRefreshFailure(this.options.freshness ?? this.options.freshnessProvider?.());
+      this.evictAfterRefreshFailure(snapshot);
       throw error;
     }
     await this.ensureFresh(snapshot);
@@ -314,19 +324,25 @@ export class TenantPolicyBoundInference implements SynthesisInference {
         throw new Error('runtime_evidence_unavailable');
       }
       this.options.runtimeEvidence?.assertSnapshot(snapshot);
-    } catch {
-      this.evictAfterRefreshFailure(this.options.freshness ?? this.options.freshnessProvider?.());
-      throw new TenantPolicyBoundInferenceError('active_policy_snapshot_refresh_failed');
+      if (this.options.requireRuntimeEvidence && !this.options.backendForVerifiedBinding) {
+        throw new Error(RUNTIME_EVIDENCE_BACKEND_UNAVAILABLE);
+      }
+    } catch (error: unknown) {
+      this.evictAfterRefreshFailure(snapshot);
+      throw new TenantPolicyBoundInferenceError(
+        'active_policy_snapshot_refresh_failed',
+        this.refreshFailureReason(error),
+      );
     }
     if (!this.options.verifiedBindingForwarder && this.options.requireBindingForwarding) {
-      this.evictAfterRefreshFailure(this.options.freshness ?? this.options.freshnessProvider?.());
+      this.evictAfterRefreshFailure(snapshot);
       throw new TenantPolicyBoundInferenceError('active_policy_snapshot_refresh_failed');
     }
     try {
       await this.options.verifiedBindingForwarder?.(binding, snapshot);
       await this.options.onVerifiedBinding?.(binding, snapshot);
     } catch {
-      this.evictAfterRefreshFailure(this.options.freshness ?? this.options.freshnessProvider?.());
+      this.evictAfterRefreshFailure(snapshot);
       throw new TenantPolicyBoundInferenceError('active_policy_snapshot_refresh_failed');
     }
     return { binding, snapshot };
@@ -366,7 +382,7 @@ export class TenantPolicyBoundInference implements SynthesisInference {
   }
 
   private async ensureFresh(snapshot: VerifiedActivePolicySnapshotV1): Promise<void> {
-    const freshness = this.options.freshness ?? this.options.freshnessProvider?.();
+    const freshness = this.currentFreshness();
     if (!freshness) {
       if (this.options.requireFreshness) {
         throw new TenantPolicyBoundInferenceError('active_policy_snapshot_refresh_failed');
@@ -379,9 +395,11 @@ export class TenantPolicyBoundInference implements SynthesisInference {
         orgId: this.tenantId,
         deploymentId: snapshot.deploymentId,
       };
-      const sample = await this.withTimeout(
-        freshness.trustedTime.read(context),
-        freshness.refreshTimeoutMs ?? DEFAULT_REFRESH_TIMEOUT_MS,
+      const timeoutMs = freshness.refreshTimeoutMs ?? DEFAULT_REFRESH_TIMEOUT_MS;
+      const sample = await this.readWithRetry(
+        () => freshness.trustedTime.read(context),
+        timeoutMs,
+        (error) => this.isRefreshTimeout(error),
       );
       if (
         sample.orgId !== this.tenantId ||
@@ -398,14 +416,15 @@ export class TenantPolicyBoundInference implements SynthesisInference {
       if (sample.trustedNow < this.trustedDeadline) return;
       const expected = freshness.expectedContext();
       assertGenerationContextEqual(snapshot.generationContext, expected);
-      const recent = await this.withTimeout(
-        freshness.highWater.readRecent(expected, RENEWAL_GRACE_READ_COUNT),
-        freshness.refreshTimeoutMs ?? DEFAULT_REFRESH_TIMEOUT_MS,
+      const recent = await this.readWithRetry(
+        () => freshness.highWater.readRecent(expected, RENEWAL_GRACE_READ_COUNT),
+        timeoutMs,
+        (error) => this.isTransientHighWaterFailure(error),
       );
       servingCheckpointForInstalled(recent, expected, snapshot.durableCheckpoint);
       this.trustedDeadline = sample.trustedNow + freshness.refreshIntervalMs;
     } catch (error: unknown) {
-      this.evictAfterRefreshFailure(freshness);
+      this.evictAfterRefreshFailure(snapshot, freshness);
       if (error instanceof TenantPolicyBoundInferenceError) throw error;
       throw new TenantPolicyBoundInferenceError(
         'active_policy_snapshot_refresh_failed',
@@ -439,8 +458,15 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     );
   }
 
-  private evictAfterRefreshFailure(freshness: TenantPolicyFreshnessPort | undefined): void {
-    freshness?.evict();
+  private currentFreshness(): TenantPolicyFreshnessPort | undefined {
+    return this.options.freshness ?? this.options.freshnessProvider?.();
+  }
+
+  private evictAfterRefreshFailure(
+    snapshot?: VerifiedActivePolicySnapshotV1,
+    freshness: TenantPolicyFreshnessPort | undefined = this.currentFreshness(),
+  ): void {
+    freshness?.evict(snapshot);
     this.trustedDeadline = 0;
   }
 
@@ -456,13 +482,39 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     }
   }
 
+  // Only failures thrown by the read are retried, and only those `retryable` names; checks on its result are not.
+  private async readWithRetry<T>(
+    read: () => Promise<T>,
+    timeoutMs: number,
+    retryable: (error: unknown) => boolean,
+  ): Promise<T> {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await this.withTimeout(read(), timeoutMs);
+      } catch (error: unknown) {
+        if (attempt >= REFRESH_READ_ATTEMPTS || !retryable(error)) throw error;
+      }
+    }
+  }
+
+  // The trusted-time authority closes itself when a sample fails, so only a timeout is worth retrying.
+  private isRefreshTimeout(error: unknown): boolean {
+    return error instanceof Error && error.message === REFRESH_TIMEOUT_CODE;
+  }
+
+  // A high-water verification refusal is a result check; a transport failure or timeout is not.
+  private isTransientHighWaterFailure(error: unknown): boolean {
+    if (this.isRefreshTimeout(error)) return true;
+    return !(error instanceof Error && error.message.startsWith(HIGH_WATER_CODE_PREFIX));
+  }
+
   private async withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
         promise,
         new Promise<T>((_, reject) => {
-          timer = setTimeout(() => reject(new Error('active_policy_refresh_timeout')), timeoutMs);
+          timer = setTimeout(() => reject(new Error(REFRESH_TIMEOUT_CODE)), timeoutMs);
           timer.unref?.();
         }),
       ]);

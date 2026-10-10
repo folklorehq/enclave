@@ -20,22 +20,21 @@ import {
   singleVersionSealedContentKeyring,
   type SealedContentKeyringConfig,
 } from '../crypto/esdk.js';
-import { inferenceModel, phalaInference } from '../inference/phala.js';
-import {
-  CachedInference,
-  LLM_CACHE_PROMPT_VERSION,
-  type InferenceModel,
-} from '../inference/CachedInference.js';
+import { LLM_CACHE_PROMPT_VERSION, type InferenceModel } from '../inference/CachedInference.js';
 import { S3LlmCache } from '../inference/S3LlmCache.js';
 import type { LlmCacheNamer } from '../inference/llm-cache.js';
 import {
-  TenantPolicyBoundInference,
   type TenantPolicyFreshnessPort,
   type TenantPolicyRuntimeEvidencePort,
   type TenantPolicyVerifiedBindingForwarder,
   type TenantPolicyVerifiedBindingBackendFactory,
   type TenantPolicySnapshotProvider,
 } from '../inference/TenantPolicyBoundInference.js';
+import {
+  dedicatedCachedInference,
+  poolPolicyBoundInference,
+  poolPolicyPortsFrom,
+} from '../inference/tenant-inference-builders.js';
 import { TenantContext } from './tenant-context.js';
 
 export interface TenantIdentity {
@@ -167,22 +166,14 @@ export class TenantContextFactory {
       orgId: tenantId,
       namer,
     });
-    const cached = new CachedInference(phalaInference, cache, {
-      embedModel: inferenceModel('embed'),
-      generateModel: inferenceModel('generate'),
-      critiqueModel: inferenceModel('critique'),
-      promptVersion: LLM_CACHE_PROMPT_VERSION,
-    });
-    if (!this.deps.enforceTenantPolicy) return cached;
-    return new TenantPolicyBoundInference(tenantId, snapshotProvider, cached, {
-      freshnessProvider: () => this.deps.activePolicyFreshnessFor?.(tenantId),
+    if (!this.deps.enforceTenantPolicy) {
+      return dedicatedCachedInference(cache, LLM_CACHE_PROMPT_VERSION);
+    }
+    return poolPolicyBoundInference({
+      orgId: tenantId,
+      snapshot: snapshotProvider,
+      policy: poolPolicyPortsFrom(this.deps),
       operationCache: cache,
-      requireFreshness: true,
-      runtimeEvidence: this.deps.activePolicyRuntimeEvidenceFor?.(tenantId),
-      requireRuntimeEvidence: true,
-      verifiedBindingForwarder: this.deps.activePolicyBindingForwarderFor?.(tenantId),
-      backendForVerifiedBinding: this.deps.activePolicyBackendFor?.(tenantId),
-      requireBindingForwarding: true,
     });
   }
 

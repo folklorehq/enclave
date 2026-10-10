@@ -26,6 +26,7 @@ import type {
   DstackNativeVerificationResultV1,
   DstackNativeVerifierPort,
 } from './DstackNativeVerifier.js';
+import type { BootSessionState } from './ports.js';
 
 export type PinnedBootManifestKeyStatus = 'active' | 'verification-only' | 'disabled' | 'revoked';
 
@@ -265,8 +266,8 @@ export class BootManifestVerifier {
     return TRUSTED_SIGNER_RECOVERY_ROOT_DIGEST;
   }
 
-  /** Content-free boot session identity for the evidence seam. */
-  bootSessionState(): { sessionId: string; bootEpoch: number } {
+  /** Keyset-derived session identity: identical across reboots, so never per-boot freshness evidence. */
+  bootSessionState(): BootSessionState {
     return {
       sessionId: createHash('sha256')
         .update(`${this.#keysetDigest}\u0000${this.#keysetGeneration}`)

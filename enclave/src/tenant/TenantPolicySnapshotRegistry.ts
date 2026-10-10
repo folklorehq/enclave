@@ -53,7 +53,11 @@ export class TenantPolicySnapshotRegistry<
   TSnapshot extends TenantPolicySnapshotLike = TenantPolicySnapshotLike,
   TContext = unknown,
 > {
-  constructor(private readonly generationRegistry: TenantGenerationRegistry<TContext, TSnapshot>) {}
+  private readonly evicted = new Map<string, TenantPolicySnapshotLike>();
+
+  constructor(private readonly generationRegistry: TenantGenerationRegistry<TContext, TSnapshot>) {
+    generationRegistry.onReplaced(() => this.dropLapsedEvictions());
+  }
 
   stage(snapshots: ReadonlyMap<string, TSnapshot>): ReadonlyMap<string, TSnapshot> {
     const staged: Array<readonly [string, TSnapshot]> = [];
@@ -67,7 +71,23 @@ export class TenantPolicySnapshotRegistry<
   }
 
   get(tenantId: string): TSnapshot | undefined {
+    if (this.evicted.has(tenantId)) return undefined;
     return this.generationRegistry.get(tenantId)?.snapshot;
+  }
+
+  // Withholds only the snapshot a refusal was raised on; installing any other snapshot lifts it.
+  evict(tenantId: string, snapshot: TenantPolicySnapshotLike): void {
+    if (this.generationRegistry.get(tenantId)?.snapshot !== snapshot) return;
+    this.evicted.set(tenantId, snapshot);
+  }
+
+  // A removed or re-installed tenant's eviction no longer names an installed snapshot.
+  private dropLapsedEvictions(): void {
+    for (const [tenantId, snapshot] of this.evicted) {
+      if (this.generationRegistry.get(tenantId)?.snapshot !== snapshot) {
+        this.evicted.delete(tenantId);
+      }
+    }
   }
 }
 
