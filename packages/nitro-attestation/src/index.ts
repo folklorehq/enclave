@@ -38,6 +38,7 @@ export {
   type VerifiedPoolRuntimeIdentity,
   type VerifiedRuntimeIdentity,
 } from './nitro-document-verifier.js';
+export { NITRO_PAYLOAD_DECODE_OPTIONS } from './nitro-document-payload.js';
 export { derivePcr3FromRoleArn, derivePcr4FromInstanceId } from './nitro-pcr.js';
 export { extractRuntimeAttestationNonce } from './runtime-attestation-nonce.js';
 export {

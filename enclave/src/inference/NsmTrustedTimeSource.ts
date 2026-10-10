@@ -1,6 +1,9 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { decode } from 'cborg';
-import { verifyAwsNitroAttestationDocument } from '@folklore/nitro-attestation';
+import {
+  NITRO_PAYLOAD_DECODE_OPTIONS,
+  verifyAwsNitroAttestationDocument,
+} from '@folklore/nitro-attestation';
 import type { NsmAttestationPort } from '../sealing/nsm.js';
 import type { NsmAttestationDocumentV1, NsmTrustedTimeSourcePort } from '@folklore/inference';
 
@@ -27,7 +30,7 @@ const PUBLIC_KEY_BYTES = 32;
 const PCR0_BYTES = 48;
 const USER_DATA_MAX_BYTES = 512;
 const DOCUMENT_MAX_BYTES = 16 * 1024;
-const decodeOptions = {
+const coseDecodeOptions = {
   strict: true,
   useMaps: true,
   rejectDuplicateMapKeys: true,
@@ -116,7 +119,7 @@ export class NsmTrustedTimeSource implements NsmTrustedTimeSourcePort {
   private readDocument(document: Uint8Array): ParsedNsmDocument {
     const payload = this.decodeCose(document)[2];
     if (!(payload instanceof Uint8Array)) throw new Error('invalid');
-    const fields = this.decodeMap(payload);
+    const fields = this.decodePayload(payload);
     const expectedFields = new Set([
       'module_id',
       'digest',
@@ -169,7 +172,7 @@ export class NsmTrustedTimeSource implements NsmTrustedTimeSourcePort {
   }
 
   private decodeCose(document: Uint8Array): readonly unknown[] {
-    const values = this.coseValues(decode(document, decodeOptions));
+    const values = this.coseValues(decode(document, coseDecodeOptions));
     if (
       values.length !== 4 ||
       !(values[0] instanceof Uint8Array) ||
@@ -190,8 +193,8 @@ export class NsmTrustedTimeSource implements NsmTrustedTimeSourcePort {
     throw new Error('invalid');
   }
 
-  private decodeMap(value: Uint8Array): Map<unknown, unknown> {
-    const decoded = decode(value, decodeOptions);
+  private decodePayload(value: Uint8Array): Map<unknown, unknown> {
+    const decoded = decode(value, NITRO_PAYLOAD_DECODE_OPTIONS);
     if (!(decoded instanceof Map)) throw new Error('invalid');
     return decoded;
   }

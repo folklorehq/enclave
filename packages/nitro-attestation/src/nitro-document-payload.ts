@@ -41,8 +41,10 @@ export interface NitroDocumentTrustPathPayload {
   timestamp: number;
 }
 
-const decodeOptions = {
-  strict: true,
+/** cborg options for an AWS Nitro attestation payload; shared by every decoder of it. */
+export const NITRO_PAYLOAD_DECODE_OPTIONS = {
+  // AWS NSM payload encoding is not minimal; the ES384 COSE signature and AWS chain carry authenticity.
+  strict: false,
   allowIndefinite: false,
   allowUndefined: false,
   allowBigInt: false,
@@ -52,7 +54,7 @@ const decodeOptions = {
 
 function decodePayload(payload: Uint8Array): Map<string, unknown> {
   try {
-    return decode(payload, decodeOptions) as Map<string, unknown>;
+    return decode(payload, NITRO_PAYLOAD_DECODE_OPTIONS) as Map<string, unknown>;
   } catch {
     throw new NitroAttestationError('malformed_document');
   }
