@@ -26,6 +26,15 @@ import { TenantRequestQuiescer } from './tenant/TenantRequestQuiescer.js';
 import { TenantRequestQuiescenceMonitor } from './tenant/TenantRequestQuiescenceMonitor.js';
 import { TenantMessageRouter } from './tenant/tenant-message-router.js';
 import { HttpCanaryAuthorizationConsumer } from './ingest/HttpCanaryAuthorizationConsumer.js';
+import { ControlPlaneTenantDirectorySource } from './directory/ControlPlaneTenantDirectorySource.js';
+import {
+  EntitlementProjectionApplier,
+  type ProjectionDatabase,
+} from './directory/EntitlementProjectionApplier.js';
+import {
+  TenantEntitlementProjectionRunner,
+  type ProjectionTenant,
+} from './directory/TenantEntitlementProjectionRunner.js';
 import { QueueSetDrainer } from './tenant/QueueSetDrainer.js';
 import { saveAllTenantIndices } from './tenant/index-persistence.js';
 import { createTenantResolver } from './tenant/tenant-resolver.js';
@@ -354,7 +363,10 @@ let verifiedPoolManifest: VerifiedAssignmentManifest | undefined;
 let verifiedBootGenerationContext: BootBoundGenerationContext | undefined;
 let durableGenerationHighWaterClient: RecentGenerationHighWaterPort | undefined;
 let activePolicyGeneration = 0;
-const runtimeDatabaseLease = new RuntimeDatabaseLease<ApiContainer, RuntimeDatabaseConnection>({
+const runtimeDatabaseLease = new RuntimeDatabaseLease<
+  ApiContainer,
+  RuntimeDatabaseConnection & ProjectionDatabase
+>({
   requestRestart: (exitCode) => process.exit(exitCode),
 });
 let activateRuntimeDatabase: ((config: RuntimeDatabaseConfig) => Promise<void>) | undefined;
@@ -1302,6 +1314,38 @@ if (poolRuntimeAttestationServer && poolRuntimeAttestationListener) {
   logger.info('pool runtime attestation listener started');
   bootStatus.reach('attestation_listening');
 }
+
+const projectionTenants = (): ProjectionTenant[] =>
+  registry.all().flatMap((context) => {
+    const tenantDeploymentId = context.tenantDeploymentId ?? context.deploymentId;
+    return tenantDeploymentId ? [{ tenantId: context.tenantId, tenantDeploymentId }] : [];
+  });
+// The shared-pool tenant DB has no other writer of each tenant's entitlement row.
+const entitlementProjectionApplier = new EntitlementProjectionApplier({
+  database: () => runtimeDatabaseLease.database(),
+  logger: logger.child({ component: 'entitlement_projection' }),
+});
+const entitlementProjectionRunner =
+  isSharedPool && controlPlaneIdentity && controlPlaneFetch && DEPLOYMENT_ID
+    ? new TenantEntitlementProjectionRunner({
+        tenants: projectionTenants,
+        beginTenant: beginTenantRequest,
+        syncTenant: ({ tenantId, tenantDeploymentId }) =>
+          entitlementProjectionApplier.apply(
+            tenantId,
+            new ControlPlaneTenantDirectorySource({
+              controlPlaneUrl: controlPlaneIdentity.origin,
+              runtimeDeploymentId: DEPLOYMENT_ID,
+              tenantDeploymentId,
+              orgId: tenantId,
+              agentToken: () => process.env['AGENT_TOKEN'] ?? '',
+              fetchImpl: controlPlaneFetch,
+            }),
+          ),
+        logger,
+      })
+    : undefined;
+entitlementProjectionRunner?.start();
 bootStatus.begin('workers_start');
 
 // One consumer serves every assigned tenant: it resolves each request's keyring/crypto from the
@@ -1439,6 +1483,8 @@ drainerRef.current = new QueueSetDrainer({
 async function shutdown(): Promise<void> {
   logger.info('enclave shutting down — saving hnsw indices', { count: registry.size });
   clearInterval(assignmentRefreshTimer);
+  if ((await entitlementProjectionRunner?.stop(SHUTDOWN_QUIESCE_TIMEOUT_MS)) === false)
+    logger.warn('entitlement_projection_stop_timeout');
   tenantRequestQuiescence.stop();
   // Quiesce synthesis (await the in-flight op) and shred its theme indices + LLM-cache RAM fronts
   // before the final save, so no synth runs concurrently with it (§2.2 pt 5).

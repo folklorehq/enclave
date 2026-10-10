@@ -70,6 +70,10 @@ export class RuntimeDatabaseLease<
     return this.#api;
   }
 
+  database(): TDatabase | undefined {
+    return this.#database;
+  }
+
   private encode(config: RuntimeDatabaseConfig): string {
     return JSON.stringify(runtimeDatabaseConfigSchema.parse(config));
   }
