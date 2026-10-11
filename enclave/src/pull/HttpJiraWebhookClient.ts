@@ -1,13 +1,10 @@
-import { createHash, randomBytes } from 'node:crypto';
 import { ProxyAgent } from 'undici';
 import {
-  assertPublicAddressSet,
   ProviderEgressError,
   ProviderRejectedError,
-  resolvePublicAddresses,
   type ProviderTokenFetchOptions,
 } from '../egress/provider-token-fetch.js';
-import { EGRESS_PROXY_PORT } from '../egress/proxy.js';
+import { EGRESS_PROXY_URL } from '../egress/proxy.js';
 
 const JIRA_GATEWAY_ORIGIN = 'https://api.atlassian.com';
 const JIRA_GATEWAY_HOST = 'api.atlassian.com';
@@ -69,12 +66,7 @@ export interface JiraWebhookClientPort {
 
 export interface JiraWebhookClientOptions extends Pick<
   ProviderTokenFetchOptions,
-  | 'fetchImpl'
-  | 'resolve'
-  | 'assertProxyResolution'
-  | 'maxRequestBytes'
-  | 'maxResponseBytes'
-  | 'timeoutMs'
+  'fetchImpl' | 'maxRequestBytes' | 'maxResponseBytes' | 'timeoutMs'
 > {
   clock?: () => Date;
 }
@@ -99,20 +91,13 @@ interface JiraWebhookRequest {
 /** Performs only the fixed Jira dynamic-webhook protocol through the enclave egress proxy. */
 export class HttpJiraWebhookClient implements JiraWebhookClientPort {
   private readonly fetchImpl: typeof globalThis.fetch;
-  private readonly resolve: (hostname: string) => Promise<readonly string[]>;
-  private readonly assertProxyResolution: (
-    hostname: string,
-    addresses: readonly string[],
-  ) => Promise<void>;
   private readonly maxRequestBytes: number;
   private readonly maxResponseBytes: number;
   private readonly timeoutMs: number;
   private readonly clock: () => Date;
 
-  constructor(options: JiraWebhookClientOptions) {
+  constructor(options: JiraWebhookClientOptions = {}) {
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch;
-    this.resolve = options.resolve ?? resolvePublicAddresses;
-    this.assertProxyResolution = options.assertProxyResolution;
     this.maxRequestBytes = options.maxRequestBytes ?? MAX_REQUEST_BYTES;
     this.maxResponseBytes = options.maxResponseBytes ?? MAX_RESPONSE_BYTES;
     this.timeoutMs = options.timeoutMs ?? 10_000;
@@ -228,15 +213,7 @@ export class HttpJiraWebhookClient implements JiraWebhookClientPort {
     if (body && Buffer.byteLength(body, 'utf8') > this.maxRequestBytes) {
       throw new ProviderEgressError();
     }
-    const addresses = await this.providerAddresses();
-    const bindingNonce = randomBytes(16).toString('hex');
-    const proxy = new ProxyAgent({
-      uri: `http://localhost:${EGRESS_PROXY_PORT}`,
-      headers: {
-        'x-folklore-egress-address-set-sha256': this.addressSetDigest(addresses, bindingNonce),
-        'x-folklore-egress-binding-nonce': bindingNonce,
-      },
-    });
+    const proxy = new ProxyAgent({ uri: EGRESS_PROXY_URL });
 
     try {
       let response: Response;
@@ -289,18 +266,6 @@ export class HttpJiraWebhookClient implements JiraWebhookClientPort {
         // A close failure cannot expose provider response data.
       }
     }
-  }
-
-  private async providerAddresses(): Promise<readonly string[]> {
-    let addresses: readonly string[];
-    try {
-      addresses = await this.resolve(JIRA_GATEWAY_HOST);
-      assertPublicAddressSet(addresses);
-      await this.assertProxyResolution(JIRA_GATEWAY_HOST, addresses);
-    } catch {
-      throw new ProviderEgressError();
-    }
-    return addresses;
   }
 
   private async readResponse(response: Response): Promise<Uint8Array> {
@@ -499,12 +464,6 @@ export class HttpJiraWebhookClient implements JiraWebhookClientPort {
       throw new JiraWebhookResponseError();
     }
     return value;
-  }
-
-  private addressSetDigest(addresses: readonly string[], nonce: string): string {
-    return createHash('sha256')
-      .update(JSON.stringify({ addresses: [...addresses], nonce }))
-      .digest('hex');
   }
 }
 

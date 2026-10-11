@@ -1,8 +1,5 @@
-import { randomBytes, createHash } from 'node:crypto';
-import { lookup as dnsLookup } from 'node:dns/promises';
-import { isIP } from 'node:net';
 import { ProxyAgent } from 'undici';
-import { EGRESS_PROXY_PORT } from './proxy.js';
+import { EGRESS_PROXY_URL } from './proxy.js';
 
 export type ProviderTokenOperation =
   | 'code'
@@ -59,9 +56,6 @@ export interface VerifiedProviderConfig {
 
 export interface ProviderTokenFetchOptions {
   fetchImpl?: typeof globalThis.fetch;
-  resolve?: (hostname: string) => Promise<readonly string[]>;
-  /** The host proxy compares the supplied address-set digest before CONNECT. */
-  assertProxyResolution: (hostname: string, addresses: readonly string[]) => Promise<void>;
   maxRequestBytes?: number;
   maxResponseBytes?: number;
   timeoutMs?: number;
@@ -106,8 +100,6 @@ interface BoundProviderRequest {
   executable: ExecutableProviderRequest;
   normalizedEndpoint: string;
   fetchImpl: typeof globalThis.fetch;
-  resolve: (hostname: string) => Promise<readonly string[]>;
-  assertProxyResolution: (hostname: string, addresses: readonly string[]) => Promise<void>;
   maxRequestBytes: number;
   maxResponseBytes: number;
   timeoutMs: number;
@@ -117,7 +109,7 @@ interface BoundProviderRequest {
 export function createProviderTokenFetch(
   config: VerifiedProviderConfig,
   request: ProviderTokenRequest,
-  options: ProviderTokenFetchOptions,
+  options: ProviderTokenFetchOptions = {},
 ): () => Promise<Response> {
   assertSupportedProvider(config.kind);
   const executable = buildProviderRequest(config, request);
@@ -126,70 +118,57 @@ export function createProviderTokenFetch(
     executable.query,
   );
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
-  const resolve = options.resolve ?? resolvePublicAddresses;
   const maxRequestBytes = options.maxRequestBytes ?? DEFAULT_MAX_REQUEST_BYTES;
   const maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
   const timeoutMs = options.timeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS;
-  const assertProxyResolution = options.assertProxyResolution;
 
   return () =>
     executeProviderRequest({
       executable,
       normalizedEndpoint,
       fetchImpl,
-      resolve,
-      assertProxyResolution,
       maxRequestBytes,
       maxResponseBytes,
       timeoutMs,
     });
 }
 
+// An enclave has no resolver: the host proxy resolves and gates; TLS server auth stops misdirection.
 async function executeProviderRequest(bound: BoundProviderRequest): Promise<Response> {
-  const addresses = await resolveProviderAddresses(bound);
   const bodyLength = bound.executable.body ? Buffer.byteLength(bound.executable.body) : 0;
   if (bodyLength > bound.maxRequestBytes) throw new ProviderEgressError();
-  const bindingNonce = randomBytes(16).toString('hex');
-  const proxy = new ProxyAgent({
-    uri: `http://localhost:${EGRESS_PROXY_PORT}`,
-    headers: {
-      'x-folklore-egress-address-set-sha256': addressSetDigest(addresses, bindingNonce),
-      'x-folklore-egress-binding-nonce': bindingNonce,
-    },
-  });
+  const proxy = new ProxyAgent({ uri: EGRESS_PROXY_URL });
   try {
-    const response = await bound.fetchImpl(bound.normalizedEndpoint, {
-      method: bound.executable.method,
-      headers: new Headers(bound.executable.headers),
-      redirect: 'manual',
-      signal: AbortSignal.timeout(bound.timeoutMs),
-      dispatcher: proxy,
-      ...(bound.executable.body ? { body: bound.executable.body } : {}),
-    } as RequestInit & { dispatcher: ProxyAgent });
-    if (bound.executable.acceptsNoContent && response.status === 204) {
-      return new Response(null, { status: 204 });
-    }
-    const buffered = await bufferProviderResponse(
-      response,
-      bound.executable.allowedContentTypes,
-      bound.maxResponseBytes,
-    );
-    return buffered;
+    return await sendThroughProxy(bound, proxy);
+  } catch (error) {
+    throw classifyProviderFailure(error);
   } finally {
-    await proxy.close();
+    await proxy.close().catch(() => undefined);
   }
 }
 
-async function resolveProviderAddresses(bound: BoundProviderRequest): Promise<readonly string[]> {
-  const hostname = new URL(bound.normalizedEndpoint).hostname;
-  const addresses = await bound.resolve(hostname);
-  assertPublicAddressSet(addresses);
-  try {
-    await bound.assertProxyResolution(hostname, addresses);
-  } catch {
-    throw new ProviderEgressError();
+async function sendThroughProxy(bound: BoundProviderRequest, proxy: ProxyAgent): Promise<Response> {
+  const response = await bound.fetchImpl(bound.normalizedEndpoint, {
+    method: bound.executable.method,
+    headers: new Headers(bound.executable.headers),
+    redirect: 'manual',
+    signal: AbortSignal.timeout(bound.timeoutMs),
+    dispatcher: proxy,
+    ...(bound.executable.body ? { body: bound.executable.body } : {}),
+  } as RequestInit & { dispatcher: ProxyAgent });
+  if (bound.executable.acceptsNoContent && response.status === 204) {
+    return new Response(null, { status: 204 });
   }
-  return addresses;
+  return bufferProviderResponse(
+    response,
+    bound.executable.allowedContentTypes,
+    bound.maxResponseBytes,
+  );
+}
+
+function classifyProviderFailure(error: unknown): Error {
+  if (error instanceof ProviderEgressError || error instanceof ProviderRejectedError) return error;
+  return new ProviderEgressError();
 }
 
 async function bufferProviderResponse(
@@ -544,93 +523,4 @@ export function normalizeEndpoint(value: string, allowedHosts: readonly string[]
   }
   if (url.href !== value) throw new ProviderEgressError();
   return url.href;
-}
-
-export async function resolvePublicAddresses(hostname: string): Promise<readonly string[]> {
-  const results = await dnsLookup(hostname, { all: true, verbatim: true });
-  return [...new Set(results.map((entry) => entry.address))].sort();
-}
-
-export async function assertStablePublicAddresses(
-  hostname: string,
-  addresses: readonly string[],
-): Promise<void> {
-  const current = await resolvePublicAddresses(hostname);
-  if (
-    current.length !== addresses.length ||
-    current.some((address, index) => address !== addresses[index])
-  ) {
-    throw new ProviderEgressError();
-  }
-}
-
-export function assertPublicAddressSet(addresses: readonly string[]): void {
-  if (
-    addresses.length === 0 ||
-    new Set(addresses).size !== addresses.length ||
-    addresses.some((address) => !isPublicAddress(address))
-  ) {
-    throw new ProviderEgressError();
-  }
-}
-
-function addressSetDigest(addresses: readonly string[], nonce: string): string {
-  return createHash('sha256')
-    .update(JSON.stringify({ addresses: [...addresses], nonce }))
-    .digest('hex');
-}
-
-function isPublicAddress(address: string): boolean {
-  const kind = isIP(address);
-  if (kind === 4) return isPublicIpv4(address);
-  if (kind === 6) return isPublicIpv6(address);
-  return false;
-}
-
-function isPublicIpv4(address: string): boolean {
-  const octets = address.split('.').map(Number);
-  if (
-    octets.length !== 4 ||
-    octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
-  ) {
-    return false;
-  }
-  const [a, b, c] = octets as [number, number, number, number];
-  return !(
-    a === 0 ||
-    a === 10 ||
-    a === 127 ||
-    (a === 100 && b >= 64 && b <= 127) ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 0 && c === 0) ||
-    (a === 192 && b === 0 && c === 2) ||
-    (a === 192 && b === 168) ||
-    (a === 198 && (b === 18 || b === 19)) ||
-    (a === 198 && b === 51 && c === 100) ||
-    (a === 203 && b === 0 && c === 113) ||
-    a >= 224
-  );
-}
-
-function isPublicIpv6(address: string): boolean {
-  const normalized = address.toLowerCase();
-  if (normalized.startsWith('::ffff:')) {
-    const mapped = normalized.slice('::ffff:'.length);
-    if (isIP(mapped) === 4) return isPublicIpv4(mapped);
-    return false;
-  }
-  return !(
-    normalized === '::1' ||
-    normalized === '::' ||
-    normalized.startsWith('fc') ||
-    normalized.startsWith('fd') ||
-    normalized.startsWith('fe8') ||
-    normalized.startsWith('fe9') ||
-    normalized.startsWith('fea') ||
-    normalized.startsWith('feb') ||
-    normalized.startsWith('ff') ||
-    normalized.startsWith('64:ff9b:') ||
-    normalized.startsWith('2001:db8:')
-  );
 }

@@ -4,7 +4,7 @@ import { HttpsProxyAgent } from 'https-proxy-agent';
 // Lock-step with the socat forwarder in enclave/entrypoint.sh and the vsock bridge in
 // infra/src/enclave.ts (EGRESS_PROXY_VSOCK_PORT) — one literal, three files.
 export const EGRESS_PROXY_PORT = 8002;
-const PROXY_URL = `http://localhost:${EGRESS_PROXY_PORT}`;
+export const EGRESS_PROXY_URL = `http://localhost:${EGRESS_PROXY_PORT}`;
 
 // Loopback callers — the AWS vsock proxy (:8000) and the inference vsock fallback (:8001) — must
 // bypass the egress proxy or unseal and synthesis break. Production inference no longer takes that
@@ -19,7 +19,7 @@ export interface EgressProxyConfig {
 }
 
 export function buildEgressProxyConfig(): EgressProxyConfig {
-  return { httpProxy: PROXY_URL, httpsProxy: PROXY_URL, noProxy: LOOPBACK_NO_PROXY };
+  return { httpProxy: EGRESS_PROXY_URL, httpsProxy: EGRESS_PROXY_URL, noProxy: LOOPBACK_NO_PROXY };
 }
 
 // Routes external fetch/undici SDKs through the CONNECT proxy while loopback bypasses it;
@@ -33,7 +33,7 @@ let externalProxyAgent: HttpsProxyAgent<string> | undefined;
 
 // Slack's WebClient uses axios with `proxy: false`, so it must be handed an explicit agent.
 export function externalHttpsProxyAgent(): HttpsProxyAgent<string> {
-  return (externalProxyAgent ??= new HttpsProxyAgent(PROXY_URL));
+  return (externalProxyAgent ??= new HttpsProxyAgent(EGRESS_PROXY_URL));
 }
 
 let exportProxyDispatcher: ProxyAgent | undefined;
@@ -42,7 +42,7 @@ let exportProxyDispatcher: ProxyAgent | undefined;
 // — belt-and-suspenders over the global dispatcher, so the export write can never dial
 // a destination host directly and fails closed against the host allowlist.
 export function proxiedExportFetch(): typeof globalThis.fetch {
-  const dispatcher = (exportProxyDispatcher ??= new ProxyAgent(PROXY_URL));
+  const dispatcher = (exportProxyDispatcher ??= new ProxyAgent(EGRESS_PROXY_URL));
   return ((input, init) =>
     globalThis.fetch(input, { ...init, dispatcher } as RequestInit)) as typeof globalThis.fetch;
 }

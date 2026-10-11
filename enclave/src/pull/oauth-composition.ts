@@ -19,9 +19,9 @@ import { HttpProviderTokenClient } from './HttpProviderTokenClient.js';
 import { SealedCodeGrantOpener } from './SealedCodeGrantOpener.js';
 import { EnclaveProviderRefreshSecretLoader } from './EnclaveProviderRefreshSecretLoader.js';
 import { EGRESS_PROXY_PORT } from '../egress/proxy.js';
-import {
-  assertStablePublicAddresses,
-  type ProviderTokenFetchOptions,
+import type {
+  ProviderTokenFetchOptions,
+  VerifiedProviderConfig,
 } from '../egress/provider-token-fetch.js';
 import { HttpJiraWebhookClient } from './HttpJiraWebhookClient.js';
 import {
@@ -36,7 +36,6 @@ import {
 import { S3JiraWebhookReplayStore } from '../ingest/S3JiraWebhookReplayStore.js';
 import type { OAuthRefreshCommand, OAuthRefreshMetadataUpdate } from '@folklore/contracts/enclave';
 import type { WebhookLifecycleDelivery } from '@folklore/contracts/enclave';
-import type { VerifiedProviderConfig } from '../egress/provider-token-fetch.js';
 import {
   bootManifestOAuthProviderSchema,
   controlPlaneIdentitySchema,
@@ -144,10 +143,9 @@ export function createOAuthRuntime(options: OAuthCompositionOptions): OAuthRunti
     identity,
     options.readControlPlaneSpkiSha256,
   );
-  const providerFetchOptions: ProviderTokenFetchOptions = {
-    assertProxyResolution: assertStablePublicAddresses,
-    ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
-  };
+  const providerFetchOptions: ProviderTokenFetchOptions = options.fetchImpl
+    ? { fetchImpl: options.fetchImpl }
+    : {};
   const providerSecrets = new EnclaveProviderRefreshSecretLoader(
     { getSecretValue: options.getSecretValue },
     options.kmsKeyId,
