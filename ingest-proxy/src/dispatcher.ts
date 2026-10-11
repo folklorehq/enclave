@@ -12,6 +12,7 @@ import { checkRateLimit } from './rate-limiter.js';
 import { fetchDispatcherAuthSecret, computeDispatcherAuthHmac } from './dispatcher-auth.js';
 import { ingestFunctionName } from './ingest-function-name.js';
 import { UUID_PATTERN } from './uuid-pattern.js';
+import { acceptWebhook, loggableSource, rejectWebhook } from './webhook-outcome-log.js';
 import {
   captureNotionVerificationToken,
   getNotionVerificationCaptureConfig,
@@ -431,7 +432,7 @@ function logSecretFetchFailure(
     JSON.stringify({
       msg: 'dispatcher: webhook secret fetch failed',
       scope,
-      source,
+      source: loggableSource(source),
       ...(tenantId ? { tenantId } : {}),
       errorName: err instanceof Error ? err.name : typeof err,
     }),
@@ -543,12 +544,13 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 
     const source = event.pathParameters?.['source'];
     const tenantId = event.pathParameters?.['tenant_id'];
-    if (!source) return { statusCode: 400 };
+    const mode: RoutingMode = tenantId ? 'url' : 'payload';
+    if (!source) return rejectWebhook(source, mode, 'source_unrecognized');
 
     const body = event.body ?? '';
     const headers = normalizeHeaders(event.headers);
     if (source === JIRA_SOURCE && Buffer.byteLength(body, 'utf8') > MAX_JIRA_RAW_BODY_BYTES) {
-      return { statusCode: 413 };
+      return rejectWebhook(source, mode, 'payload_too_large');
     }
     let parsed: unknown;
     try {
@@ -570,7 +572,9 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       }
     }
 
-    if (!EXTRACTORS[source] && !tenantId) return { statusCode: 400 };
+    if (!tenantId && !Object.hasOwn(EXTRACTORS, source)) {
+      return rejectWebhook(source, mode, 'source_unrecognized');
+    }
 
     if (!tenantId && source === 'notion' && isNotionVerificationChallenge(parsed)) {
       const result = await captureNotionVerificationToken(
@@ -581,7 +585,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       );
       return result === 'captured'
         ? { statusCode: 200, headers: { 'content-type': 'text/plain' }, body: '' }
-        : { statusCode: 503 };
+        : rejectWebhook(source, mode, 'verification_capture_unavailable');
     }
 
     if (isVerificationChallenge(source, parsed)) {
@@ -597,7 +601,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 
     // URL-routed mode: tenantId is in the path, use per-tenant secret, skip resolveTenant()
     if (tenantId) {
-      if (!UUID_PATTERN.test(tenantId)) return { statusCode: 401 };
+      if (!UUID_PATTERN.test(tenantId)) return rejectWebhook(source, mode, 'tenant_invalid');
       const bearer: ReturnType<typeof bearerAuthorization> =
         source === JIRA_SOURCE ? bearerAuthorization(headers['authorization']) : { present: false };
       if (bearer.present) {
@@ -606,13 +610,15 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
           headers['x-hub-signature'] !== undefined ||
           headers['x-hub-signature-256'] !== undefined
         ) {
-          return { statusCode: 401 };
+          return rejectWebhook(source, mode, 'auth_malformed');
         }
         const routeId = routeQueryValue(event);
-        if (!routeId) return { statusCode: 401 };
-        if (!isJiraBearerAdmissible(bearer.value)) return { statusCode: 401 };
+        if (!routeId) return rejectWebhook(source, mode, 'auth_malformed');
+        if (!isJiraBearerAdmissible(bearer.value)) {
+          return rejectWebhook(source, mode, 'auth_malformed');
+        }
         const sourceIp = requestSourceIp(event);
-        if (!consumeJiraAdmission(sourceIp)) return { statusCode: 429 };
+        if (!consumeJiraAdmission(sourceIp)) return rejectWebhook(source, mode, 'rate_limited');
 
         const oauthContext = oauthDispatchContext(
           event,
@@ -631,7 +637,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
           rawQuery: oauthContext.rawQuery,
           webhookIdentifier: oauthContext.webhookIdentifier,
         });
-        if (!parsedEnvelope.success) return { statusCode: 401 };
+        if (!parsedEnvelope.success) return rejectWebhook(source, mode, 'auth_malformed');
         const payloadBody = JSON.stringify(parsedEnvelope.data);
         if (
           !fitsEncryptedSqsMessage({
@@ -642,12 +648,14 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
             messageType: 'jira-oauth-envelope',
           })
         ) {
-          return { statusCode: 413 };
+          return rejectWebhook(source, mode, 'payload_too_large');
         }
 
         const routingDecision = await isOAuthRoutingAllowed(tenantId, source, routeId);
-        if (routingDecision === 'unavailable') return { statusCode: 503 };
-        if (routingDecision !== 'allowed') return { statusCode: 401 };
+        if (routingDecision === 'unavailable') {
+          return rejectWebhook(source, mode, 'routing_unavailable');
+        }
+        if (routingDecision !== 'allowed') return rejectWebhook(source, mode, 'routing_denied');
 
         const invokePayload = await buildInvokePayload(
           tenantId,
@@ -658,20 +666,24 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
           'url',
           oauthContext,
         );
-        if (!invokePayload) return { statusCode: 503 };
+        if (!invokePayload) return rejectWebhook(source, mode, 'dispatcher_auth_unavailable');
         const invokeResult = await lambda.send(new InvokeCommand(invokePayload));
-        if (!downstreamInvokeSucceeded(invokeResult)) return { statusCode: 503 };
-        return { statusCode: 200 };
+        if (!downstreamInvokeSucceeded(invokeResult)) {
+          return rejectWebhook(source, mode, 'downstream_failed');
+        }
+        return acceptWebhook(source, mode);
       }
 
-      if (source === JIRA_SOURCE) return { statusCode: 401 };
+      if (source === JIRA_SOURCE) return rejectWebhook(source, mode, 'auth_unsupported');
       const routingDecision = await isRoutingAllowed(tenantId, source, 'url');
-      if (routingDecision === 'unavailable') return { statusCode: 503 };
-      if (routingDecision !== 'allowed') return { statusCode: 401 };
+      if (routingDecision === 'unavailable') {
+        return rejectWebhook(source, mode, 'routing_unavailable');
+      }
+      if (routingDecision !== 'allowed') return rejectWebhook(source, mode, 'routing_denied');
       const secret = await fetchPerTenantSecret(tenantId, source);
-      if (!secret) return { statusCode: 503 };
+      if (!secret) return rejectWebhook(source, mode, 'secret_unavailable');
       const signatureValid = verifySignature(source, headers, body, secret);
-      if (!signatureValid) return { statusCode: 401 };
+      if (!signatureValid) return rejectWebhook(source, mode, 'signature_invalid');
 
       // Zoom CRC: handle endpoint.url_validation AFTER signature verification
       const zoomCrc = handleZoomCrc(source, parsed, secret);
@@ -687,7 +699,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       const rateLimitTable = process.env['RATE_LIMIT_TABLE'];
       if (rateLimitTable) {
         if (!(await checkRateLimit(tenantId, source))) {
-          return { statusCode: 429 };
+          return rejectWebhook(source, mode, 'rate_limited');
         }
       }
 
@@ -699,19 +711,21 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
         ingestFunctionName(tenantId),
         'url',
       );
-      if (!invokePayload) return { statusCode: 503 };
+      if (!invokePayload) return rejectWebhook(source, mode, 'dispatcher_auth_unavailable');
       const invokeResult = await lambda.send(new InvokeCommand(invokePayload));
-      if (!downstreamInvokeSucceeded(invokeResult)) return { statusCode: 503 };
+      if (!downstreamInvokeSucceeded(invokeResult)) {
+        return rejectWebhook(source, mode, 'downstream_failed');
+      }
 
-      return { statusCode: 200 };
+      return acceptWebhook(source, mode);
     }
 
     // Shared-secret mode: use shared secret for signature verification
     const secret = await fetchSharedSecret(source);
-    if (!secret) return { statusCode: 503 };
+    if (!secret) return rejectWebhook(source, mode, 'secret_unavailable');
 
     const signatureValid = verifySignature(source, headers, body, secret);
-    if (!signatureValid) return { statusCode: 401 };
+    if (!signatureValid) return rejectWebhook(source, mode, 'signature_invalid');
 
     if (source === INTERCOM_SOURCE && isIntercomPing(parsed)) {
       return { statusCode: 200 };
@@ -728,16 +742,18 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     }
 
     const tenant = await resolveTenant(ddb, source, parsed, headers as Record<string, string>);
-    if (!tenant) return { statusCode: 401 };
+    if (!tenant) return rejectWebhook(source, mode, 'tenant_unresolved');
     const routingDecision = await isRoutingAllowed(tenant.orgId, source, 'payload');
-    if (routingDecision === 'unavailable') return { statusCode: 503 };
-    if (routingDecision !== 'allowed') return { statusCode: 401 };
+    if (routingDecision === 'unavailable') {
+      return rejectWebhook(source, mode, 'routing_unavailable');
+    }
+    if (routingDecision !== 'allowed') return rejectWebhook(source, mode, 'routing_denied');
 
     // Rate limiting (skip if RATE_LIMIT_TABLE env var is not configured)
     const rateLimitTable = process.env['RATE_LIMIT_TABLE'];
     if (rateLimitTable) {
       if (!(await checkRateLimit(tenant.orgId, source))) {
-        return { statusCode: 429 };
+        return rejectWebhook(source, mode, 'rate_limited');
       }
     }
 
@@ -749,17 +765,18 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       ingestFunctionName(tenant.orgId),
       'payload',
     );
-    if (!invokePayload) return { statusCode: 503 };
+    if (!invokePayload) return rejectWebhook(source, mode, 'dispatcher_auth_unavailable');
     const invokeResult = await lambda.send(new InvokeCommand(invokePayload));
-    if (!downstreamInvokeSucceeded(invokeResult)) return { statusCode: 503 };
+    if (!downstreamInvokeSucceeded(invokeResult)) {
+      return rejectWebhook(source, mode, 'downstream_failed');
+    }
 
-    return { statusCode: 200 };
+    return acceptWebhook(source, mode);
   } catch (err) {
-    const source = event.pathParameters?.['source'] ?? 'unknown';
     console.error(
       JSON.stringify({
         msg: 'dispatcher: unhandled error',
-        source,
+        source: loggableSource(event.pathParameters?.['source']),
         errorName: err instanceof Error ? err.name : typeof err,
       }),
     );

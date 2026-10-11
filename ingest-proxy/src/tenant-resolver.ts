@@ -110,6 +110,7 @@ export async function resolveTenant(
   body: unknown,
   headers: Record<string, string>,
 ): Promise<{ orgId: string } | null> {
+  if (!Object.hasOwn(EXTRACTORS, source)) return null;
   const extractor = EXTRACTORS[source];
   if (!extractor) return null;
 

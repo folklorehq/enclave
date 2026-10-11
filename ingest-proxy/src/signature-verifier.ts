@@ -231,5 +231,6 @@ export function verifySignature(
   body: string,
   secret: string,
 ): boolean {
+  if (!Object.hasOwn(signatureVerifiers, source)) return false;
   return signatureVerifiers[source]?.(headers, body, secret) ?? false;
 }
