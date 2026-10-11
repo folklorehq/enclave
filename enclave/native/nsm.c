@@ -21,7 +21,8 @@ struct nsm_raw {
 
 #define NSM_IOCTL _IOWR(NSM_IOCTL_MAGIC, 0, struct nsm_raw)
 #define NSM_DEV "/dev/nsm"
-#define REQ_MAX_SIZE 512
+/* Matches the kernel driver's NSM_REQUEST_MAX_SIZE. */
+#define REQ_MAX_SIZE 0x1000
 #define RESP_MAX_SIZE (16 * 1024)
 
 static void secure_zero(void *buffer, size_t size) {

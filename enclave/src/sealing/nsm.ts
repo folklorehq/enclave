@@ -4,7 +4,10 @@ import { decode } from 'cborg';
 
 const require = createRequire(import.meta.url);
 const STUB = process.env['NSM_STUB'] === '1';
-const REQUEST_MAX_BYTES = 512;
+// Matches the NSM driver's NSM_REQUEST_MAX_SIZE; each field also carries its own cap below.
+export const REQUEST_MAX_BYTES = 0x1000;
+export const USER_DATA_MAX_BYTES = 512;
+const PUBLIC_KEY_MAX_BYTES = 512;
 const RESPONSE_MAX_BYTES = 16 * 1024;
 const NONCE_BYTES = 32;
 const ENTROPY_MAX_BYTES = 256;
@@ -106,7 +109,7 @@ function validateEntropyRequest(bytes: number): void {
 }
 
 function encodeAttestationRequest(request: NsmAttestationRequest): Uint8Array {
-  const publicKey = validateOptionalByteString(request.publicKey);
+  const publicKey = validateOptionalPublicKey(request.publicKey);
   const nonce = validateOptionalNonce(request.nonce);
   const userData = validateOptionalUserData(request.userData);
   const encoded = Uint8Array.from([
@@ -138,20 +141,16 @@ function validateOptionalNonce(value: Uint8Array | undefined): Uint8Array | unde
 
 function validateOptionalUserData(value: Uint8Array | undefined): Uint8Array | undefined {
   if (value === undefined) return undefined;
-  return validateByteString(value, false);
+  return validateByteString(value, USER_DATA_MAX_BYTES);
 }
 
-function validateOptionalByteString(value: Uint8Array | undefined): Uint8Array | undefined {
+function validateOptionalPublicKey(value: Uint8Array | undefined): Uint8Array | undefined {
   if (value === undefined) return undefined;
-  return validateByteString(value, false);
+  return validateByteString(value, PUBLIC_KEY_MAX_BYTES);
 }
 
-function validateByteString(value: unknown, allowEmpty: boolean): Uint8Array {
-  if (
-    !(value instanceof Uint8Array) ||
-    (!allowEmpty && value.byteLength === 0) ||
-    value.byteLength > REQUEST_MAX_BYTES
-  ) {
+function validateByteString(value: unknown, maxBytes: number): Uint8Array {
+  if (!(value instanceof Uint8Array) || value.byteLength === 0 || value.byteLength > maxBytes) {
     throw new Error('nsm_invalid_request');
   }
   return value;
@@ -215,11 +214,7 @@ function requireNative(): { call(request: Buffer): Buffer } {
   return require('../native/nsm.node') as { call(request: Buffer): Buffer };
 }
 
-// Evidence anchor: the NSM user-data anchor is a canonical CBOR map with exactly twelve
-// integer keys, no unknown keys, and a maximum full request size of 512 bytes. The exact keys are
-// version, purpose code, domain code, context digest, org ID, deployment ID, session ID, boot
-// epoch, policy generation, keyset high-water epoch, keyset high-water digest, and nonce. Raw NSM
-// documents, wire bytes, receipt ids, proof ids, and customer content never leave enclave memory.
+// The evidence anchor travels as NSM user_data, so it keeps the 512-byte field cap.
 export const EVIDENCE_ANCHOR_CBOR_VERSION = 1 as const;
 export const EVIDENCE_ANCHOR_PURPOSE_CODE = 1 as const;
 export const EVIDENCE_ANCHOR_DOMAIN_CODE = 1 as const;

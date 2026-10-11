@@ -17,6 +17,7 @@ import {
 import { inferenceModel, inferenceModelRevision } from './phala.js';
 import type { SynthesisInference } from './CachedInference.js';
 import { llmCacheKey } from './llm-cache.js';
+import { TrustedTimeAuthorityError } from './TrustedTimeAuthority.js';
 import type { RecentGenerationHighWaterPort } from './ports.js';
 import {
   RENEWAL_GRACE_READ_COUNT,
@@ -31,6 +32,8 @@ const REFRESH_REASON_PREFIXES = [
   'high_water_',
   'trusted_time_',
   'runtime_evidence_',
+  'nsm_',
+  'clock_raw_',
 ] as const;
 const MAX_REFRESH_REASON_DEPTH = 8;
 const REFRESH_READ_ATTEMPTS = 2;
@@ -452,7 +455,8 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     return (
       value instanceof Error &&
       (Object.getPrototypeOf(value) === Error.prototype ||
-        value instanceof ServiceUnavailableError) &&
+        value instanceof ServiceUnavailableError ||
+        value instanceof TrustedTimeAuthorityError) &&
       REFRESH_REASON_PATTERN.test(value.message) &&
       REFRESH_REASON_PREFIXES.some((prefix) => value.message.startsWith(prefix))
     );

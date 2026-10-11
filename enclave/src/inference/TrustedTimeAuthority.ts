@@ -16,6 +16,8 @@ import type {
   TrustedTimeSample,
 } from '@folklore/inference';
 
+import { USER_DATA_MAX_BYTES } from '../sealing/nsm.js';
+
 interface TrustedTimeCheckpoint {
   readonly binding: TrustedTimeBindingV1;
   readonly nsmTimestampMs: number;
@@ -51,7 +53,6 @@ export type TrustedTimeAuthorityErrorCode =
   | 'trusted_time_drift';
 
 const NONCE_BYTES = 32;
-const MAX_USER_DATA_BYTES = 512;
 const NANOSECONDS_PER_MILLISECOND = 1_000_000n;
 const DEFAULT_SAMPLE_WINDOW_BOUND_MS = 1_000;
 const DEFAULT_MAXIMUM_CHECKPOINT_AGE_MS = 60_000;
@@ -72,8 +73,11 @@ const DECISION_REASONS = new Set<TrustedTimeDecisionReason>([
 ]);
 
 export class TrustedTimeAuthorityError extends Error {
-  constructor(public readonly code: TrustedTimeAuthorityErrorCode) {
-    super(code);
+  constructor(
+    public readonly code: TrustedTimeAuthorityErrorCode,
+    options?: ErrorOptions,
+  ) {
+    super(code, options);
     this.name = 'TrustedTimeAuthorityError';
   }
 }
@@ -194,8 +198,8 @@ export class TrustedTimeAuthority implements TrustedTimeAuthorityV1Port {
         nonce: Uint8Array.from(nonce),
         userData: Uint8Array.from(userData),
       });
-    } catch {
-      throw this.failure('nsm_attestation_invalid');
+    } catch (error: unknown) {
+      throw this.failure('nsm_attestation_invalid', error);
     }
     const rawAfterNs = this.readRawClock();
     if (rawAfterNs < rawBeforeNs) throw this.closeWithFailure('clock_raw_rollback');
@@ -270,7 +274,7 @@ export class TrustedTimeAuthority implements TrustedTimeAuthorityV1Port {
   private bindingUserData(binding: TrustedTimeBindingV1): Uint8Array {
     const encoded = JSON.stringify(this.bindingValues(binding));
     const userData = new TextEncoder().encode(encoded);
-    if (userData.byteLength === 0 || userData.byteLength > MAX_USER_DATA_BYTES) {
+    if (userData.byteLength === 0 || userData.byteLength > USER_DATA_MAX_BYTES) {
       throw this.failure('nsm_attestation_invalid');
     }
     return userData;
@@ -403,7 +407,7 @@ export class TrustedTimeAuthority implements TrustedTimeAuthorityV1Port {
     this.#lastRawNs = undefined;
   }
 
-  private failure(code: TrustedTimeAuthorityErrorCode): TrustedTimeAuthorityError {
-    return new TrustedTimeAuthorityError(code);
+  private failure(code: TrustedTimeAuthorityErrorCode, cause?: unknown): TrustedTimeAuthorityError {
+    return new TrustedTimeAuthorityError(code, cause === undefined ? undefined : { cause });
   }
 }

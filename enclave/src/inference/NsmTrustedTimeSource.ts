@@ -4,7 +4,7 @@ import {
   NITRO_PAYLOAD_DECODE_OPTIONS,
   verifyAwsNitroAttestationDocument,
 } from '@folklore/nitro-attestation';
-import type { NsmAttestationPort } from '../sealing/nsm.js';
+import { USER_DATA_MAX_BYTES, type NsmAttestationPort } from '../sealing/nsm.js';
 import type { NsmAttestationDocumentV1, NsmTrustedTimeSourcePort } from '@folklore/inference';
 
 export interface NsmTrustedTimeSourceOptions {
@@ -28,7 +28,6 @@ interface ParsedNsmDocument {
 const NONCE_BYTES = 32;
 const PUBLIC_KEY_BYTES = 32;
 const PCR0_BYTES = 48;
-const USER_DATA_MAX_BYTES = 512;
 const DOCUMENT_MAX_BYTES = 16 * 1024;
 const coseDecodeOptions = {
   strict: true,
@@ -69,8 +68,8 @@ export class NsmTrustedTimeSource implements NsmTrustedTimeSourcePort {
         nonce: Uint8Array.from(input.nonce),
         userData: Uint8Array.from(input.userData),
       });
-    } catch {
-      throw new Error('nsm_attestation_invalid');
+    } catch (error: unknown) {
+      throw new Error('nsm_attestation_invalid', { cause: error });
     }
     if (!(rawDocument instanceof Uint8Array) || rawDocument.byteLength > DOCUMENT_MAX_BYTES) {
       throw new Error('nsm_attestation_invalid');
