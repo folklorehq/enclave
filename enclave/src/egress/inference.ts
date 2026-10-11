@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { X509Certificate, createHash } from 'node:crypto';
 import { checkServerIdentity } from 'node:tls';
 import { matchesSpkiPin } from '@folklore/utils';
 import type { InferenceTrustPolicyV1 } from '@folklore/contracts';
@@ -58,16 +58,29 @@ export function createPinnedInferenceTransport(
   };
 }
 
-function verifyInferenceCertificate(
+export function verifyInferenceCertificate(
   hostname: string,
   certificate: Parameters<typeof checkServerIdentity>[1],
   expectedPins: readonly string[],
 ): Error | undefined {
   const tlsError = checkServerIdentity(hostname, certificate);
   if (tlsError) return tlsError;
-  if (!certificate.pubkey) return new Error('inference_spki_unavailable');
-  const actualPin = createHash('sha256').update(certificate.pubkey).digest('hex');
+  const spki = subjectPublicKeyInfoDer(certificate);
+  if (!spki) return new Error('inference_spki_unavailable');
+  const actualPin = createHash('sha256').update(spki).digest('hex');
   return matchesSpkiPin(expectedPins, actualPin)
     ? undefined
     : new Error('inference_spki_pin_mismatch');
+}
+
+// Node's `certificate.pubkey` is the bare EC point for ECDSA keys, not the SPKI the pin is taken over.
+function subjectPublicKeyInfoDer(
+  certificate: Parameters<typeof checkServerIdentity>[1],
+): Buffer | undefined {
+  if (!certificate.raw) return undefined;
+  try {
+    return new X509Certificate(certificate.raw).publicKey.export({ type: 'spki', format: 'der' });
+  } catch {
+    return undefined;
+  }
 }
