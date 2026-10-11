@@ -9,8 +9,10 @@ import type { ProviderTokenClient } from './ProviderTokenClient.js';
 import type { SealedCodeGrantOpener } from './SealedCodeGrantOpener.js';
 import { gitHubInstallationBindingPlaintext } from './github-installation-binding.js';
 import type { VerifiedProviderConfig } from '../egress/provider-token-fetch.js';
+import { refusalFrom } from './oauth-failure-reason.js';
 
 const OWNERSHIP_UNVERIFIED = 'github_installation_ownership_unverified';
+const MINT_FAILED = 'github_mint_failed';
 
 export type GitHubInstallationSourceKind = 'github';
 
@@ -66,8 +68,8 @@ export class EnclaveGitHubInstallationTokenService {
     let grant: EnclaveAuthorizationCodeGrant;
     try {
       grant = this.grants.open(input);
-    } catch {
-      throw new Error(OWNERSHIP_UNVERIFIED);
+    } catch (error) {
+      throw refusalFrom(OWNERSHIP_UNVERIFIED, error);
     }
     if (!this.grantMatches(grant, input)) {
       grant.authorizationCode = '';
@@ -107,15 +109,15 @@ export class EnclaveGitHubInstallationTokenService {
     grant: EnclaveAuthorizationCodeGrant,
     installationId: string,
   ): Promise<void> {
-    let owned = false;
+    let owned: boolean;
     try {
       owned = await this.provider.userAdministersGitHubInstallation({
         config,
         code: grant.authorizationCode,
         installationId,
       });
-    } catch {
-      owned = false;
+    } catch (error) {
+      throw refusalFrom(OWNERSHIP_UNVERIFIED, error);
     }
     if (!owned) throw new Error(OWNERSHIP_UNVERIFIED);
   }
@@ -136,7 +138,7 @@ export class EnclaveGitHubInstallationTokenService {
         !minted.expiresAt ||
         !Number.isFinite(Date.parse(minted.expiresAt))
       ) {
-        throw new Error('github_mint_failed');
+        throw new Error(MINT_FAILED);
       }
       minted.accessToken = '';
       // Pulls mint per use, so the stored credential carries the proven installation, not a token.
@@ -167,8 +169,8 @@ export class EnclaveGitHubInstallationTokenService {
         metadata,
       });
       return metadata;
-    } catch {
-      throw new Error('github_mint_failed');
+    } catch (error) {
+      throw refusalFrom(MINT_FAILED, error);
     } finally {
       if (minted) minted.accessToken = '';
     }

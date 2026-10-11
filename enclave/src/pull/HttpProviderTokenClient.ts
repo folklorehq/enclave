@@ -16,6 +16,7 @@ import {
   type ProviderTokenFetchOptions,
   type VerifiedProviderConfig,
 } from '../egress/provider-token-fetch.js';
+import { providerOAuthErrorReason } from './oauth-failure-reason.js';
 
 const TOKEN_MAX_BYTES = 512 * 1024;
 const TOKEN_VALUE_MAX_BYTES = 16 * 1024;
@@ -159,11 +160,17 @@ export class HttpProviderTokenClient implements ProviderTokenClient {
     const parsed = await this.parse(response);
     if (!isRecord(parsed)) throw new Error('provider_token_response_invalid');
     try {
+      this.rejectOAuthErrorBody(parsed);
       return this.requireToken(parsed['access_token']);
     } finally {
       parsed['access_token'] = '';
       parsed['refresh_token'] = '';
     }
+  }
+
+  private rejectOAuthErrorBody(parsed: Record<string, unknown>): void {
+    const code = parsed['error'];
+    if (code !== undefined && code !== null) throw new Error(providerOAuthErrorReason(code));
   }
 
   private async findGitHubInstallation(

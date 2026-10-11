@@ -1,6 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import { Hono, type Context } from 'hono';
 import type { ZodType } from 'zod';
+import type { Logger } from '@folklore/core';
 import {
   connectorOAuthMetadataUpdateSchema,
   oauthDisconnectCleanupCommandSchema,
@@ -15,9 +16,13 @@ import {
   memberIdentityLinkPersistenceSchema,
   type MemberIdentityLinkPersistence,
 } from '@folklore/contracts';
+import { redemptionRefusalReason } from './oauth-failure-reason.js';
 
 const MAX_SUBMISSION_BYTES = 2_100_000;
 const BEARER_PREFIX = 'Bearer ';
+const REDEMPTION_FAILED = 'oauth_redemption_failed';
+
+type RedemptionOperation = 'source' | 'member_identity' | 'github_installation';
 
 export interface EnclaveOAuthIngressHandlers {
   resolveGeneration(input: { orgId: string; deploymentId: string }): Promise<string | null>;
@@ -40,12 +45,14 @@ export interface EnclaveOAuthIngressOptions {
   /** Deployment token loaded from SSM; callbacks never authenticate with a public URL alone. */
   authorizationToken: string;
   maxBodyBytes?: number;
+  logger?: Logger;
 }
 
 /** HTTP boundary for opaque OAuth envelopes; all redemption and persistence remain in enclave RAM. */
 export class EnclaveOAuthIngress {
   readonly app: Hono;
   private readonly maxBodyBytes: number;
+  private readonly logger: Logger | undefined;
 
   constructor(
     private readonly handlers: EnclaveOAuthIngressHandlers,
@@ -57,6 +64,7 @@ export class EnclaveOAuthIngress {
       throw new Error('oauth_ingress_body_limit_invalid');
     }
     this.authorizationToken = options.authorizationToken;
+    this.logger = options.logger;
     this.app = new Hono();
     this.app.post('/source', (context) => this.handleSource(context));
     this.app.post('/member-identity', (context) => this.handleMemberIdentity(context));
@@ -71,6 +79,7 @@ export class EnclaveOAuthIngress {
   private async handleSource(context: Context) {
     return this.handle(
       context,
+      'source',
       sealedAuthorizationCodeSubmissionSchema,
       connectorOAuthMetadataUpdateSchema,
       (input, generation) => this.handlers.redeemSource(input, generation),
@@ -80,6 +89,7 @@ export class EnclaveOAuthIngress {
   private async handleMemberIdentity(context: Context) {
     return this.handle(
       context,
+      'member_identity',
       sealedAuthorizationCodeSubmissionSchema,
       memberIdentityLinkPersistenceSchema,
       (input, generation) => this.handlers.redeemMemberIdentity(input, generation),
@@ -89,6 +99,7 @@ export class EnclaveOAuthIngress {
   private async handleGitHubInstallation(context: Context) {
     return this.handle(
       context,
+      'github_installation',
       sealedGitHubInstallationSubmissionSchema,
       connectorOAuthMetadataUpdateSchema,
       (input, generation) => this.handlers.redeemGitHubInstallation(input, generation),
@@ -124,6 +135,7 @@ export class EnclaveOAuthIngress {
     R extends ConnectorOAuthMetadataUpdate | MemberIdentityLinkPersistence,
   >(
     context: Context,
+    operation: RedemptionOperation,
     schema: ZodType<T>,
     resultSchema: ZodType<R>,
     redeem: (input: T, generation: string) => Promise<R>,
@@ -146,9 +158,19 @@ export class EnclaveOAuthIngress {
       const metadata = await redeem(parsed.data, generation);
       resultSchema.parse(metadata);
       return context.json({ accepted: true }, 202);
-    } catch {
-      return context.json({ error: 'oauth_redemption_failed' }, 503);
+    } catch (error) {
+      return this.refuseRedemption(context, operation, error);
     }
+  }
+
+  private refuseRedemption(
+    context: Context,
+    operation: RedemptionOperation,
+    error: unknown,
+  ): Response {
+    const reason = redemptionRefusalReason(error);
+    this.logger?.warn('oauth_ingress.redemption_refused', { errorCode: reason, operation });
+    return context.json({ error: REDEMPTION_FAILED, reason }, 503);
   }
 
   private async readBody(request: Request): Promise<unknown | null> {

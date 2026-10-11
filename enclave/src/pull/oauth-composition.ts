@@ -1,5 +1,6 @@
 import { matchesSpkiPin, verifyControlPlaneCertificate } from '@folklore/utils';
 import type { S3Client } from '@aws-sdk/client-s3';
+import type { Logger } from '@folklore/core';
 import { ProxyAgent } from 'undici';
 import { z } from 'zod';
 import type { EnclaveCrypto } from '../crypto/esdk.js';
@@ -98,6 +99,7 @@ export interface OAuthCompositionOptions {
   jiraWebhookMode?: JiraWebhookMode;
   jiraWebhookPilotOrgIds?: readonly string[];
   jiraWebhookClaimPolicy?: JiraWebhookClaimPolicy;
+  logger?: Logger;
 }
 
 export interface OAuthRuntime {
@@ -257,6 +259,7 @@ export function createOAuthRuntime(options: OAuthCompositionOptions): OAuthRunti
   return {
     ingress: new EnclaveOAuthIngress(handlers, {
       authorizationToken: options.authorizationToken,
+      ...(options.logger ? { logger: options.logger } : {}),
     }),
     refreshOAuthCredential: async (input) => {
       const tenant = options.resolveTenant(input.orgId);

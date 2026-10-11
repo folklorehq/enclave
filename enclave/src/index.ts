@@ -755,6 +755,7 @@ if (enabledOAuthProviders.length > 0) {
     getSecretValue: (input) => providerSecretReader.read(input),
     kmsKeyId: verifiedManifest.kmsKeyArn,
     s3,
+    logger: logger.child({ component: 'oauth_ingress' }),
   });
   oauthIngress = runtime.ingress;
   refreshOAuthCredential = runtime.refreshOAuthCredential;

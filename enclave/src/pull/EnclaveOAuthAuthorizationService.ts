@@ -12,6 +12,10 @@ import { createHash, type KeyObject } from 'node:crypto';
 import type { ProviderTokenClient, ProviderTokenResponse } from './ProviderTokenClient.js';
 import type { VerifiedProviderConfig } from '../egress/provider-token-fetch.js';
 import { SealedCodeGrantOpener } from './SealedCodeGrantOpener.js';
+import { OAuthRefusal } from './OAuthRefusal.js';
+import { oauthFailureReason } from './oauth-failure-reason.js';
+
+const REDEMPTION_FAILED = 'oauth_redemption_failed';
 
 type AuthorizationGrant = EnclaveAuthorizationCodeGrant;
 
@@ -59,9 +63,9 @@ export interface MemberIdentityLinkPersistencePort {
   persist(input: MemberIdentityLinkPersistenceRecord): Promise<void>;
 }
 
-export class EnclaveOAuthRedemptionError extends Error {
-  constructor() {
-    super('oauth_redemption_failed');
+export class EnclaveOAuthRedemptionError extends OAuthRefusal {
+  constructor(underlying?: unknown) {
+    super(REDEMPTION_FAILED, oauthFailureReason(underlying, REDEMPTION_FAILED));
     this.name = 'EnclaveOAuthRedemptionError';
   }
 }
@@ -163,7 +167,7 @@ export class EnclaveOAuthAuthorizationService {
       return metadata;
     } catch (error) {
       if (error instanceof EnclaveOAuthRedemptionError) throw error;
-      throw new EnclaveOAuthRedemptionError();
+      throw new EnclaveOAuthRedemptionError(error);
     } finally {
       grant.authorizationCode = '';
       grant.codeVerifier = null;
@@ -222,7 +226,7 @@ export class EnclaveOAuthAuthorizationService {
       return link;
     } catch (error) {
       if (error instanceof EnclaveOAuthRedemptionError) throw error;
-      throw new EnclaveOAuthRedemptionError();
+      throw new EnclaveOAuthRedemptionError(error);
     } finally {
       grant.authorizationCode = '';
       grant.codeVerifier = null;
@@ -236,8 +240,8 @@ export class EnclaveOAuthAuthorizationService {
   private decryptGrant(submission: SealedAuthorizationCodeSubmission): AuthorizationGrant {
     try {
       return this.grants.open(submission);
-    } catch {
-      throw new EnclaveOAuthRedemptionError();
+    } catch (error) {
+      throw new EnclaveOAuthRedemptionError(error);
     }
   }
 
