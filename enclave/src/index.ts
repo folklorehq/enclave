@@ -3,7 +3,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { KMSClient } from '@aws-sdk/client-kms';
 import { SQSClient } from '@aws-sdk/client-sqs';
 import { SSMClient, PutParameterCommand } from '@aws-sdk/client-ssm';
-import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { awsClientTransport } from './aws/aws-transport.js';
 import { TenantInferenceMemo } from './tenant/TenantInferenceMemo.js';
 import { TenantContextFactory } from './tenant/TenantContextFactory.js';
@@ -145,6 +145,7 @@ import {
 } from '@folklore/inference';
 import { createOAuthRuntime, createPinnedControlPlaneFetch } from './pull/oauth-composition.js';
 import { evictMintedTokensForOrg, resetMintedTokenCache } from './pull/pull-runner.js';
+import { ManifestProviderSecretReader } from './pull/ManifestProviderSecretReader.js';
 import { GitHubCodebaseConnectionResolver } from './codebase/GitHubCodebaseConnectionResolver.js';
 import { CodebaseSelectionStore } from './codebase/CodebaseSelectionStore.js';
 import { EnclaveCodebaseSettingsAdapter } from './codebase/EnclaveCodebaseSettingsAdapter.js';
@@ -730,11 +731,12 @@ if (enabledOAuthProviders.length > 0) {
   const secretReferences = new Map(
     verifiedManifest.secretReferences.map((reference) => [reference.id, reference]),
   );
+  const providerSecretReader = new ManifestProviderSecretReader(
+    new AwsBootManifestSecretsManager(secretsManager),
+    secretReferences,
+  );
   for (const provider of enabledOAuthProviders) {
-    const reference = secretReferences.get(provider.secretReferenceId);
-    if (!reference || reference.store !== 'secrets-manager') {
-      throw new Error('oauth_provider_secret_reference_invalid');
-    }
+    providerSecretReader.assertReference(provider.secretReferenceId);
   }
   const runtime = createOAuthRuntime({
     controlPlaneUrl: identity.origin,
@@ -750,25 +752,7 @@ if (enabledOAuthProviders.length > 0) {
     jiraWebhookPilotOrgIds: jiraOAuthProvider?.jiraWebhookPilotOrgIds,
     jiraWebhookClaimPolicy: jiraOAuthProvider?.jiraWebhookClaimPolicy,
     resolveTenant,
-    getSecretValue: async ({ secretId }) => {
-      const reference = secretReferences.get(secretId);
-      if (!reference || reference.store !== 'secrets-manager') {
-        throw new Error('oauth_provider_secret_reference_invalid');
-      }
-      const response = await secretsManager.send(
-        new GetSecretValueCommand({ SecretId: reference.arn, VersionId: reference.versionId }),
-      );
-      if (
-        response.ARN !== reference.arn ||
-        response.VersionId !== reference.versionId ||
-        !response.SecretBinary
-      ) {
-        throw new Error('oauth_provider_secret_version_mismatch');
-      }
-      return typeof response.SecretBinary === 'string'
-        ? Buffer.from(response.SecretBinary, 'base64')
-        : Buffer.from(response.SecretBinary);
-    },
+    getSecretValue: (input) => providerSecretReader.read(input),
     kmsKeyId: verifiedManifest.kmsKeyArn,
     s3,
   });
