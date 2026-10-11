@@ -25,6 +25,7 @@ import {
   type PullRunnerDeps,
   type PullCompleteSignal,
   type PullDueMessage,
+  type PullNotProcessedReason,
 } from '../pull/pull-runner.js';
 import type { TenantContext } from './tenant-context.js';
 import type { TenantRegistry } from './tenant-registry.js';
@@ -87,6 +88,8 @@ export interface RoutedResult {
   commitReplay?: () => Promise<void>;
   releaseReplay?: () => Promise<void>;
   droppedCode?: typeof GITHUB_BINDING_MISMATCH;
+  // The pull runner's fixed not-processed reason, carried into the pull-failed signal.
+  failureCode?: PullNotProcessedReason;
 }
 
 const GITHUB_SOURCE = 'github';
@@ -202,7 +205,7 @@ export class TenantMessageRouter {
         ...(codebaseSelectionStore ? { codebaseSelectionStore } : {}),
       });
       if (result.outcome === 'not_processed') {
-        return { context, facts: [], shouldAcknowledge: false };
+        return { context, facts: [], shouldAcknowledge: false, failureCode: result.reason };
       }
       if (result.outcome === 'superseded') {
         return {

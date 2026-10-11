@@ -17,6 +17,8 @@ import {
   type OAuthRefreshCommand,
   type OAuthRefreshMetadataUpdate,
   type PullDueMessage,
+  type PullFailedSignal,
+  type PullFailureReason,
 } from '@folklore/contracts/enclave';
 import { externalHttpsProxyAgent } from '../egress/proxy.js';
 import { ProviderRejectedError } from '../egress/provider-token-fetch.js';
@@ -68,14 +70,7 @@ export interface PullCompleteSignal {
   backfillLeaseToken?: string;
 }
 
-export interface PullFailedSignal {
-  type: 'pull-failed';
-  orgId: string;
-  sourceKind: string;
-  sourceId: string;
-  failedAt: string;
-  backfillLeaseToken?: string;
-}
+export type { PullFailedSignal };
 
 export function buildPullCompleteSignal(
   message: PullDueMessage,
@@ -93,7 +88,11 @@ export function buildPullCompleteSignal(
   };
 }
 
-export function buildPullFailedSignal(message: PullDueMessage, failedAt: Date): PullFailedSignal {
+export function buildPullFailedSignal(
+  message: PullDueMessage,
+  failedAt: Date,
+  reason?: PullFailureReason,
+): PullFailedSignal {
   const backfillLeaseToken =
     'backfillLeaseToken' in message ? message.backfillLeaseToken : undefined;
   return {
@@ -103,6 +102,7 @@ export function buildPullFailedSignal(message: PullDueMessage, failedAt: Date): 
     sourceId: message.sourceId,
     failedAt: failedAt.toISOString(),
     ...(backfillLeaseToken ? { backfillLeaseToken } : {}),
+    ...(reason ? { reason } : {}),
   };
 }
 
@@ -174,6 +174,8 @@ export type PullRunResult =
       sourceId: string;
       sourceKind: string;
     };
+
+export type PullNotProcessedReason = Extract<PullRunResult, { outcome: 'not_processed' }>['reason'];
 
 const consoleLogger: Logger = logger;
 
@@ -580,10 +582,7 @@ function superseded(message: PullDueMessage): PullRunResult {
   return { outcome: 'superseded', sourceId: message.sourceId, sourceKind: message.kind };
 }
 
-function notProcessed(
-  message: PullDueMessage,
-  reason: Extract<PullRunResult, { outcome: 'not_processed' }>['reason'],
-): PullRunResult {
+function notProcessed(message: PullDueMessage, reason: PullNotProcessedReason): PullRunResult {
   return { outcome: 'not_processed', reason, sourceId: message.sourceId, sourceKind: message.kind };
 }
 

@@ -14,6 +14,7 @@ import {
 } from '@folklore/contracts/enclave-output';
 import {
   processedFactSchema,
+  PULL_FAILURE_PHASES,
   pullCompleteSignalSchema,
   pullFailedSignalSchema,
 } from '@folklore/contracts/enclave';
@@ -24,6 +25,7 @@ import {
   type PullDueMessage,
   type PullFailedSignal,
 } from '../pull/pull-runner.js';
+import { pullFailureReason, type PullFailure } from '../pull/pull-failure-reason.js';
 import { HALT_POLL_INTERVAL_MS, type HaltGate } from '../control/HaltGate.js';
 import { DurableAckBatch } from '../ingest/DurableAckBatch.js';
 import { ReceivedMessageLeases } from '../ingest/ReceivedMessageLeases.js';
@@ -41,7 +43,8 @@ import {
 const MAX_LONG_POLL_SECONDS = 20;
 const RECEIVE_BATCH = 10;
 const BATCH_TARGET = 50;
-const PULL_FAILURE_RETRY_THRESHOLD = 3;
+// Equals the tenant webhook queue's maxReceiveCount, pinned by a test against its definition.
+export const PULL_FAILURE_RETRY_THRESHOLD = 3;
 // An empty pool has no queue long-poll to pace the loop, so wait before re-checking for an assignment.
 const EMPTY_POOL_POLL_INTERVAL_MS = 5_000;
 // Equals the tenant webhook queue's VisibilityTimeout, pinned by a test against its definition.
@@ -221,9 +224,10 @@ export class QueueSetDrainer {
     let releaseReplay: (() => Promise<void>) | undefined;
     let phase = 'parse';
     let errorType = 'Error';
+    let raw: RoutableMessage | undefined;
     try {
       const parsed: unknown = JSON.parse(msg.Body!);
-      const raw = parseRoutableMessage(parsed);
+      raw = parseRoutableMessage(parsed);
       phase = 'route';
       const routed = await this.deps.router.route(raw, assignment.tenantId);
       releaseReplay = routed.releaseReplay;
@@ -257,12 +261,10 @@ export class QueueSetDrainer {
         await this.leases.release(msg);
         await this.releaseReplay(releaseReplay);
         releaseReplay = undefined;
-        const failure = this.pullFailureAfterRetry(raw, assignment.assignmentGeneration);
-        if (failure) {
-          await this.emitPullFailed(failure.signal, assignment.assignmentGeneration);
-          const state = this.pullFailures.get(failure.key);
-          if (state) state.emitted = true;
-        }
+        await this.recordPullFailure(raw, assignment, {
+          phase: 'release',
+          ...(routed.failureCode ? { code: routed.failureCode } : {}),
+        });
         return;
       }
       // #196: defer the delete — the message is acked only after this tenant's index is durably
@@ -316,7 +318,47 @@ export class QueueSetDrainer {
         phase,
         error_type: errorType,
       });
+      // The release path already counted this delivery before its signal failed to send.
+      if (raw?.tenant_id === assignment.tenantId && phase !== 'release') {
+        await this.recordThrownPullFailure(raw, assignment, {
+          phase: this.pullPhase(phase),
+          error,
+        });
+      }
     }
+  }
+
+  private async recordPullFailure(
+    raw: RoutableMessage,
+    assignment: QueueAssignment,
+    failure: PullFailure,
+  ): Promise<void> {
+    const pending = this.pullFailureAfterRetry(raw, failure, assignment.assignmentGeneration);
+    if (!pending) return;
+    await this.emitPullFailed(pending.signal, assignment.assignmentGeneration);
+    const state = this.pullFailures.get(pending.key);
+    if (state) state.emitted = true;
+  }
+
+  // A thrown pull reaches the redrive limit too, so it must still produce its pull-failed signal.
+  private async recordThrownPullFailure(
+    raw: RoutableMessage,
+    assignment: QueueAssignment,
+    failure: PullFailure,
+  ): Promise<void> {
+    try {
+      await this.recordPullFailure(raw, assignment, failure);
+    } catch (error) {
+      this.deps.logger.error('pull_failed_signal_emit_failed', {
+        error_type: classifyErrorType(error),
+      });
+    }
+  }
+
+  private pullPhase(phase: string): PullFailure['phase'] {
+    return (PULL_FAILURE_PHASES as readonly string[]).includes(phase)
+      ? (phase as PullFailure['phase'])
+      : 'route';
   }
 
   private async admitAll(queueUrl: string, messages: readonly Message[]): Promise<Message[]> {
@@ -417,6 +459,7 @@ export class QueueSetDrainer {
 
   private pullFailureAfterRetry(
     raw: RoutableMessage,
+    failure: PullFailure,
     assignmentGeneration?: number,
   ): { key: string; signal: PullFailedSignal } | undefined {
     if (!this.isPullDue(raw)) return undefined;
@@ -429,7 +472,14 @@ export class QueueSetDrainer {
     state.attempts += 1;
     this.pullFailures.set(key, state);
     if (state.emitted || state.attempts < PULL_FAILURE_RETRY_THRESHOLD) return undefined;
-    return { key, signal: buildPullFailedSignal(raw, state.firstFailedAt) };
+    return {
+      key,
+      signal: buildPullFailedSignal(
+        raw,
+        state.firstFailedAt,
+        pullFailureReason(failure, state.attempts),
+      ),
+    };
   }
 
   private pullFailureKey(
