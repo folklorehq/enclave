@@ -26,6 +26,8 @@ import {
 } from '../pull/pull-runner.js';
 import { HALT_POLL_INTERVAL_MS, type HaltGate } from '../control/HaltGate.js';
 import { DurableAckBatch } from '../ingest/DurableAckBatch.js';
+import { ReceivedMessageLeases } from '../ingest/ReceivedMessageLeases.js';
+import type { VisibilityHeartbeatTimers } from '../ingest/VisibilityHeartbeat.js';
 import { errorType as classifyErrorType } from '../logging/error-fields.js';
 import {
   parseRoutableMessage,
@@ -42,6 +44,10 @@ const BATCH_TARGET = 50;
 const PULL_FAILURE_RETRY_THRESHOLD = 3;
 // An empty pool has no queue long-poll to pace the loop, so wait before re-checking for an assignment.
 const EMPTY_POOL_POLL_INTERVAL_MS = 5_000;
+// Equals the tenant webhook queue's VisibilityTimeout, pinned by a test against its definition.
+export const MESSAGE_VISIBILITY_TIMEOUT_SECONDS = 120;
+const MESSAGE_VISIBILITY_RENEWAL_MS = 40_000;
+const INGEST_VISIBILITY_RENEWAL_FAILED = 'INGEST_VISIBILITY_RENEWAL_FAILED';
 
 export interface QueueAssignment {
   tenantId: string;
@@ -81,6 +87,7 @@ export interface QueueSetDrainerDeps {
   isBusy?: () => boolean;
   onDrainComplete?: () => Promise<void>;
   logger: Logger;
+  visibilityTimers?: VisibilityHeartbeatTimers;
 }
 
 // Drains the set of per-tenant webhook queues (design §5). Every message is routed to its own
@@ -95,13 +102,23 @@ export class QueueSetDrainer {
   private activeDrains = 0;
   private readonly drainIdleWaiters: Array<() => void> = [];
   private readonly evictingTenants = new Set<string>();
+  private readonly leases: ReceivedMessageLeases;
   // Tracks the last value actually written, not merely the in-process idle transition: a freshly
   // booted process has no prior write, so its first non-idle sweep must write `false` unconditionally
   // — otherwise a stale `"1"` written before a prior self-stop survives the stop/start cycle and the
   // parent's systemd timer stops the host again before the enclave finishes booting.
   private lastWrittenIdle: boolean | undefined;
 
-  constructor(private readonly deps: QueueSetDrainerDeps) {}
+  constructor(private readonly deps: QueueSetDrainerDeps) {
+    this.leases = new ReceivedMessageLeases(
+      { sqs: deps.sqs, logger: deps.logger, timers: deps.visibilityTimers },
+      {
+        visibilityTimeoutSeconds: MESSAGE_VISIBILITY_TIMEOUT_SECONDS,
+        renewalIntervalMs: MESSAGE_VISIBILITY_RENEWAL_MS,
+        failureCode: INGEST_VISIBILITY_RENEWAL_FAILED,
+      },
+    );
+  }
 
   async runForever(): Promise<void> {
     console.log('processing loop started', { queues: this.deps.assignments().length });
@@ -133,6 +150,7 @@ export class QueueSetDrainer {
       await this.updateIdle(received);
       await this.deps.onDrainComplete?.();
     } finally {
+      await this.leases.releaseAll();
       this.activeDrains -= 1;
       if (this.activeDrains === 0) {
         for (const resolve of this.drainIdleWaiters.splice(0)) resolve();
@@ -181,8 +199,12 @@ export class QueueSetDrainer {
       );
       const messages = resp.Messages ?? [];
       if (messages.length === 0) break;
-      for (const msg of messages) {
-        if (this.evictingTenants.has(assignment.tenantId)) break;
+      const fresh = await this.admitAll(assignment.queueUrl, messages);
+      for (const [index, msg] of fresh.entries()) {
+        if (this.evictingTenants.has(assignment.tenantId)) {
+          await this.releaseAll(fresh.slice(index));
+          break;
+        }
         await this.handleMessage(assignment, msg, ackBatch);
       }
       total += messages.length;
@@ -232,6 +254,7 @@ export class QueueSetDrainer {
       await this.emitFacts(facts, assignment.assignmentGeneration);
       if (!shouldAcknowledge) {
         phase = 'release';
+        await this.leases.release(msg);
         await this.releaseReplay(releaseReplay);
         releaseReplay = undefined;
         const failure = this.pullFailureAfterRetry(raw, assignment.assignmentGeneration);
@@ -266,11 +289,18 @@ export class QueueSetDrainer {
           }
         },
         afterPersist: commitReplay,
-        release: routed.releaseReplay,
-        ack: () => this.ackCurrentAssignment(assignment, msg.ReceiptHandle!),
+        release: async () => {
+          await this.leases.release(msg);
+          await routed.releaseReplay?.();
+        },
+        ack: async () => {
+          const receiptHandle = await this.leases.release(msg);
+          await this.ackCurrentAssignment(assignment, receiptHandle!);
+        },
       });
       releaseReplay = undefined;
     } catch (error) {
+      await this.leases.release(msg);
       await this.releaseReplay(releaseReplay);
       if (error instanceof TenantMessageRouteError) {
         phase = error.phase;
@@ -287,6 +317,18 @@ export class QueueSetDrainer {
         error_type: errorType,
       });
     }
+  }
+
+  private async admitAll(queueUrl: string, messages: readonly Message[]): Promise<Message[]> {
+    const fresh: Message[] = [];
+    for (const msg of messages) {
+      if (await this.leases.admit(queueUrl, msg)) fresh.push(msg);
+    }
+    return fresh;
+  }
+
+  private async releaseAll(messages: readonly Message[]): Promise<void> {
+    for (const msg of messages) await this.leases.release(msg);
   }
 
   private async releaseReplay(release: (() => Promise<void>) | undefined): Promise<void> {
