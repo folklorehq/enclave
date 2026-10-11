@@ -1,4 +1,5 @@
 import { writeFileSync } from 'node:fs';
+import { isFailureCodeSlug } from '@folklore/core';
 import type { EnclaveBootPhase } from '@folklore/control-plane';
 import { ENCLAVE_BOOT_STATUS_PATH } from './boot-status-path.js';
 import type { EnclaveBootStep } from './boot-steps.js';
@@ -13,6 +14,10 @@ const READY_PHASE: EnclaveBootPhase = 'ready';
 const API_DEGRADED_FALLBACK = 'api_start_failed';
 const CLEAN_EXIT_CODE = 0;
 const MAX_EXIT_STATUS = 255;
+// The parent sink reads at most nine digits, so the count holds there instead of growing past it.
+const MAX_MESSAGE_FAILURE_COUNT = 999_999_999;
+const MESSAGE_FAILURE_FALLBACK = 'message_unclassified';
+const WITHHELD_SNAPSHOT_SUFFIX = '_active_policy_snapshot_unavailable';
 
 interface FatalMonitorTarget {
   on(event: 'uncaughtExceptionMonitor', listener: (error: unknown) => void): unknown;
@@ -25,6 +30,9 @@ export class EnclaveBootStatus {
   private step: EnclaveBootStep | undefined;
   private failed = false;
   private degradation: string | undefined;
+  private crashLine: string | undefined;
+  private lastMessageFailure: string | undefined;
+  private messageFailures = 0;
 
   constructor(private readonly path: string = ENCLAVE_BOOT_STATUS_PATH) {}
 
@@ -47,6 +55,15 @@ export class EnclaveBootStatus {
     this.recordPhase();
   }
 
+  // A failed message never stops the enclave; its code only rides the next status lines.
+  recordMessageFailure(code: string): void {
+    const named = isFailureCodeSlug(code) ? code : MESSAGE_FAILURE_FALLBACK;
+    if (!this.isWithheldSnapshotEcho(named)) this.lastMessageFailure = named;
+    this.messageFailures = Math.min(this.messageFailures + 1, MAX_MESSAGE_FAILURE_COUNT);
+    if (this.crashLine === undefined) this.recordPhase();
+    else this.record(this.crashLine);
+  }
+
   isReady(): boolean {
     return this.phase === READY_PHASE;
   }
@@ -58,7 +75,8 @@ export class EnclaveBootStatus {
 
   fail(error: unknown): void {
     this.failed = true;
-    this.record(`phase=${this.phase} fatal=${this.failureCode(error)}`);
+    this.crashLine = `phase=${this.phase} fatal=${this.failureCode(error)}`;
+    this.record(this.crashLine);
   }
 
   installFatalMonitor(target: FatalMonitorTarget = process): void {
@@ -70,7 +88,8 @@ export class EnclaveBootStatus {
   private recordExit(code: number): void {
     if (this.failed || code === CLEAN_EXIT_CODE) return;
     const named = Number.isInteger(code) && code > 0 && code <= MAX_EXIT_STATUS;
-    this.record(`phase=${this.phase} fatal=${named ? `${PROCESS_EXIT}_${code}` : PROCESS_EXIT}`);
+    this.crashLine = `phase=${this.phase} fatal=${named ? `${PROCESS_EXIT}_${code}` : PROCESS_EXIT}`;
+    this.record(this.crashLine);
   }
 
   // Past boot, a throw can come from a content path, where even a slug-shaped message may be a value.
@@ -91,6 +110,17 @@ export class EnclaveBootStatus {
       : errorClassCode(error, API_DEGRADED_FALLBACK);
   }
 
+  // A failure that withholds the policy snapshot makes every later attempt fail this way too, so
+  // that echo must not hide the code that caused it.
+  private isWithheldSnapshotEcho(code: string): boolean {
+    return this.lastMessageFailure !== undefined && code.endsWith(WITHHELD_SNAPSHOT_SUFFIX);
+  }
+
+  private messageFailureSuffix(): string {
+    if (this.lastMessageFailure === undefined) return '';
+    return ` last=${this.lastMessageFailure} n=${this.messageFailures}`;
+  }
+
   private recordPhase(): void {
     const degraded = this.degradation === undefined ? '' : ` fatal=${this.degradation}`;
     this.record(`phase=${this.phase}${degraded}`);
@@ -98,7 +128,7 @@ export class EnclaveBootStatus {
 
   private record(line: string): void {
     try {
-      writeFileSync(this.path, `${line}\n`);
+      writeFileSync(this.path, `${line}${this.messageFailureSuffix()}\n`);
     } catch {
       // Visibility only: a status write must never be the thing that stops a boot.
     }

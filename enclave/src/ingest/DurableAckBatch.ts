@@ -1,5 +1,9 @@
 import type { Logger } from '@folklore/core';
 
+export type DurableAckFailureStep = 'persist' | 'post_persist' | 'ack';
+
+export type DurableAckFailureListener = (step: DurableAckFailureStep, error: unknown) => void;
+
 export interface DurableAckItem {
   tenantId: string;
   hasUnsavedInserts(): boolean;
@@ -17,7 +21,10 @@ export interface DurableAckItem {
 export class DurableAckBatch {
   private readonly items: DurableAckItem[] = [];
 
-  constructor(private readonly logger: Logger) {}
+  constructor(
+    private readonly logger: Logger,
+    private readonly onFailure: DurableAckFailureListener = () => {},
+  ) {}
 
   add(item: DurableAckItem): void {
     this.items.push(item);
@@ -30,7 +37,8 @@ export class DurableAckBatch {
       const persistenceItem = group.find((item) => item.hasUnsavedInserts());
       try {
         if (persistenceItem) await persistenceItem.persist();
-      } catch {
+      } catch (error) {
+        this.notifyFailure('persist', error);
         await this.releaseGroup(group);
         // Content-free: leave this tenant's batch in queue for redelivery.
         this.logger.error('hnsw persist failed — batch left in queue for retry', {
@@ -42,7 +50,8 @@ export class DurableAckBatch {
         try {
           await item.afterDurablePersistence?.();
           await item.afterPersist?.();
-        } catch {
+        } catch (error) {
+          this.notifyFailure('post_persist', error);
           await this.releaseGroup(group.slice(index));
           this.logger.error('post-persistence hook failed — batch left in queue for retry', {
             tenantId: item.tenantId,
@@ -51,7 +60,8 @@ export class DurableAckBatch {
         }
         try {
           await item.ack();
-        } catch {
+        } catch (error) {
+          this.notifyFailure('ack', error);
           await this.releaseGroup(group.slice(index + 1));
           // A failed delete redelivers and reprocesses idempotently — never crash the drain loop.
           this.logger.error('ack failed — message left in queue for retry', {
@@ -62,6 +72,15 @@ export class DurableAckBatch {
       }
     }
     this.items.length = 0;
+  }
+
+  // Reporting is visibility only; it must never stop the release that follows it.
+  private notifyFailure(step: DurableAckFailureStep, error: unknown): void {
+    try {
+      this.onFailure(step, error);
+    } catch {
+      this.logger.error('durable_ack_failure_report_failed');
+    }
   }
 
   private groupByTenant(): Map<string, DurableAckItem[]> {

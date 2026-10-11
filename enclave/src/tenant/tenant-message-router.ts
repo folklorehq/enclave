@@ -151,8 +151,9 @@ export class TenantMessageRouteError extends Error {
   constructor(
     readonly phase: TenantMessageRoutePhase,
     readonly errorType: string,
+    cause?: unknown,
   ) {
-    super('tenant_message_route_failed');
+    super('tenant_message_route_failed', { cause });
     this.name = 'TenantMessageRouteError';
   }
 }
@@ -244,7 +245,7 @@ export class TenantMessageRouter {
         canaryAuthorization: raw.canary_authorization,
       });
     } catch (error) {
-      throw new TenantMessageRouteError('decrypt', errorType(error));
+      throw new TenantMessageRouteError('decrypt', errorType(error), error);
     }
     this.validateCanaryBody(raw.canary_authorization, plaintext);
     const canaryProof = raw.canary_authorization
@@ -290,9 +291,9 @@ export class TenantMessageRouter {
         );
       } catch (error) {
         if (error instanceof PipelineProcessingError) {
-          throw new TenantMessageRouteError(error.phase, error.errorType);
+          throw new TenantMessageRouteError(error.phase, error.errorType, error);
         }
-        throw new TenantMessageRouteError('pipeline', errorType(error));
+        throw new TenantMessageRouteError('pipeline', errorType(error), error);
       }
       if (canaryProof && raw.canary_authorization) {
         const outcomeProof = await this.createCanaryOutcomeProof(raw.canary_authorization, facts);
@@ -547,7 +548,7 @@ export class TenantMessageRouter {
       );
     } catch (error) {
       plaintext.fill(0);
-      throw new TenantMessageRouteError('pipeline', errorType(error));
+      throw new TenantMessageRouteError('pipeline', errorType(error), error);
     }
     if (resolution.outcome === 'not_processed') {
       plaintext.fill(0);

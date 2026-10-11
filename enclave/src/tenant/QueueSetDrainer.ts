@@ -32,6 +32,11 @@ import { ReceivedMessageLeases } from '../ingest/ReceivedMessageLeases.js';
 import type { VisibilityHeartbeatTimers } from '../ingest/VisibilityHeartbeat.js';
 import { errorType as classifyErrorType } from '../logging/error-fields.js';
 import {
+  messageFailureCode,
+  notProcessedFailureCode,
+  type MessageFailurePhase,
+} from './message-failure/message-failure-code.js';
+import {
   parseRoutableMessage,
   TenantMessageRouteError,
   type RoutableMessage,
@@ -89,6 +94,8 @@ export interface QueueSetDrainerDeps {
   // synthesis — counts as a busy poll, so the host is never stopped out from under it.
   isBusy?: () => boolean;
   onDrainComplete?: () => Promise<void>;
+  // Receives one closed-set code per failed message attempt, for visibility outside the enclave.
+  onMessageFailure?: (code: string) => void;
   logger: Logger;
   visibilityTimers?: VisibilityHeartbeatTimers;
 }
@@ -147,7 +154,9 @@ export class QueueSetDrainer {
         await this.updateIdle(false);
         return;
       }
-      const ackBatch = new DurableAckBatch(this.deps.logger);
+      const ackBatch = new DurableAckBatch(this.deps.logger, (step, error) =>
+        this.reportMessageFailure(messageFailureCode(step, error)),
+      );
       const received = await this.drainAllQueues(assignments, ackBatch);
       await ackBatch.commit();
       await this.updateIdle(received);
@@ -222,7 +231,7 @@ export class QueueSetDrainer {
     ackBatch: DurableAckBatch,
   ): Promise<void> {
     let releaseReplay: (() => Promise<void>) | undefined;
-    let phase = 'parse';
+    let phase: MessageFailurePhase = 'parse';
     let errorType = 'Error';
     let raw: RoutableMessage | undefined;
     try {
@@ -258,6 +267,7 @@ export class QueueSetDrainer {
       await this.emitFacts(facts, assignment.assignmentGeneration);
       if (!shouldAcknowledge) {
         phase = 'release';
+        this.reportMessageFailure(notProcessedFailureCode(routed.failureCode));
         await this.leases.release(msg);
         await this.releaseReplay(releaseReplay);
         releaseReplay = undefined;
@@ -318,13 +328,24 @@ export class QueueSetDrainer {
         phase,
         error_type: errorType,
       });
-      // The release path already counted this delivery before its signal failed to send.
-      if (raw?.tenant_id === assignment.tenantId && phase !== 'release') {
+      // The release path already counted and reported this delivery before its signal failed to send.
+      if (phase === 'release') return;
+      this.reportMessageFailure(messageFailureCode(phase, error));
+      if (raw?.tenant_id === assignment.tenantId) {
         await this.recordThrownPullFailure(raw, assignment, {
           phase: this.pullPhase(phase),
           error,
         });
       }
+    }
+  }
+
+  // Reporting is visibility only, so it can never be the thing that fails a message.
+  private reportMessageFailure(code: string): void {
+    try {
+      this.deps.onMessageFailure?.(code);
+    } catch {
+      this.deps.logger.error('message_failure_report_failed');
     }
   }
 

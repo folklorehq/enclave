@@ -1462,6 +1462,7 @@ drainerRef.current = new QueueSetDrainer({
     if (!isSharedPool) return;
     await haltCache.set(`pool:usage:${DEPLOYMENT_ID}`, collectPoolUsage(), 300);
   },
+  onMessageFailure: (code) => bootStatus.recordMessageFailure(code),
   logger,
 });
 
