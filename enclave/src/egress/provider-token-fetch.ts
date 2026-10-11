@@ -61,6 +61,11 @@ export interface ProviderTokenFetchOptions {
   timeoutMs?: number;
 }
 
+type ProviderSuccessStatus = 200 | 201;
+
+const DEFAULT_SUCCESS_STATUS: ProviderSuccessStatus = 200;
+// GitHub documents 201 Created for POST /app/installations/{id}/access_tokens.
+const GITHUB_INSTALLATION_SUCCESS_STATUS: ProviderSuccessStatus = 201;
 const DEFAULT_MAX_REQUEST_BYTES = 64 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES = 512 * 1024;
 export const DEFAULT_PROVIDER_TIMEOUT_MS = 10_000;
@@ -91,6 +96,7 @@ interface ExecutableProviderRequest {
   query?: Readonly<Record<string, string>>;
   method: 'GET' | 'POST' | 'DELETE';
   acceptsNoContent?: boolean;
+  successStatus?: ProviderSuccessStatus;
   headers: Record<string, string>;
   body?: string;
   allowedContentTypes: readonly string[];
@@ -161,6 +167,7 @@ async function sendThroughProxy(bound: BoundProviderRequest, proxy: ProxyAgent):
   }
   return bufferProviderResponse(
     response,
+    bound.executable.successStatus ?? DEFAULT_SUCCESS_STATUS,
     bound.executable.allowedContentTypes,
     bound.maxResponseBytes,
   );
@@ -173,13 +180,14 @@ function classifyProviderFailure(error: unknown): Error {
 
 async function bufferProviderResponse(
   response: Response,
+  successStatus: ProviderSuccessStatus,
   allowedContentTypes: readonly string[],
   maxResponseBytes: number,
 ): Promise<Response> {
   if (response.status >= 400 && response.status < 500) {
     throw new ProviderRejectedError(response.status);
   }
-  if (response.status !== 200) throw new ProviderEgressError();
+  if (response.status !== successStatus) throw new ProviderEgressError();
   const length = Number(response.headers.get('content-length') ?? 0);
   if (Number.isFinite(length) && length > maxResponseBytes) throw new ProviderEgressError();
   const contentType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase();
@@ -237,6 +245,7 @@ function buildProviderRequest(
         authorization: `Bearer ${request.installationJwt}`,
       },
       allowedContentTypes: ['application/json'],
+      successStatus: GITHUB_INSTALLATION_SUCCESS_STATUS,
     };
   }
   if (isGitHubUserRequest(request)) {
