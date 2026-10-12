@@ -1,5 +1,6 @@
 import type { EvidenceKeySessionErrorCode } from '../../inference/EvidenceKeySession.js';
 import type { PullNotProcessedReason } from '../../pull/pull-runner.js';
+import { OUTPUT_FAILURE_REASONS } from '../output/output-failure-reasons.js';
 
 const ACTIVE_POLICY_REASONS = [
   'active_policy_assignment_context_mismatch',
@@ -175,15 +176,6 @@ const INFERENCE_TRANSPORT_REASONS = [
 
 const ROUTE_REASONS = ['canary_authorization_invalid'] as const;
 
-const OUTPUT_REASONS = [
-  'output_bind_failed',
-  'output_payload_not_json',
-  'output_send_failed',
-  'output_serialize_failed',
-  'output_sign_failed',
-  'output_validate_failed',
-] as const;
-
 // Node and undici connection codes; the reason is the lower-cased code, never the message.
 export const NETWORK_ERROR_CODES: ReadonlySet<string> = new Set([
   'ECONNREFUSED',
@@ -258,5 +250,5 @@ export const MESSAGE_FAILURE_REASONS: ReadonlySet<string> = new Set<string>([
   ...EVIDENCE_SESSION_REASONS,
   ...INFERENCE_TRANSPORT_REASONS,
   ...ROUTE_REASONS,
-  ...OUTPUT_REASONS,
+  ...OUTPUT_FAILURE_REASONS,
 ]);

@@ -1,4 +1,4 @@
-export const OUTPUT_PAYLOAD_NOT_JSON = 'output_payload_not_json';
+import { OUTPUT_PAYLOAD_NOT_JSON } from './output-failure-reasons.js';
 
 /** A copy of `value` with `undefined` object members dropped; refuses anything JSON cannot carry exactly. */
 export function jsonOutputPayload(value: unknown): unknown {

@@ -32,6 +32,7 @@ import { ReceivedMessageLeases } from '../ingest/ReceivedMessageLeases.js';
 import type { VisibilityHeartbeatTimers } from '../ingest/VisibilityHeartbeat.js';
 import { errorType as classifyErrorType } from '../logging/error-fields.js';
 import { jsonOutputPayload } from './output/json-output-payload.js';
+import { EMIT_STEP_REASONS, type EmitStep } from './output/output-failure-reasons.js';
 import {
   messageFailureCode,
   notProcessedFailureCode,
@@ -57,15 +58,6 @@ const EMPTY_POOL_POLL_INTERVAL_MS = 5_000;
 export const MESSAGE_VISIBILITY_TIMEOUT_SECONDS = 120;
 const MESSAGE_VISIBILITY_RENEWAL_MS = 40_000;
 const INGEST_VISIBILITY_RENEWAL_FAILED = 'INGEST_VISIBILITY_RENEWAL_FAILED';
-const EMIT_STEP_REASONS = {
-  validate: 'output_validate_failed',
-  bind: 'output_bind_failed',
-  sign: 'output_sign_failed',
-  serialize: 'output_serialize_failed',
-  send: 'output_send_failed',
-} as const;
-
-type EmitStep = keyof typeof EMIT_STEP_REASONS;
 type OutputPayload = ProcessedFact | PullCompleteSignal | PullFailedSignal;
 
 export interface QueueAssignment {
