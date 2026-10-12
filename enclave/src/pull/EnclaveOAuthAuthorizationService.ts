@@ -16,6 +16,7 @@ import { OAuthRefusal } from './OAuthRefusal.js';
 import { oauthFailureReason } from './oauth-failure-reason.js';
 
 const REDEMPTION_FAILED = 'oauth_redemption_failed';
+const PROVIDER_NOT_CONFIGURED = 'provider_not_configured';
 
 type AuthorizationGrant = EnclaveAuthorizationCodeGrant;
 
@@ -93,20 +94,18 @@ export class EnclaveOAuthAuthorizationService {
     const grant = this.decryptGrant(submission);
     if (!this.matches(submission, grant, generation)) throw new EnclaveOAuthRedemptionError();
     if (Date.parse(grant.expiresAt) <= Date.now()) throw new EnclaveOAuthRedemptionError();
-    if (
-      !(await this.states.consume({
-        orgId: grant.orgId,
-        deploymentId: grant.deploymentId,
-        sourceKind: grant.sourceKind,
-        stateBindingId: grant.stateBindingId,
-      }))
-    )
-      throw new EnclaveOAuthRedemptionError();
-    const config = this.configFor(grant.sourceKind);
-    if (!config) throw new EnclaveOAuthRedemptionError();
-
     let response: ProviderTokenResponse | undefined;
     try {
+      const config = this.requireProviderConfig(grant.sourceKind);
+      if (
+        !(await this.states.consume({
+          orgId: grant.orgId,
+          deploymentId: grant.deploymentId,
+          sourceKind: grant.sourceKind,
+          stateBindingId: grant.stateBindingId,
+        }))
+      )
+        throw new EnclaveOAuthRedemptionError();
       response = await this.provider.exchangeAuthorizationCode({
         config,
         code: grant.authorizationCode,
@@ -189,6 +188,7 @@ export class EnclaveOAuthAuthorizationService {
       if (!this.matches(submission, grant, generation)) throw new EnclaveOAuthRedemptionError();
       if (Date.parse(grant.expiresAt) <= Date.now()) throw new EnclaveOAuthRedemptionError();
       if (!grant.accountId || !grant.memberEmail) throw new EnclaveOAuthRedemptionError();
+      const config = this.requireProviderConfig(grant.sourceKind);
       if (
         !(await this.states.consumeMember({
           orgId: grant.orgId,
@@ -199,8 +199,6 @@ export class EnclaveOAuthAuthorizationService {
       ) {
         throw new EnclaveOAuthRedemptionError();
       }
-      const config = this.configFor(grant.sourceKind);
-      if (!config) throw new EnclaveOAuthRedemptionError();
       response = await this.provider.exchangeAuthorizationCode({
         config,
         code: grant.authorizationCode,
@@ -235,6 +233,17 @@ export class EnclaveOAuthAuthorizationService {
         if (response.refreshToken) response.refreshToken = '';
       }
     }
+  }
+
+  // Checked before the state is consumed, so the connect is retryable once a roll carries the kind.
+  private requireProviderConfig(sourceKind: string): VerifiedProviderConfig {
+    const config = this.configFor(sourceKind);
+    if (!config) {
+      throw new EnclaveOAuthRedemptionError(
+        new OAuthRefusal(REDEMPTION_FAILED, PROVIDER_NOT_CONFIGURED),
+      );
+    }
+    return config;
   }
 
   private decryptGrant(submission: SealedAuthorizationCodeSubmission): AuthorizationGrant {

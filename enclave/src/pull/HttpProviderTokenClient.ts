@@ -325,15 +325,17 @@ export class HttpProviderTokenClient implements ProviderTokenClient {
     if (!isRecord(parsed)) {
       throw new Error('provider_token_response_invalid');
     }
-    const accessToken = this.requireToken(parsed['access_token']);
+    this.rejectOAuthErrorBody(parsed);
+    const tokens = this.grantedTokens(config, operation, parsed);
+    const accessToken = this.requireToken(tokens['access_token']);
     const refreshToken =
-      typeof parsed['refresh_token'] === 'string'
-        ? this.requireToken(parsed['refresh_token'])
+      typeof tokens['refresh_token'] === 'string'
+        ? this.requireToken(tokens['refresh_token'])
         : undefined;
     if (config.kind === 'linear' || config.kind === 'notion') {
       if (!refreshToken) throw new Error('provider_token_response_invalid');
     }
-    const expiresIn = parsed['expires_in'];
+    const expiresIn = tokens['expires_in'];
     const result: ProviderTokenResponse = {
       accessToken,
       ...(typeof refreshToken === 'string' ? { refreshToken } : {}),
@@ -346,6 +348,18 @@ export class HttpProviderTokenClient implements ProviderTokenClient {
       result.externalTenantId = this.requireId(parsed['workspace_id']);
     }
     return result;
+  }
+
+  // Slack's user-scope code grant nests the user token in authed_user; its refresh returns it top level.
+  private grantedTokens(
+    config: VerifiedProviderConfig,
+    operation: 'code' | 'refresh',
+    parsed: Record<string, unknown>,
+  ): Record<string, unknown> {
+    if (config.kind !== 'slack' || operation !== 'code') return parsed;
+    const user = parsed['authed_user'];
+    if (!isRecord(user)) throw new Error('provider_token_response_invalid');
+    return user;
   }
 
   private identityFrom(
