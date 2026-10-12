@@ -5,6 +5,7 @@ import {
   OfficialAciReceiptVerificationError,
 } from '@folklore/inference';
 import { AppError } from '@folklore/errors';
+import { ZodError } from 'zod';
 import { ProviderEgressError, ProviderRejectedError } from '../../egress/provider-token-fetch.js';
 import { TenantPolicyBoundInferenceError } from '../../inference/TenantPolicyBoundInference.js';
 import { TrustedTimeAuthorityError } from '../../inference/TrustedTimeAuthority.js';
@@ -57,6 +58,10 @@ const BUILT_IN_ERROR_TYPES = new Set([
 ]);
 
 const NETWORK_PREFIX = 'network';
+const AWS_HTTP_PREFIX = 'aws_http';
+const AWS_FAULTS: ReadonlySet<unknown> = new Set(['client', 'server']);
+const MIN_HTTP_STATUS = 100;
+const MAX_HTTP_STATUS = 599;
 const PUBLIC_ACI_SESSION_SENTENCE_PREFIX = 'public ACI ';
 const PUBLIC_ACI_SESSION_PREFIX = 'public_aci';
 const ABORT_REASONS: Readonly<Record<string, string>> = {
@@ -87,6 +92,8 @@ const FIXED_CLASS_REASONS: ReadonlyArray<readonly [ErrorClass, string]> = [
   [CrossTenantRoutingError, 'cross_tenant'],
   [UnknownTenantError, 'tenant_unassigned'],
   [TenantContextZeroizedError, 'tenant_zeroized'],
+  // A schema refusal names no field: an issue path or message can echo the parsed value.
+  [ZodError, 'schema_invalid'],
 ];
 
 // Each of these carries a code typed as a closed union; the prefix keeps the class distinguishable.
@@ -173,7 +180,8 @@ function linkReason(link: unknown): string | undefined {
     known(link.message) ??
     fixedSentenceReason(link.message) ??
     networkCodeReason(link) ??
-    abortReason(link)
+    abortReason(link) ??
+    awsHttpReason(link)
   );
 }
 
@@ -198,6 +206,22 @@ function networkCodeReason(error: Error): string | undefined {
 
 function abortReason(error: Error): string | undefined {
   return error instanceof DOMException ? ABORT_REASONS[error.name] : undefined;
+}
+
+// An AWS SDK service exception carries its HTTP status in `$metadata`; only the bare status is named.
+function awsHttpReason(error: Error): string | undefined {
+  const { $fault: fault, $metadata: metadata } = error as Error & {
+    $fault?: unknown;
+    $metadata?: { httpStatusCode?: unknown };
+  };
+  const status = metadata?.httpStatusCode;
+  return AWS_FAULTS.has(fault) &&
+    typeof status === 'number' &&
+    Number.isInteger(status) &&
+    status >= MIN_HTTP_STATUS &&
+    status <= MAX_HTTP_STATUS
+    ? `${AWS_HTTP_PREFIX}_${status}`
+    : undefined;
 }
 
 function typedCodeReason(prefix: string, error: Error): string {

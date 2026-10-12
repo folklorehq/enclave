@@ -218,7 +218,21 @@ export class BootManifestVerifier {
     if (parsed.signed.manifest.inferenceCommissioning !== undefined) {
       throw new Error(bootManifestVerificationErrors.invalid);
     }
+    // The v2 encoding drops binding `providers` and `evidenceFreeSessionVerifiers` too; both are v3-only.
+    if (this.carriesV3OnlyPolicyFields(parsed.signed.manifest.providerInferenceTrustPolicy)) {
+      throw new Error(bootManifestVerificationErrors.invalid);
+    }
     return this.freezeOwnedManifest(parsed.signed.manifest);
+  }
+
+  private carriesV3OnlyPolicyFields(policy: BootManifest['providerInferenceTrustPolicy']): boolean {
+    if (policy === undefined) return false;
+    return (
+      policy.evidenceFreeSessionVerifiers !== undefined ||
+      policy.channelPolicy.acceptedBindings.some(
+        (binding) => 'providers' in binding && binding.providers !== undefined,
+      )
+    );
   }
 
   private verifyV3(

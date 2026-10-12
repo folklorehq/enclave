@@ -77,6 +77,12 @@ const HIGH_WATER_REASONS = [
   'high_water_wrong_context',
 ] as const;
 
+const LLM_CACHE_REASONS = [
+  'llm_cache_close_timeout',
+  'llm_cache_closed',
+  'llm_cache_namer_unbound',
+] as const;
+
 const NSM_REASONS = [
   'nsm_attestation_invalid',
   'nsm_invalid_entropy_request',
@@ -200,6 +206,7 @@ export const PUBLIC_ACI_SESSION_MESSAGES: ReadonlySet<string> = new Set([
   'public ACI keyset policy digest mismatch',
   'public ACI trusted time is invalid',
   'public ACI receipt keyset digest mismatch',
+  'public ACI receipt schema is invalid',
   'public ACI receipt session reference is invalid',
   'public ACI channel policy is invalid',
   'public ACI policy origin is invalid',
@@ -217,6 +224,7 @@ export const PUBLIC_ACI_SESSION_MESSAGES: ReadonlySet<string> = new Set([
   'public ACI session fetch failed',
   'public ACI session is too large',
   'public ACI session is malformed',
+  'public ACI session schema is invalid',
   'public ACI session time or content binding is invalid',
   'public ACI session claim policy failed',
   'public ACI session channel policy failed',
@@ -230,6 +238,7 @@ export const MESSAGE_FAILURE_REASONS: ReadonlySet<string> = new Set<string>([
   ...ACTIVE_POLICY_REASONS,
   ...CLOCK_RAW_REASONS,
   ...HIGH_WATER_REASONS,
+  ...LLM_CACHE_REASONS,
   ...NSM_REASONS,
   ...PUBLIC_ACI_REASONS,
   ...RUNTIME_EVIDENCE_REASONS,

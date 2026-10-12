@@ -127,6 +127,7 @@ export function createPublicAciOperationBackend(
           workloadKeysetDigest: keyset.workloadKeysetDigest,
           model: binding.modelId,
           acceptedChannelBindings: policy.channelPolicy.acceptedBindings,
+          evidenceFreeVerifiers: policy.evidenceFreeSessionVerifiers ?? [],
           maxSessionLifetimeSeconds: policy.maxSessionLifetimeSeconds,
           requiredSessionClaims: [
             ...new Set([...policy.requiredSessionClaims, ...role.requiredSessionClaims]),
