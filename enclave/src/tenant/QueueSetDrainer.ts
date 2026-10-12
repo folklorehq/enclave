@@ -31,6 +31,7 @@ import { DurableAckBatch } from '../ingest/DurableAckBatch.js';
 import { ReceivedMessageLeases } from '../ingest/ReceivedMessageLeases.js';
 import type { VisibilityHeartbeatTimers } from '../ingest/VisibilityHeartbeat.js';
 import { errorType as classifyErrorType } from '../logging/error-fields.js';
+import { jsonOutputPayload } from './output/json-output-payload.js';
 import {
   messageFailureCode,
   notProcessedFailureCode,
@@ -56,6 +57,16 @@ const EMPTY_POOL_POLL_INTERVAL_MS = 5_000;
 export const MESSAGE_VISIBILITY_TIMEOUT_SECONDS = 120;
 const MESSAGE_VISIBILITY_RENEWAL_MS = 40_000;
 const INGEST_VISIBILITY_RENEWAL_FAILED = 'INGEST_VISIBILITY_RENEWAL_FAILED';
+const EMIT_STEP_REASONS = {
+  validate: 'output_validate_failed',
+  bind: 'output_bind_failed',
+  sign: 'output_sign_failed',
+  serialize: 'output_serialize_failed',
+  send: 'output_send_failed',
+} as const;
+
+type EmitStep = keyof typeof EMIT_STEP_REASONS;
+type OutputPayload = ProcessedFact | PullCompleteSignal | PullFailedSignal;
 
 export interface QueueAssignment {
   tenantId: string;
@@ -431,15 +442,12 @@ export class QueueSetDrainer {
   private async emitFacts(facts: ProcessedFact[], assignmentGeneration?: number): Promise<void> {
     const identity = this.deps.outputIdentity(assignmentGeneration);
     for (const fact of facts) {
-      const output = this.authenticatedOutput(fact, undefined, assignmentGeneration);
-      await this.deps.sqs.send(
-        new SendMessageCommand({
-          QueueUrl: this.deps.processedQueueUrl,
-          MessageBody: JSON.stringify(output),
-          MessageGroupId: `processed-${fact.orgId}`,
-          MessageDeduplicationId: `processed-${fact.orgId}-${fact.factId}-${identity.assignmentGeneration}`,
-        }),
-      );
+      await this.sendOutput({
+        payload: fact,
+        orgId: fact.orgId,
+        deduplicationId: `processed-${fact.orgId}-${fact.factId}-${identity.assignmentGeneration}`,
+        assignmentGeneration,
+      });
     }
   }
 
@@ -448,15 +456,12 @@ export class QueueSetDrainer {
     assignmentGeneration?: number,
   ): Promise<void> {
     const identity = this.deps.outputIdentity(assignmentGeneration);
-    const output = this.authenticatedOutput(signal, undefined, assignmentGeneration);
-    await this.deps.sqs.send(
-      new SendMessageCommand({
-        QueueUrl: this.deps.processedQueueUrl,
-        MessageBody: JSON.stringify(output),
-        MessageGroupId: `processed-${signal.orgId}`,
-        MessageDeduplicationId: `pull-complete-${signal.orgId}-${signal.sourceId}-${signal.completedAt}-${identity.assignmentGeneration}`,
-      }),
-    );
+    await this.sendOutput({
+      payload: signal,
+      orgId: signal.orgId,
+      deduplicationId: `pull-complete-${signal.orgId}-${signal.sourceId}-${signal.completedAt}-${identity.assignmentGeneration}`,
+      assignmentGeneration,
+    });
   }
 
   private async emitPullFailed(
@@ -464,19 +469,47 @@ export class QueueSetDrainer {
     assignmentGeneration?: number,
   ): Promise<void> {
     const identity = this.deps.outputIdentity(assignmentGeneration);
-    const output = this.authenticatedOutput(
-      signal,
-      this.pullFailureNonce(signal, assignmentGeneration),
+    await this.sendOutput({
+      payload: signal,
+      orgId: signal.orgId,
+      deduplicationId: `pull-failed-${signal.orgId}-${signal.sourceId}-${signal.failedAt}-${identity.assignmentGeneration}`,
+      nonce: this.pullFailureNonce(signal, assignmentGeneration),
       assignmentGeneration,
+    });
+  }
+
+  private async sendOutput(output: {
+    payload: OutputPayload;
+    orgId: string;
+    deduplicationId: string;
+    nonce?: string;
+    assignmentGeneration?: number;
+  }): Promise<void> {
+    const envelope = await this.authenticatedOutput(
+      output.payload,
+      output.nonce,
+      output.assignmentGeneration,
     );
-    await this.deps.sqs.send(
-      new SendMessageCommand({
-        QueueUrl: this.deps.processedQueueUrl,
-        MessageBody: JSON.stringify(output),
-        MessageGroupId: `processed-${signal.orgId}`,
-        MessageDeduplicationId: `pull-failed-${signal.orgId}-${signal.sourceId}-${signal.failedAt}-${identity.assignmentGeneration}`,
-      }),
+    const body = await this.emitStep('serialize', () => JSON.stringify(envelope));
+    await this.emitStep('send', () =>
+      this.deps.sqs.send(
+        new SendMessageCommand({
+          QueueUrl: this.deps.processedQueueUrl,
+          MessageBody: body,
+          MessageGroupId: `processed-${output.orgId}`,
+          MessageDeduplicationId: output.deduplicationId,
+        }),
+      ),
     );
+  }
+
+  // Names the emit sub-step that threw; a cause the failure code already recognises still wins.
+  private async emitStep<T>(step: EmitStep, run: () => T | Promise<T>): Promise<T> {
+    try {
+      return await run();
+    } catch (error: unknown) {
+      throw new Error(EMIT_STEP_REASONS[step], { cause: error });
+    }
   }
 
   private pullFailureAfterRetry(
@@ -525,23 +558,31 @@ export class QueueSetDrainer {
     return raw.type === 'pull-due';
   }
 
-  private authenticatedOutput(
-    payload: ProcessedFact | PullCompleteSignal | PullFailedSignal,
+  private async authenticatedOutput(
+    payload: OutputPayload,
     nonce = randomBytes(32).toString('hex'),
     assignmentGeneration?: number,
-  ): unknown {
-    const validated =
-      'type' in payload && payload.type === 'pull-complete'
-        ? pullCompleteSignalSchema.parse(payload)
-        : 'type' in payload && payload.type === 'pull-failed'
-          ? pullFailedSignalSchema.parse(payload)
-          : processedFactSchema.parse(payload);
-    return this.deps.outputAuthenticator.sign(
+  ): Promise<unknown> {
+    const validated = await this.emitStep('validate', () => this.validatedOutput(payload));
+    const binding = await this.emitStep('bind', () =>
       enclaveOutputBindingForPayload(validated, {
         ...this.deps.outputIdentity(assignmentGeneration),
         nonce,
       }),
     );
+    return this.emitStep('sign', () => this.deps.outputAuthenticator.sign(binding));
+  }
+
+  // JSON reads an undefined member as absent, so dropping one first widens nothing the signer covers.
+  private validatedOutput(payload: OutputPayload): OutputPayload {
+    const json = jsonOutputPayload(payload);
+    if ('type' in payload && payload.type === 'pull-complete') {
+      return pullCompleteSignalSchema.parse(json);
+    }
+    if ('type' in payload && payload.type === 'pull-failed') {
+      return pullFailedSignalSchema.parse(json);
+    }
+    return processedFactSchema.parse(json);
   }
 
   private archive(tenantId: string, msg: Message, bucket: string): void {
