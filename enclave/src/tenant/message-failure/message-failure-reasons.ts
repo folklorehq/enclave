@@ -36,6 +36,7 @@ const HIGH_WATER_REASONS = [
   'high_water_body_invalid',
   'high_water_body_noncanonical',
   'high_water_body_oversized',
+  'high_water_cache_config_invalid',
   'high_water_candidate_invalid',
   'high_water_candidate_too_large',
   'high_water_checkpoint_digest_mismatch',

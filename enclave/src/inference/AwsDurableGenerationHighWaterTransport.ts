@@ -25,11 +25,19 @@ import type {
   DurableGenerationHighWaterEnvelopeV1,
   DurableGenerationHighWaterTransport,
 } from './DurableGenerationHighWaterClient.js';
+import {
+  VerifiedHighWaterEntryCache,
+  type VerifiedHighWaterEntry,
+} from './high-water/VerifiedHighWaterEntryCache.js';
 
 const MAX_HIGH_WATER_BODY_BYTES = 1_048_576;
 const MAX_HIGH_WATER_SCAN_PAGES = 1_024;
 const MAX_HIGH_WATER_SCAN_VERSIONS = 4_096;
 const MAX_HIGH_WATER_SCAN_OBJECT_BYTES = 67_108_864;
+const HIGH_WATER_FETCH_CONCURRENCY = 8;
+const MAX_VERIFIED_SEQUENCE_PREFIXES = 64;
+const MAX_VERIFIED_CACHE_COST = MAX_HIGH_WATER_SCAN_OBJECT_BYTES;
+const HIGH_WATER_REQUEST_TIMEOUT_MS = 4_000;
 const POINTER_ATTRIBUTE_NAMES = [
   'pointerVersion',
   'contextKey',
@@ -54,6 +62,16 @@ const PROGRESSION_REFUSALS: ReadonlyMap<GenerationHighWaterProgressionV1, string
 ]);
 const UNKNOWN_PROGRESSION_REFUSAL = 'high_water_progression_invalid';
 
+interface SequenceVersion {
+  readonly sequence: number;
+  readonly key: string;
+  readonly versionId: string;
+}
+
+interface ScanBytes {
+  total: number;
+}
+
 export interface AwsDurableGenerationHighWaterTransportConfig {
   readonly config: GenerationHighWaterRuntimeConfigV1;
   readonly s3: Pick<S3Client, 'send'>;
@@ -62,6 +80,11 @@ export interface AwsDurableGenerationHighWaterTransportConfig {
 
 export class AwsDurableGenerationHighWaterTransport implements DurableGenerationHighWaterTransport {
   private readonly signerKey: KeyObject;
+  // S3 never rewrites a version id's bytes, so a verified version stays verified.
+  private readonly verifiedEntries = new VerifiedHighWaterEntryCache(
+    MAX_VERIFIED_CACHE_COST,
+    MAX_VERIFIED_SEQUENCE_PREFIXES,
+  );
 
   constructor(private readonly options: AwsDurableGenerationHighWaterTransportConfig) {
     this.signerKey = createPublicKey({
@@ -125,43 +148,98 @@ export class AwsDurableGenerationHighWaterTransport implements DurableGeneration
     count: number,
   ): Promise<readonly (DurableGenerationHighWaterEnvelopeV1 & { versionId: string })[]> {
     const versions = await this.listSequenceVersions(context);
+    const prefix = this.sequencePrefix(context);
+    this.verifiedEntries.retainListed(
+      prefix,
+      new Set(versions.map((version) => this.versionCacheId(version))),
+    );
+    const scan: ScanBytes = { total: 0 };
     let previous: HighWaterLogEntryV1 | null = null;
     const chain: GenerationContextV1[] = [];
-    const tail: (DurableGenerationHighWaterEnvelopeV1 & { versionId: string })[] = [];
-    let totalObjectBytes = 0;
-    for (const version of versions) {
-      const response = await this.options.s3.send(
-        new GetObjectCommand({
-          Bucket: this.options.config.bucket,
-          Key: version.key,
-          VersionId: version.versionId,
-        }),
+    const tail: { entry: HighWaterLogEntryV1; versionId: string }[] = [];
+    for (let start = 0; start < versions.length; start += HIGH_WATER_FETCH_CONCURRENCY) {
+      const window = versions.slice(start, start + HIGH_WATER_FETCH_CONCURRENCY);
+      const settled = await Promise.allSettled(
+        window.map(async (version) => ({
+          version,
+          verified: await this.verifiedEntry(prefix, version, scan),
+        })),
       );
-      if (response.VersionId !== version.versionId) {
-        throw new Error('high_water_object_version_mismatch');
+      for (const result of settled) {
+        if (result.status === 'rejected') throw result.reason;
+        const { version, verified } = result.value;
+        const entry = verified.entry;
+        this.assertChainEntry(context, entry, version.sequence, previous);
+        chain.push(generationHighWaterEntryContextV1(entry));
+        tail.push({ entry, versionId: version.versionId });
+        if (tail.length > count) tail.shift();
+        previous = entry;
       }
-      if (typeof response.ContentLength === 'number') {
-        totalObjectBytes = this.addScanObjectBytes(totalObjectBytes, response.ContentLength);
-      }
-      const bytes = await this.readBoundedBody(response.Body);
-      if (typeof response.ContentLength !== 'number') {
-        totalObjectBytes = this.addScanObjectBytes(totalObjectBytes, bytes.byteLength);
-      }
-      const entry = this.decodeCanonicalEntry(bytes);
-      this.assertChainEntry(context, entry, version.sequence, previous);
-      this.verifyEntrySignature(entry);
-      chain.push(generationHighWaterEntryContextV1(entry));
-      tail.push({ entry, bytes, versionId: version.versionId });
-      if (tail.length > count) tail.shift();
-      previous = entry;
     }
     if (tail.length === 0) throw new Error('high_water_sequence_missing');
     this.assertProgression(chain);
     const headRelease = this.headRelease(context, chain);
     // Only the head release's trailing segment is served, so no window spans a release change.
-    return tail.filter(
-      ({ entry }) => generationHighWaterReleaseKeyV1(entry.checkpoint) === headRelease,
+    return tail
+      .filter(({ entry }) => generationHighWaterReleaseKeyV1(entry.checkpoint) === headRelease)
+      .map(({ entry, versionId }) => ({
+        entry: structuredClone(entry),
+        // decodeCanonicalEntry proved these bytes are the object's exact canonical encoding.
+        bytes: encode(entry, rfc8949EncodeOptions),
+        versionId,
+      }));
+  }
+
+  private async verifiedEntry(
+    prefix: string,
+    version: SequenceVersion,
+    scan: ScanBytes,
+  ): Promise<VerifiedHighWaterEntry> {
+    const id = this.versionCacheId(version);
+    const known = this.verifiedEntries.get(prefix, id);
+    if (known) {
+      scan.total = this.addScanObjectBytes(scan.total, known.objectBytes);
+      return known;
+    }
+    const fetched = await this.fetchVerifiedEntry(version, scan);
+    this.verifiedEntries.admit(prefix, id, fetched);
+    return fetched;
+  }
+
+  private versionCacheId(version: SequenceVersion): string {
+    return `${version.key}\u0000${version.versionId}`;
+  }
+
+  private async fetchVerifiedEntry(
+    version: SequenceVersion,
+    scan: ScanBytes,
+  ): Promise<VerifiedHighWaterEntry> {
+    const response = await this.options.s3.send(
+      new GetObjectCommand({
+        Bucket: this.options.config.bucket,
+        Key: version.key,
+        VersionId: version.versionId,
+      }),
+      this.requestOptions(),
     );
+    if (response.VersionId !== version.versionId) {
+      throw new Error('high_water_object_version_mismatch');
+    }
+    if (typeof response.ContentLength === 'number') {
+      scan.total = this.addScanObjectBytes(scan.total, response.ContentLength);
+    }
+    const bytes = await this.readBoundedBody(response.Body);
+    if (typeof response.ContentLength !== 'number') {
+      scan.total = this.addScanObjectBytes(scan.total, bytes.byteLength);
+    }
+    const entry = this.decodeCanonicalEntry(bytes);
+    this.verifyEntrySignature(entry);
+    return { entry, objectBytes: response.ContentLength ?? bytes.byteLength };
+  }
+
+  // Per command, not on the shared egress agent: a stalled request must not outlive the refresh budget.
+  private requestOptions(): { abortSignal: AbortSignal } {
+    return { abortSignal: AbortSignal.timeout(HIGH_WATER_REQUEST_TIMEOUT_MS) };
   }
 
   private assertProgression(chain: readonly GenerationContextV1[]): void {
@@ -189,9 +267,9 @@ export class AwsDurableGenerationHighWaterTransport implements DurableGeneration
 
   private async listSequenceVersions(
     context: DurableGenerationHighWaterTransportContextV1,
-  ): Promise<readonly { sequence: number; key: string; versionId: string }[]> {
+  ): Promise<readonly SequenceVersion[]> {
     const prefix = this.sequencePrefix(context);
-    const versions = new Map<number, { sequence: number; key: string; versionId: string }>();
+    const versions = new Map<number, SequenceVersion>();
     let keyMarker: string | undefined;
     let versionIdMarker: string | undefined;
     const seenMarkerPairs = new Set<string>();
@@ -208,6 +286,7 @@ export class AwsDurableGenerationHighWaterTransport implements DurableGeneration
           KeyMarker: keyMarker,
           VersionIdMarker: versionIdMarker,
         }),
+        this.requestOptions(),
       );
       if (Array.isArray(response.DeleteMarkers) && response.DeleteMarkers.length > 0) {
         throw new Error('high_water_sequence_stale_finalized_state');
@@ -343,6 +422,7 @@ export class AwsDurableGenerationHighWaterTransport implements DurableGeneration
         Key: { contextKey: { S: `${context.orgId}:${context.deploymentId}` } },
         ConsistentRead: true,
       }),
+      this.requestOptions(),
     );
     if (!response.Item) throw new Error('high_water_pointer_missing');
     const item = this.parsePointerAttributes(response.Item);
