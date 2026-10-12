@@ -49,8 +49,12 @@ export interface TenantPolicyFreshnessPort {
   readonly expectedContext: () => GenerationContextV1;
   readonly refreshIntervalMs: number;
   readonly refreshTimeoutMs?: number;
-  /** Withholds the snapshot the failed operation used; a missing snapshot evicts nothing installed. */
-  readonly evict: (snapshot?: VerifiedActivePolicySnapshotV1) => void;
+  /** Withholds the snapshot the failed operation used, naming the refusal; a missing snapshot evicts nothing installed. */
+  readonly evict: (snapshot?: VerifiedActivePolicySnapshotV1, code?: string) => void;
+  /** Rises on every refusal of this tenant's snapshot by any caller; a deadline stamped earlier is void. */
+  readonly refusalEpoch?: () => number;
+  /** Lifts a withhold only for a full re-verification taken at the current epoch. */
+  readonly confirm?: (snapshot: VerifiedActivePolicySnapshotV1, epoch: number) => void;
 }
 
 export interface TenantPolicyRuntimeEvidencePort {
@@ -93,6 +97,7 @@ export class TenantPolicyBoundInferenceError extends Error {
   constructor(
     readonly code:
       | 'active_policy_snapshot_unavailable'
+      | 'active_policy_snapshot_unverified'
       | 'active_policy_tenant_mismatch'
       | 'active_policy_role_binding_mismatch'
       | 'active_policy_snapshot_refresh_failed'
@@ -106,6 +111,8 @@ export class TenantPolicyBoundInferenceError extends Error {
 
 export class TenantPolicyBoundInference implements SynthesisInference {
   private trustedDeadline = 0;
+  private deadlineSnapshot: VerifiedActivePolicySnapshotV1 | undefined;
+  private deadlineEpoch: number | undefined;
   private lastTrustedNow = 0;
   private readonly options: TenantPolicyBoundInferenceOptions;
 
@@ -208,8 +215,10 @@ export class TenantPolicyBoundInference implements SynthesisInference {
       ? (await this.backendFor(binding, snapshot)).generateStructured
       : this.options.structured;
     if (!structured) {
-      this.evictAfterRefreshFailure(snapshot);
-      throw new TenantPolicyBoundInferenceError('active_policy_snapshot_refresh_failed');
+      throw this.refuse(
+        snapshot,
+        new TenantPolicyBoundInferenceError('active_policy_snapshot_refresh_failed'),
+      );
     }
     return structured(prompt, tool, systemPrompt);
   }
@@ -307,21 +316,27 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     try {
       assertVerifiedActivePolicySnapshotV1(snapshot);
     } catch {
-      this.evictAfterRefreshFailure(snapshot);
-      throw new TenantPolicyBoundInferenceError('active_policy_snapshot_unavailable');
+      // Not the withheld code: a snapshot that fails its own brand check is the cause, not an echo.
+      throw this.refuse(
+        snapshot,
+        new TenantPolicyBoundInferenceError('active_policy_snapshot_unverified'),
+      );
     }
     if (snapshot.orgId !== this.tenantId || snapshot.tenantId !== this.tenantId) {
-      this.evictAfterRefreshFailure(snapshot);
-      throw new TenantPolicyBoundInferenceError('active_policy_tenant_mismatch');
+      throw this.refuse(
+        snapshot,
+        new TenantPolicyBoundInferenceError('active_policy_tenant_mismatch'),
+      );
     }
     let binding: VerifiedActivePolicyRoleBindingV1;
     try {
       binding = this.roleBinding(snapshot, role);
     } catch (error: unknown) {
-      this.evictAfterRefreshFailure(snapshot);
-      throw error;
+      throw this.refuse(snapshot, error);
     }
-    await this.ensureFresh(snapshot);
+    const freshness = this.currentFreshness();
+    const epoch = freshness?.refusalEpoch?.();
+    const verifiedInFull = await this.ensureFresh(snapshot, freshness, epoch);
     try {
       if (!this.options.runtimeEvidence && this.options.requireRuntimeEvidence) {
         throw new Error('runtime_evidence_unavailable');
@@ -331,24 +346,41 @@ export class TenantPolicyBoundInference implements SynthesisInference {
         throw new Error(RUNTIME_EVIDENCE_BACKEND_UNAVAILABLE);
       }
     } catch (error: unknown) {
-      this.evictAfterRefreshFailure(snapshot);
-      throw new TenantPolicyBoundInferenceError(
-        'active_policy_snapshot_refresh_failed',
-        this.refreshFailureReason(error),
+      throw this.refuse(
+        snapshot,
+        new TenantPolicyBoundInferenceError(
+          'active_policy_snapshot_refresh_failed',
+          this.refreshFailureReason(error),
+        ),
       );
     }
     if (!this.options.verifiedBindingForwarder && this.options.requireBindingForwarding) {
-      this.evictAfterRefreshFailure(snapshot);
-      throw new TenantPolicyBoundInferenceError('active_policy_snapshot_refresh_failed');
+      throw this.refuse(
+        snapshot,
+        new TenantPolicyBoundInferenceError('active_policy_snapshot_refresh_failed'),
+      );
     }
     try {
       await this.options.verifiedBindingForwarder?.(binding, snapshot);
       await this.options.onVerifiedBinding?.(binding, snapshot);
     } catch {
-      this.evictAfterRefreshFailure(snapshot);
-      throw new TenantPolicyBoundInferenceError('active_policy_snapshot_refresh_failed');
+      throw this.refuse(
+        snapshot,
+        new TenantPolicyBoundInferenceError('active_policy_snapshot_refresh_failed'),
+      );
     }
+    if (verifiedInFull && epoch !== undefined) freshness?.confirm?.(snapshot, epoch);
     return { binding, snapshot };
+  }
+
+  private refuse(snapshot: VerifiedActivePolicySnapshotV1, error: unknown): unknown {
+    this.evictAfterRefreshFailure(snapshot, this.currentFreshness(), this.refusalCode(error));
+    return error;
+  }
+
+  private refusalCode(error: unknown): string | undefined {
+    if (!(error instanceof TenantPolicyBoundInferenceError)) return undefined;
+    return error.reason ?? error.code;
   }
 
   private roleBinding(
@@ -384,13 +416,17 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     return binding;
   }
 
-  private async ensureFresh(snapshot: VerifiedActivePolicySnapshotV1): Promise<void> {
-    const freshness = this.currentFreshness();
+  // True only when this call itself re-read the durable high-water and found the snapshot serving.
+  private async ensureFresh(
+    snapshot: VerifiedActivePolicySnapshotV1,
+    freshness: TenantPolicyFreshnessPort | undefined,
+    epoch: number | undefined,
+  ): Promise<boolean> {
     if (!freshness) {
       if (this.options.requireFreshness) {
         throw new TenantPolicyBoundInferenceError('active_policy_snapshot_refresh_failed');
       }
-      return;
+      return false;
     }
     this.assertFreshnessOptions(freshness);
     try {
@@ -416,7 +452,7 @@ export class TenantPolicyBoundInference implements SynthesisInference {
       if (sample.trustedNow >= snapshot.policy.lifetime.snapshotExpiresAt) {
         throw new TenantPolicyBoundInferenceError('active_policy_snapshot_expired');
       }
-      if (sample.trustedNow < this.trustedDeadline) return;
+      if (this.deadlineHolds(sample.trustedNow, snapshot, epoch)) return false;
       const expected = freshness.expectedContext();
       assertGenerationContextEqual(snapshot.generationContext, expected);
       const recent = await this.readWithRetry(
@@ -426,13 +462,19 @@ export class TenantPolicyBoundInference implements SynthesisInference {
       );
       servingCheckpointForInstalled(recent, expected, snapshot.durableCheckpoint);
       this.trustedDeadline = sample.trustedNow + freshness.refreshIntervalMs;
+      this.deadlineSnapshot = snapshot;
+      this.deadlineEpoch = epoch;
+      return true;
     } catch (error: unknown) {
-      this.evictAfterRefreshFailure(snapshot, freshness);
-      if (error instanceof TenantPolicyBoundInferenceError) throw error;
-      throw new TenantPolicyBoundInferenceError(
-        'active_policy_snapshot_refresh_failed',
-        this.refreshFailureReason(error),
-      );
+      const refusal =
+        error instanceof TenantPolicyBoundInferenceError
+          ? error
+          : new TenantPolicyBoundInferenceError(
+              'active_policy_snapshot_refresh_failed',
+              this.refreshFailureReason(error),
+            );
+      this.evictAfterRefreshFailure(snapshot, freshness, this.refusalCode(refusal));
+      throw refusal;
     }
   }
 
@@ -462,6 +504,19 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     );
   }
 
+  // A deadline vouches only for the snapshot and refusal epoch its own full refresh saw.
+  private deadlineHolds(
+    trustedNow: number,
+    snapshot: VerifiedActivePolicySnapshotV1,
+    epoch: number | undefined,
+  ): boolean {
+    return (
+      trustedNow < this.trustedDeadline &&
+      this.deadlineSnapshot === snapshot &&
+      this.deadlineEpoch === epoch
+    );
+  }
+
   private currentFreshness(): TenantPolicyFreshnessPort | undefined {
     return this.options.freshness ?? this.options.freshnessProvider?.();
   }
@@ -469,8 +524,9 @@ export class TenantPolicyBoundInference implements SynthesisInference {
   private evictAfterRefreshFailure(
     snapshot?: VerifiedActivePolicySnapshotV1,
     freshness: TenantPolicyFreshnessPort | undefined = this.currentFreshness(),
+    code?: string,
   ): void {
-    freshness?.evict(snapshot);
+    freshness?.evict(snapshot, code);
     this.trustedDeadline = 0;
   }
 

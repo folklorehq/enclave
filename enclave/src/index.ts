@@ -443,6 +443,7 @@ const policyWiring = new TenantPolicyWiring<LiveTenantPolicySnapshot>({
   attestation: () => runtimeAttestation,
   bootManifest: () => verifiedBootManifest,
   bootContext: () => verifiedBootGenerationContext,
+  onPolicyRefusal: (code) => bootStatus.recordPolicyRefusal(code),
 });
 activePolicySnapshotFor = (tenantId) => policyWiring.snapshotFor(tenantId);
 activePolicyFreshnessFor = (tenantId) => {
@@ -476,6 +477,8 @@ activePolicyFreshnessFor = (tenantId) => {
     expectedContext,
     refreshIntervalMs: snapshot.policy.lifetime.admissionLeaseLifetimeMs,
     evict: policyWiring.evictFor(tenantId),
+    refusalEpoch: policyWiring.refusalEpochFor(tenantId),
+    confirm: policyWiring.confirmFor(tenantId),
   };
 };
 activePolicyBindingForwarderFor = (tenantId) => async (binding, snapshot) => {

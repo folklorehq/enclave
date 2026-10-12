@@ -25,6 +25,7 @@ const ACTIVE_POLICY_REASONS = [
   'active_policy_snapshot_expired',
   'active_policy_snapshot_refresh_failed',
   'active_policy_snapshot_unavailable',
+  'active_policy_snapshot_unverified',
   'active_policy_tenant_mismatch',
   'active_policy_trusted_time_invalid',
 ] as const;
@@ -140,7 +141,7 @@ const TRUSTED_TIME_REASONS = [
   'trusted_time_wiring_unavailable',
 ] as const;
 
-const NOT_PROCESSED_REASONS = [
+export const NOT_PROCESSED_REASONS = [
   'connection_missing',
   'token_missing',
   'connector_missing',

@@ -5,6 +5,7 @@ import { ENCLAVE_BOOT_STATUS_PATH } from './boot-status-path.js';
 import type { EnclaveBootStep } from './boot-steps.js';
 import { isRuntimeDatabaseActivationFailureCode } from '../runtime-database/runtime-database-failure-codes.js';
 import { errorClassCode, guardFailureCode } from './guard-failure-code.js';
+import { MESSAGE_FAILURE_REASONS } from '../tenant/message-failure/message-failure-reasons.js';
 
 const BOOT_FAILED = 'boot_failed';
 const RUNTIME_FAILED = 'runtime_failed';
@@ -18,6 +19,18 @@ const MAX_EXIT_STATUS = 255;
 const MAX_MESSAGE_FAILURE_COUNT = 999_999_999;
 const MESSAGE_FAILURE_FALLBACK = 'message_unclassified';
 const WITHHELD_SNAPSHOT_SUFFIX = '_active_policy_snapshot_unavailable';
+const POLICY_REFUSAL_PREFIX = 'policy_withheld';
+// The reason families a snapshot refusal is raised under (TenantPolicyBoundInference refresh reasons).
+const WITHHOLDING_REASON_PREFIXES = [
+  'active_policy_',
+  'high_water_',
+  'trusted_time_',
+  'runtime_evidence_',
+  'nsm_',
+  'clock_raw_',
+] as const;
+// An echo is attributed to the code before it only this long; after that it is reported as its own.
+const WITHHELD_SNAPSHOT_ECHO_WINDOW_MS = 15 * 60 * 1000;
 
 interface FatalMonitorTarget {
   on(event: 'uncaughtExceptionMonitor', listener: (error: unknown) => void): unknown;
@@ -33,8 +46,12 @@ export class EnclaveBootStatus {
   private crashLine: string | undefined;
   private lastMessageFailure: string | undefined;
   private messageFailures = 0;
+  private causeRecordedAt = Number.NEGATIVE_INFINITY;
 
-  constructor(private readonly path: string = ENCLAVE_BOOT_STATUS_PATH) {}
+  constructor(
+    private readonly path: string = ENCLAVE_BOOT_STATUS_PATH,
+    private readonly now: () => number = () => performance.now(),
+  ) {}
 
   reach(phase: EnclaveBootPhase): void {
     this.phase = phase;
@@ -58,8 +75,21 @@ export class EnclaveBootStatus {
   // A failed message never stops the enclave; its code only rides the next status lines.
   recordMessageFailure(code: string): void {
     const named = isFailureCodeSlug(code) ? code : MESSAGE_FAILURE_FALLBACK;
-    if (!this.isWithheldSnapshotEcho(named)) this.lastMessageFailure = named;
+    if (!this.isWithheldSnapshotEcho(named)) {
+      this.lastMessageFailure = named;
+      this.causeRecordedAt = this.now();
+    }
     this.messageFailures = Math.min(this.messageFailures + 1, MAX_MESSAGE_FAILURE_COUNT);
+    if (this.crashLine === undefined) this.recordPhase();
+    else this.record(this.crashLine);
+  }
+
+  // A withhold can be raised off the message path (answers, synthesis), so its cause is named here too.
+  recordPolicyRefusal(code: string | undefined): void {
+    const reason = code !== undefined && MESSAGE_FAILURE_REASONS.has(code) ? `_${code}` : '';
+    const named = `${POLICY_REFUSAL_PREFIX}${reason}`;
+    this.lastMessageFailure = isFailureCodeSlug(named) ? named : POLICY_REFUSAL_PREFIX;
+    this.causeRecordedAt = this.now();
     if (this.crashLine === undefined) this.recordPhase();
     else this.record(this.crashLine);
   }
@@ -113,7 +143,20 @@ export class EnclaveBootStatus {
   // A failure that withholds the policy snapshot makes every later attempt fail this way too, so
   // that echo must not hide the code that caused it.
   private isWithheldSnapshotEcho(code: string): boolean {
-    return this.lastMessageFailure !== undefined && code.endsWith(WITHHELD_SNAPSHOT_SUFFIX);
+    return (
+      code.endsWith(WITHHELD_SNAPSHOT_SUFFIX) &&
+      this.lastMessageFailure !== undefined &&
+      this.couldHaveWithheld(this.lastMessageFailure, code) &&
+      !this.lastMessageFailure.endsWith(WITHHELD_SNAPSHOT_SUFFIX) &&
+      this.now() - this.causeRecordedAt <= WITHHELD_SNAPSHOT_ECHO_WINDOW_MS
+    );
+  }
+
+  // Only a policy refusal in the echo's own phase, or a named withhold, can have caused it.
+  private couldHaveWithheld(cause: string, echo: string): boolean {
+    if (cause.startsWith(POLICY_REFUSAL_PREFIX)) return true;
+    const phase = echo.slice(0, -WITHHELD_SNAPSHOT_SUFFIX.length);
+    return WITHHOLDING_REASON_PREFIXES.some((prefix) => cause.startsWith(`${phase}_${prefix}`));
   }
 
   private messageFailureSuffix(): string {

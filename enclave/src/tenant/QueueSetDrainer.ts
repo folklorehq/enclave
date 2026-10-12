@@ -18,7 +18,7 @@ import {
   pullCompleteSignalSchema,
   pullFailedSignalSchema,
 } from '@folklore/contracts/enclave';
-import type { ProcessedFact } from '../pipeline/index.js';
+import { PipelineProcessingError, type ProcessedFact } from '../pipeline/index.js';
 import {
   buildPullFailedSignal,
   type PullCompleteSignal,
@@ -314,7 +314,8 @@ export class QueueSetDrainer {
     } catch (error) {
       await this.leases.release(msg);
       await this.releaseReplay(releaseReplay);
-      if (error instanceof TenantMessageRouteError) {
+      // A pull runs its pipeline unwrapped, so its phase arrives on the pipeline error itself.
+      if (error instanceof TenantMessageRouteError || error instanceof PipelineProcessingError) {
         phase = error.phase;
         errorType = error.errorType;
       } else {

@@ -25,6 +25,7 @@ export interface TenantPolicyWiringDeps<S extends VerifiedActivePolicySnapshotV1
     | Pick<VerifiedBootManifest, 'providerInferenceTrustPolicy'>
     | undefined;
   readonly bootContext: () => BootBoundGenerationContext | undefined;
+  readonly onPolicyRefusal?: (code: string | undefined) => void;
 }
 
 export type AnswerInferenceBuild = (
@@ -41,10 +42,18 @@ export class TenantPolicyWiring<S extends VerifiedActivePolicySnapshotV1> {
     return this.deps.snapshots.get(tenantId);
   }
 
-  evictFor(tenantId: string): (failed?: VerifiedActivePolicySnapshotV1) => void {
-    return (failed) => {
-      if (failed) this.deps.snapshots.evict(tenantId, failed);
+  evictFor(tenantId: string): (failed?: VerifiedActivePolicySnapshotV1, code?: string) => void {
+    return (failed, code) => {
+      if (failed && this.deps.snapshots.evict(tenantId, failed)) this.deps.onPolicyRefusal?.(code);
     };
+  }
+
+  refusalEpochFor(tenantId: string): () => number {
+    return () => this.deps.snapshots.refusalEpoch(tenantId);
+  }
+
+  confirmFor(tenantId: string): (verified: VerifiedActivePolicySnapshotV1, epoch: number) => void {
+    return (verified, epoch) => this.deps.snapshots.confirm(tenantId, verified, epoch);
   }
 
   expectedContextFor(tenantId: string, snapshot: S): GenerationContextV1 {

@@ -64,10 +64,10 @@ const MIN_HTTP_STATUS = 100;
 const MAX_HTTP_STATUS = 599;
 const PUBLIC_ACI_SESSION_SENTENCE_PREFIX = 'public ACI ';
 const PUBLIC_ACI_SESSION_PREFIX = 'public_aci';
-const ABORT_REASONS: Readonly<Record<string, string>> = {
-  AbortError: 'request_aborted',
-  TimeoutError: 'request_timeout',
-};
+const ABORT_REASONS: ReadonlyMap<string, string> = new Map([
+  ['AbortError', 'request_aborted'],
+  ['TimeoutError', 'request_timeout'],
+]);
 // The provider backend's own sentences under its default label; the status is a bare HTTP code.
 const PROVIDER_MESSAGE_REASONS: ReadonlyArray<readonly [RegExp, (status: string) => string]> = [
   [
@@ -205,7 +205,7 @@ function networkCodeReason(error: Error): string | undefined {
 }
 
 function abortReason(error: Error): string | undefined {
-  return error instanceof DOMException ? ABORT_REASONS[error.name] : undefined;
+  return error instanceof DOMException ? ABORT_REASONS.get(error.name) : undefined;
 }
 
 // An AWS SDK service exception carries its HTTP status in `$metadata`; only the bare status is named.
