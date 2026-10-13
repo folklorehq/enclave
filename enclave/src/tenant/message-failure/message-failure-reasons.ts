@@ -174,7 +174,7 @@ const INFERENCE_TRANSPORT_REASONS = [
   'inference_transport_unconfigured',
 ] as const;
 
-const ROUTE_REASONS = ['canary_authorization_invalid'] as const;
+const ROUTE_REASONS = ['canary_authorization_invalid', 'message_deadline_exceeded'] as const;
 
 // Node and undici connection codes; the reason is the lower-cased code, never the message.
 export const NETWORK_ERROR_CODES: ReadonlySet<string> = new Set([

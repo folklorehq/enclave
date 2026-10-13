@@ -18,6 +18,7 @@ import { inferenceModel, inferenceModelRevision } from './phala.js';
 import type { SynthesisInference } from './CachedInference.js';
 import { llmCacheKey } from './llm-cache.js';
 import { TrustedTimeAuthorityError } from './TrustedTimeAuthority.js';
+import { TransientInferenceRetry } from './TransientInferenceRetry.js';
 import type { RecentGenerationHighWaterPort } from './ports.js';
 import {
   RENEWAL_GRACE_READ_COUNT,
@@ -86,6 +87,7 @@ export interface TenantPolicyBoundInferenceOptions {
   readonly verifiedBindingForwarder?: TenantPolicyVerifiedBindingForwarder;
   readonly requireBindingForwarding?: boolean;
   readonly backendForVerifiedBinding?: TenantPolicyVerifiedBindingBackendFactory;
+  readonly transientRetry?: TransientInferenceRetry;
   readonly structured?: (prompt: string, tool: ToolSpec, systemPrompt?: string) => Promise<unknown>;
   readonly onVerifiedBinding?: (
     binding: VerifiedActivePolicyRoleBindingV1,
@@ -115,6 +117,7 @@ export class TenantPolicyBoundInference implements SynthesisInference {
   private deadlineEpoch: number | undefined;
   private lastTrustedNow = 0;
   private readonly options: TenantPolicyBoundInferenceOptions;
+  private readonly transientRetry: TransientInferenceRetry;
 
   constructor(
     private readonly tenantId: string,
@@ -127,16 +130,19 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     this.options =
       typeof optionsOrSink === 'function' ? { onVerifiedBinding: optionsOrSink } : optionsOrSink;
     this.assertFreshnessOptions(this.options.freshness);
+    this.transientRetry = this.options.transientRetry ?? new TransientInferenceRetry();
   }
 
   async embed(text: string): Promise<number[]> {
     const { binding, snapshot } = await this.bindingFor('embed');
     const cache = this.operationCache;
-    if (!cache) return (await this.backendFor(binding, snapshot)).embed(text);
+    const embedOnce = () =>
+      this.transientRetry.run(async () => (await this.backendFor(binding, snapshot)).embed(text));
+    if (!cache) return embedOnce();
     const key = this.cacheKey(binding, snapshot, 'embed', text);
     const hit = await this.operationCacheGet(key, binding.modelId, 'embed');
     if (hit !== null) return JSON.parse(hit) as number[];
-    const output = await (await this.backendFor(binding, snapshot)).embed(text);
+    const output = await embedOnce();
     await cache.set(key, JSON.stringify(output));
     return output;
   }
@@ -150,11 +156,13 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     const { binding, snapshot } = await this.bindingFor('generate');
     const cache = this.operationCache;
     if (!cache)
-      return (await this.backendFor(binding, snapshot)).generate(
-        prompt,
-        systemPrompt,
-        temperature,
-        shouldCache,
+      return this.transientRetry.run(async () =>
+        (await this.backendFor(binding, snapshot)).generate(
+          prompt,
+          systemPrompt,
+          temperature,
+          shouldCache,
+        ),
       );
     const resolvedTemperature = this.validateTemperature(snapshot, binding, temperature);
     const key = this.cacheKey(
@@ -169,9 +177,14 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     );
     const hit = await this.operationCacheGet(key, binding.modelId, 'generate');
     if (hit !== null) return hit;
-    const output = await (
-      await this.backendFor(binding, snapshot)
-    ).generate(prompt, systemPrompt, resolvedTemperature, shouldCache);
+    const output = await this.transientRetry.run(async () =>
+      (await this.backendFor(binding, snapshot)).generate(
+        prompt,
+        systemPrompt,
+        resolvedTemperature,
+        shouldCache,
+      ),
+    );
     if ((shouldCache ?? (() => true))(output)) await this.options.operationCache?.set(key, output);
     return output;
   }
@@ -184,7 +197,9 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     const { binding, snapshot } = await this.bindingFor('critique');
     const cache = this.operationCache;
     if (!cache)
-      return (await this.backendFor(binding, snapshot)).critique(prompt, systemPrompt, shouldCache);
+      return this.transientRetry.run(async () =>
+        (await this.backendFor(binding, snapshot)).critique(prompt, systemPrompt, shouldCache),
+      );
     const critiqueTemperature = snapshot.policy.roles.critique.capabilities.temperature;
     const key = this.cacheKey(
       binding,
@@ -198,9 +213,9 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     );
     const hit = await this.operationCacheGet(key, binding.modelId, 'generate');
     if (hit !== null) return hit;
-    const output = await (
-      await this.backendFor(binding, snapshot)
-    ).critique(prompt, systemPrompt, shouldCache);
+    const output = await this.transientRetry.run(async () =>
+      (await this.backendFor(binding, snapshot)).critique(prompt, systemPrompt, shouldCache),
+    );
     if ((shouldCache ?? (() => true))(output)) await this.options.operationCache?.set(key, output);
     return output;
   }
@@ -211,16 +226,18 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     systemPrompt?: string,
   ): Promise<unknown> {
     const { binding, snapshot } = await this.bindingFor('judge');
-    const structured = this.options.backendForVerifiedBinding
-      ? (await this.backendFor(binding, snapshot)).generateStructured
-      : this.options.structured;
-    if (!structured) {
-      throw this.refuse(
-        snapshot,
-        new TenantPolicyBoundInferenceError('active_policy_snapshot_refresh_failed'),
-      );
-    }
-    return structured(prompt, tool, systemPrompt);
+    return this.transientRetry.run(async () => {
+      const structured = this.options.backendForVerifiedBinding
+        ? (await this.backendFor(binding, snapshot)).generateStructured
+        : this.options.structured;
+      if (!structured) {
+        throw this.refuse(
+          snapshot,
+          new TenantPolicyBoundInferenceError('active_policy_snapshot_refresh_failed'),
+        );
+      }
+      return structured(prompt, tool, systemPrompt);
+    });
   }
 
   async authorize(role: InferenceModelRole): Promise<void> {

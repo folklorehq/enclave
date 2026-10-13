@@ -78,10 +78,16 @@ export function parseRoutableMessage(input: unknown): RoutableMessage {
   throw pull.error;
 }
 
+export interface RouteOptions {
+  signal?: AbortSignal;
+}
+
 export interface RoutedResult {
   context: TenantContext;
   facts: ProcessedFact[];
   pullComplete?: PullCompleteSignal;
+  // The next chunk of a pull the budget cut short; it resumes at the cursor this one persists.
+  continuation?: PullDueMessage;
   afterDurablePersistence?: () => Promise<void>;
   requiresDurablePersistence?: boolean;
   shouldAcknowledge: boolean;
@@ -169,7 +175,11 @@ function isPullDueMessage(raw: RoutableMessage): raw is PullDueMessage {
 export class TenantMessageRouter {
   constructor(private readonly deps: TenantMessageRouterDeps) {}
 
-  async route(raw: RoutableMessage, queueTenantId: string): Promise<RoutedResult> {
+  async route(
+    raw: RoutableMessage,
+    queueTenantId: string,
+    options: RouteOptions = {},
+  ): Promise<RoutedResult> {
     if (raw.tenant_id !== queueTenantId) {
       throw new CrossTenantRoutingError(queueTenantId, raw.tenant_id);
     }
@@ -204,6 +214,7 @@ export class TenantMessageRouter {
         jiraWebhookLifecycle: this.deps.jiraWebhookLifecycle,
         mintGitHubInstallationToken: this.deps.mintGitHubInstallationToken,
         ...(codebaseSelectionStore ? { codebaseSelectionStore } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
       });
       if (result.outcome === 'not_processed') {
         return { context, facts: [], shouldAcknowledge: false, failureCode: result.reason };
@@ -219,7 +230,10 @@ export class TenantMessageRouter {
       return {
         context,
         facts: result.facts,
+        // Per chunk, lease token included: an open 15-min lease would expire mid-chain and the
+        // planner's re-issued backfill would reset the cursor to the window start.
         pullComplete: buildPullCompleteSignal(raw),
+        ...(result.hasMore ? { continuation: this.continuationOf(raw) } : {}),
         afterDurablePersistence: result.persistCursor,
         shouldAcknowledge: true,
       };
@@ -308,6 +322,18 @@ export class TenantMessageRouter {
     } finally {
       plaintext.fill(0);
     }
+  }
+
+  // A plain scheduled pull reads the stored cursor; a backfill flag here would restart from the window start.
+  private continuationOf(raw: PullDueMessage): PullDueMessage {
+    return {
+      type: 'pull-due',
+      trigger: 'scheduled',
+      tenant_id: raw.tenant_id,
+      sourceId: raw.sourceId,
+      kind: raw.kind,
+      backfill: false,
+    };
   }
 
   private validateCanaryAuthorization(raw: IngestMessage): void {

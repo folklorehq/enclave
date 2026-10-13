@@ -109,6 +109,8 @@ export function buildPullFailedSignal(
 // the enclave (not the worker signal) owns the uniform 12-month backfill horizon,
 // so no wire message can widen how far back a pull reaches.
 const BACKFILL_WINDOW_MONTHS = 12;
+// One pull-due message embeds at most this many facts, so a 12-month backfill lands chunk by chunk.
+export const PULL_FACT_BUDGET = 250;
 
 export interface PullWindow {
   cursor: SyncCursor;
@@ -144,6 +146,7 @@ export interface PullRunnerDeps {
     installationId: string;
   }) => Promise<{ accessToken: string; expiresAt: string }>;
   codebaseSelectionStore?: Pick<CodebaseSelectionStore, 'read'>;
+  signal?: AbortSignal;
 }
 
 export type PullRunResult =
@@ -151,6 +154,7 @@ export type PullRunResult =
       outcome: 'processed';
       facts: ProcessedFact[];
       cursor: string | null;
+      hasMore: boolean;
       sourceId: string;
       sourceKind: string;
       persistCursor(): Promise<void>;
@@ -499,9 +503,11 @@ export async function runPull(
     return notProcessed(message, 'connector_missing');
   }
 
-  const window = resolvePullWindow(
-    message.backfill,
-    isCode ? storedCursor : await loadCursor(deps.ssm, message.tenant_id, message.sourceId),
+  const window = budgetedWindow(
+    resolvePullWindow(
+      message.backfill,
+      isCode ? storedCursor : await loadCursor(deps.ssm, message.tenant_id, message.sourceId),
+    ),
   );
   const result = await pullWithRefresh(
     message,
@@ -517,11 +523,18 @@ export async function runPull(
     ? advanceCodeCursorTick(result.cursor.value)
     : result.cursor.value;
   await reconcileJiraWebhook(message, deps, result.connection);
-  const facts = await deps.pipeline.handlePulled(result.facts, result.containers, message.kind);
+  const facts = await deps.pipeline.handlePulled(
+    result.facts,
+    result.containers,
+    message.kind,
+    deps.signal,
+  );
   return {
     outcome: 'processed',
     facts,
     cursor,
+    // A connector that claims more without moving its cursor would loop, so only progress counts.
+    hasMore: result.hasMore && !result.earlyReturn && cursor !== window.cursor.value,
     sourceId: message.sourceId,
     sourceKind: message.kind,
     persistCursor: async () => {
@@ -532,6 +545,10 @@ export async function runPull(
       await saveCursor(deps.ssm, message.tenant_id, message.sourceId, cursor);
     },
   };
+}
+
+function budgetedWindow(window: PullWindow): PullWindow {
+  return { cursor: window.cursor, options: { ...window.options, maxFacts: PULL_FACT_BUDGET } };
 }
 
 async function resolveCodebaseConnection(deps: PullRunnerDeps) {

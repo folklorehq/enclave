@@ -26,6 +26,7 @@ import {
   type PullFailedSignal,
 } from '../pull/pull-runner.js';
 import { pullFailureReason, type PullFailure } from '../pull/pull-failure-reason.js';
+import { PullContinuations } from './continuation/PullContinuations.js';
 import { HALT_POLL_INTERVAL_MS, type HaltGate } from '../control/HaltGate.js';
 import { DurableAckBatch } from '../ingest/DurableAckBatch.js';
 import { ReceivedMessageLeases } from '../ingest/ReceivedMessageLeases.js';
@@ -42,6 +43,7 @@ import {
   parseRoutableMessage,
   TenantMessageRouteError,
   type RoutableMessage,
+  type RoutedResult,
   type TenantMessageRouter,
 } from './tenant-message-router.js';
 
@@ -58,6 +60,9 @@ const EMPTY_POOL_POLL_INTERVAL_MS = 5_000;
 export const MESSAGE_VISIBILITY_TIMEOUT_SECONDS = 120;
 const MESSAGE_VISIBILITY_RENEWAL_MS = 40_000;
 const INGEST_VISIBILITY_RENEWAL_FAILED = 'INGEST_VISIBILITY_RENEWAL_FAILED';
+// Above one budgeted pull chunk with every embed slow; a route still running past it is wedged.
+export const MESSAGE_PROCESSING_DEADLINE_MS = 30 * 60_000;
+const MESSAGE_DEADLINE_EXCEEDED = 'message_deadline_exceeded';
 type OutputPayload = ProcessedFact | PullCompleteSignal | PullFailedSignal;
 
 export interface QueueAssignment {
@@ -66,6 +71,14 @@ export interface QueueAssignment {
   assignmentGeneration?: number;
   rawPayloadsBucket?: string;
   processedBucket?: string;
+}
+
+// One message being worked: an SQS delivery under lease, or a pull chunk continued in-process.
+interface HeldDelivery {
+  body: string | undefined;
+  archivable?: Message;
+  release(): Promise<void>;
+  ack(assignment: QueueAssignment): Promise<void>;
 }
 
 interface PullFailureState {
@@ -116,6 +129,7 @@ export class QueueSetDrainer {
   private readonly drainIdleWaiters: Array<() => void> = [];
   private readonly evictingTenants = new Set<string>();
   private readonly leases: ReceivedMessageLeases;
+  private readonly continuations = new PullContinuations();
   // Tracks the last value actually written, not merely the in-process idle transition: a freshly
   // booted process has no prior write, so its first non-idle sweep must write `false` unconditionally
   // — otherwise a stale `"1"` written before a prior self-stop survives the stop/start cycle and the
@@ -157,12 +171,11 @@ export class QueueSetDrainer {
         await this.updateIdle(false);
         return;
       }
-      const ackBatch = new DurableAckBatch(this.deps.logger, (step, error) =>
-        this.reportMessageFailure(messageFailureCode(step, error)),
-      );
+      const ackBatch = this.newAckBatch();
       const received = await this.drainAllQueues(assignments, ackBatch);
       await ackBatch.commit();
-      await this.updateIdle(received);
+      const continued = await this.drainContinuations();
+      await this.updateIdle(received || continued);
       await this.deps.onDrainComplete?.();
     } finally {
       await this.leases.releaseAll();
@@ -181,6 +194,56 @@ export class QueueSetDrainer {
 
   finishTenantEviction(tenantId: string): void {
     this.evictingTenants.delete(tenantId);
+  }
+
+  private newAckBatch(): DurableAckBatch {
+    return new DurableAckBatch(this.deps.logger, (step, error) =>
+      this.reportMessageFailure(messageFailureCode(step, error)),
+    );
+  }
+
+  // One chunk per source per sweep, after the queues: queued webhooks never wait behind a backfill.
+  private async drainContinuations(): Promise<boolean> {
+    const pending = this.continuations.takeAll();
+    if (pending.length === 0) return false;
+    const ackBatch = this.newAckBatch();
+    for (const { assignment, message } of pending) {
+      if (!(await this.isStillDrainable(assignment))) continue;
+      await this.handleDelivery(assignment, this.continuationDelivery(message), ackBatch);
+    }
+    await ackBatch.commit();
+    return true;
+  }
+
+  // A dropped chunk is not lost: its cursor is persisted, so the next scheduled pull resumes there.
+  private async isStillDrainable(assignment: QueueAssignment): Promise<boolean> {
+    if (this.evictingTenants.has(assignment.tenantId)) return false;
+    if (await this.deps.haltGateFor(assignment.tenantId).isHalted()) return false;
+    return this.isCurrentAssignment(assignment);
+  }
+
+  private sqsDelivery(msg: Message): HeldDelivery {
+    return {
+      body: msg.Body,
+      archivable: msg,
+      release: async () => {
+        await this.leases.release(msg);
+      },
+      ack: async (assignment) => {
+        const receiptHandle = await this.leases.release(msg);
+        await this.ackCurrentAssignment(assignment, receiptHandle!);
+      },
+    };
+  }
+
+  private continuationDelivery(message: RoutableMessage): HeldDelivery {
+    return {
+      body: JSON.stringify(message),
+      release: async () => {},
+      ack: async (assignment) => {
+        if (!this.isCurrentAssignment(assignment)) throw new Error('assignment_changed_before_ack');
+      },
+    };
   }
 
   private async drainAllQueues(
@@ -220,7 +283,7 @@ export class QueueSetDrainer {
           await this.releaseAll(fresh.slice(index));
           break;
         }
-        await this.handleMessage(assignment, msg, ackBatch);
+        await this.handleDelivery(assignment, this.sqsDelivery(msg), ackBatch);
       }
       total += messages.length;
       isFirstPoll = false;
@@ -228,9 +291,9 @@ export class QueueSetDrainer {
     return total;
   }
 
-  private async handleMessage(
+  private async handleDelivery(
     assignment: QueueAssignment,
-    msg: Message,
+    delivery: HeldDelivery,
     ackBatch: DurableAckBatch,
   ): Promise<void> {
     let releaseReplay: (() => Promise<void>) | undefined;
@@ -238,16 +301,17 @@ export class QueueSetDrainer {
     let errorType = 'Error';
     let raw: RoutableMessage | undefined;
     try {
-      const parsed: unknown = JSON.parse(msg.Body!);
+      const parsed: unknown = JSON.parse(delivery.body!);
       raw = parseRoutableMessage(parsed);
       phase = 'route';
-      const routed = await this.deps.router.route(raw, assignment.tenantId);
+      const routed = await this.routeWithinDeadline(raw, assignment.tenantId);
       releaseReplay = routed.releaseReplay;
       const {
         context,
         facts,
         pullComplete,
         afterDurablePersistence,
+        continuation,
         requiresDurablePersistence = true,
         shouldAcknowledge,
         commitReplay,
@@ -259,10 +323,10 @@ export class QueueSetDrainer {
           tenant_id: context.tenantId,
           code: droppedCode,
         });
-      } else {
+      } else if (delivery.archivable) {
         this.archive(
           context.tenantId,
-          msg,
+          delivery.archivable,
           assignment.rawPayloadsBucket ?? this.deps.rawPayloadsBucket ?? '',
         );
       }
@@ -271,7 +335,7 @@ export class QueueSetDrainer {
       if (!shouldAcknowledge) {
         phase = 'release';
         this.reportMessageFailure(notProcessedFailureCode(routed.failureCode));
-        await this.leases.release(msg);
+        await delivery.release();
         await this.releaseReplay(releaseReplay);
         releaseReplay = undefined;
         await this.recordPullFailure(raw, assignment, {
@@ -305,17 +369,17 @@ export class QueueSetDrainer {
         },
         afterPersist: commitReplay,
         release: async () => {
-          await this.leases.release(msg);
+          await delivery.release();
           await routed.releaseReplay?.();
         },
         ack: async () => {
-          const receiptHandle = await this.leases.release(msg);
-          await this.ackCurrentAssignment(assignment, receiptHandle!);
+          await delivery.ack(assignment);
+          if (continuation) this.continuations.record(assignment, continuation);
         },
       });
       releaseReplay = undefined;
     } catch (error) {
-      await this.leases.release(msg);
+      await delivery.release();
       await this.releaseReplay(releaseReplay);
       // A pull runs its pipeline unwrapped, so its phase arrives on the pipeline error itself.
       if (error instanceof TenantMessageRouteError || error instanceof PipelineProcessingError) {
@@ -417,18 +481,49 @@ export class QueueSetDrainer {
     assignment: QueueAssignment,
     receiptHandle: string,
   ): Promise<void> {
+    if (!this.isCurrentAssignment(assignment)) throw new Error('assignment_changed_before_ack');
+    await this.ackMessage(assignment.queueUrl, receiptHandle);
+  }
+
+  private isCurrentAssignment(assignment: QueueAssignment): boolean {
     const current = this.deps
       .assignments()
       .find((candidate) => candidate.tenantId === assignment.tenantId);
-    if (
-      !current ||
-      current.queueUrl !== assignment.queueUrl ||
-      (assignment.assignmentGeneration !== undefined &&
-        current.assignmentGeneration !== assignment.assignmentGeneration)
-    ) {
-      throw new Error('assignment_changed_before_ack');
+    return (
+      current !== undefined &&
+      current.queueUrl === assignment.queueUrl &&
+      (assignment.assignmentGeneration === undefined ||
+        current.assignmentGeneration === assignment.assignmentGeneration)
+    );
+  }
+
+  // Past the deadline the message is released and the route is told to stop; a late result is dropped.
+  private async routeWithinDeadline(raw: RoutableMessage, tenantId: string): Promise<RoutedResult> {
+    const controller = new AbortController();
+    const routing = this.deps.router.route(raw, tenantId, { signal: controller.signal });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        const exceeded = new Error(MESSAGE_DEADLINE_EXCEEDED);
+        controller.abort(exceeded);
+        reject(exceeded);
+      }, MESSAGE_PROCESSING_DEADLINE_MS);
+    });
+    try {
+      return await Promise.race([routing, deadline]);
+    } catch (error) {
+      if (controller.signal.aborted) this.discardLateRoute(routing);
+      throw error;
+    } finally {
+      clearTimeout(timer);
     }
-    await this.ackMessage(assignment.queueUrl, receiptHandle);
+  }
+
+  private discardLateRoute(routing: Promise<RoutedResult>): void {
+    routing.then(
+      (late) => this.releaseReplay(late.releaseReplay),
+      () => undefined,
+    );
   }
 
   private async emitFacts(facts: ProcessedFact[], assignmentGeneration?: number): Promise<void> {
