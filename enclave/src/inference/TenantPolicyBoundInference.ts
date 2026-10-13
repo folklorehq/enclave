@@ -40,6 +40,7 @@ const MAX_REFRESH_REASON_DEPTH = 8;
 const REFRESH_READ_ATTEMPTS = 2;
 const REFRESH_TIMEOUT_CODE = 'active_policy_refresh_timeout';
 const HIGH_WATER_CODE_PREFIX = 'high_water_';
+const HIGH_WATER_TRANSPORT_UNAVAILABLE = 'high_water_transport_unavailable';
 export const RUNTIME_EVIDENCE_BACKEND_UNAVAILABLE = 'runtime_evidence_backend_unavailable';
 
 export type TenantPolicySnapshotProvider = () => VerifiedActivePolicySnapshotV1 | undefined;
@@ -582,7 +583,9 @@ export class TenantPolicyBoundInference implements SynthesisInference {
   // A high-water verification refusal is a result check; a transport failure or timeout is not.
   private isTransientHighWaterFailure(error: unknown): boolean {
     if (this.isRefreshTimeout(error)) return true;
-    return !(error instanceof Error && error.message.startsWith(HIGH_WATER_CODE_PREFIX));
+    if (!(error instanceof Error)) return true;
+    if (error.message === HIGH_WATER_TRANSPORT_UNAVAILABLE) return true;
+    return !error.message.startsWith(HIGH_WATER_CODE_PREFIX);
   }
 
   private async withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {

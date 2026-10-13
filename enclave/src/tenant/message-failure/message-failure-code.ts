@@ -14,11 +14,7 @@ import type { PullNotProcessedReason } from '../../pull/pull-runner.js';
 import { TenantContextZeroizedError } from '../tenant-context.js';
 import { CrossTenantRoutingError, TenantMessageRouteError } from '../tenant-message-router.js';
 import { UnknownTenantError } from '../tenant-registry.js';
-import {
-  MESSAGE_FAILURE_REASONS,
-  NETWORK_ERROR_CODES,
-  PUBLIC_ACI_SESSION_MESSAGES,
-} from './message-failure-reasons.js';
+import { MESSAGE_FAILURE_REASONS, NETWORK_ERROR_CODES } from './message-failure-reasons.js';
 
 export const MESSAGE_FAILURE_PHASES = [
   'parse',
@@ -62,8 +58,6 @@ const AWS_HTTP_PREFIX = 'aws_http';
 const AWS_FAULTS: ReadonlySet<unknown> = new Set(['client', 'server']);
 const MIN_HTTP_STATUS = 100;
 const MAX_HTTP_STATUS = 599;
-const PUBLIC_ACI_SESSION_SENTENCE_PREFIX = 'public ACI ';
-const PUBLIC_ACI_SESSION_PREFIX = 'public_aci';
 const ABORT_REASONS: ReadonlyMap<string, string> = new Map([
   ['AbortError', 'request_aborted'],
   ['TimeoutError', 'request_timeout'],
@@ -186,10 +180,6 @@ function linkReason(link: unknown): string | undefined {
 }
 
 function fixedSentenceReason(message: string): string | undefined {
-  if (PUBLIC_ACI_SESSION_MESSAGES.has(message)) {
-    const words = message.slice(PUBLIC_ACI_SESSION_SENTENCE_PREFIX.length).split(' ');
-    return [PUBLIC_ACI_SESSION_PREFIX, ...words].join('_');
-  }
   for (const [pattern, reason] of PROVIDER_MESSAGE_REASONS) {
     const match = pattern.exec(message);
     if (match) return reason(match[1] ?? '');

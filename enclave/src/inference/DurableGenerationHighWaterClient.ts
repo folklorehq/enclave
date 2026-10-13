@@ -22,6 +22,7 @@ import type { ChainedGenerationHighWaterCheckpointV1 } from './ports.js';
 
 const MAX_HIGH_WATER_CANDIDATE_BYTES = 1_048_576;
 const GENERATION_HIGH_WATER_PURPOSE = 'generation-high-water' as const;
+const HIGH_WATER_CODE = /^high_water_[a-z0-9_]+$/;
 const TRANSPORT_CONTEXT_KEYS = [
   'bootRootDigest',
   'deploymentId',
@@ -90,8 +91,8 @@ export class DurableGenerationHighWaterClient {
     context: DurableGenerationHighWaterTransportContextV1,
   ): Promise<DurableGenerationHighWaterCheckpointV1> {
     const normalizedContext = assertTransportContext(context);
+    const response = await this.callTransport(() => this.transport.read({ ...normalizedContext }));
     try {
-      const response = await this.transport.read({ ...normalizedContext });
       const envelope = await this.verifyEnvelope(normalizedContext, response, 'response');
       return checkpointFromEntry(envelope.entry);
     } catch (error) {
@@ -106,8 +107,10 @@ export class DurableGenerationHighWaterClient {
   ): Promise<readonly ChainedGenerationHighWaterCheckpointV1[]> {
     const normalizedContext = assertTransportContext(context);
     if (!Number.isSafeInteger(count) || count < 1) throw failure('high_water_recent_count_invalid');
+    const responses = await this.callTransport(() =>
+      this.transport.readRecent({ ...normalizedContext }, count),
+    );
     try {
-      const responses = await this.transport.readRecent({ ...normalizedContext }, count);
       if (!Array.isArray(responses) || responses.length === 0 || responses.length > count) {
         throw failure('high_water_response_invalid');
       }
@@ -136,17 +139,30 @@ export class DurableGenerationHighWaterClient {
       normalizedCandidate,
       'candidate',
     );
-    try {
-      const response = await this.transport.commit({
+    const response = await this.callTransport(() =>
+      this.transport.commit({
         context: normalizedContext,
         entry: candidateEnvelope.entry,
         bytes: Uint8Array.from(candidateEnvelope.bytes),
-      });
+      }),
+    );
+    try {
       const envelope = await this.verifyEnvelope(normalizedContext, response, 'response');
       return checkpointFromEntry(envelope.entry);
     } catch (error) {
       if (isHighWaterFailure(error)) throw error;
       throw failure('high_water_response_invalid', error);
+    }
+  }
+
+  // The transport's own refusal codes pass through; any other I/O failure is retryable unavailability.
+  private async callTransport<T>(call: () => Promise<T>): Promise<T> {
+    try {
+      return await call();
+    } catch (error) {
+      if (isHighWaterFailure(error)) throw error;
+      if (isTransportRefusal(error)) throw failure(error.message, error);
+      throw failure('high_water_transport_unavailable', error);
     }
   }
 
@@ -365,6 +381,14 @@ function checkpointFromEntry(entry: HighWaterLogEntryV1): ChainedGenerationHighW
     issuedAt: checkpoint.issuedAtTrustedMs,
     signature: entry.signature,
   });
+}
+
+function isTransportRefusal(error: unknown): error is Error {
+  return (
+    error instanceof Error &&
+    Object.getPrototypeOf(error) === Error.prototype &&
+    HIGH_WATER_CODE.test(error.message)
+  );
 }
 
 function isHighWaterFailure(error: unknown): error is ServiceUnavailableError {
