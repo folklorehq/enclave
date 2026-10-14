@@ -1,4 +1,5 @@
 import type { S3Client } from '@aws-sdk/client-s3';
+import { ServiceUnavailableError } from '@folklore/errors';
 import type { LlmCacheNamer } from '../inference/llm-cache.js';
 import { S3LlmCache } from '../inference/S3LlmCache.js';
 import type { TenantContext } from './tenant-context.js';
@@ -9,7 +10,10 @@ export interface TenantInferenceMemoDeps<T> {
   resolveTenant: ResolveTenant;
   bucketFor: (orgId: string, tenant: TenantContext) => string;
   build: (orgId: string, tenant: TenantContext, cache: S3LlmCache) => T;
+  fenceEpoch?: (orgId: string) => number | undefined;
 }
+
+const TENANT_INFERENCE_FENCED = 'tenant_inference_fenced';
 
 interface MemoEntry<T> {
   tenant: TenantContext;
@@ -20,6 +24,8 @@ interface MemoEntry<T> {
 // One cached inference per org, rebuilt whenever the org resolves to a different context.
 export class TenantInferenceMemo<T> {
   private readonly entries = new Map<string, MemoEntry<T>>();
+  // An org evicted under a fence is not rebuilt until that fence episode ends.
+  private readonly evictedInFence = new Map<string, number>();
 
   constructor(private readonly deps: TenantInferenceMemoDeps<T>) {}
 
@@ -28,7 +34,10 @@ export class TenantInferenceMemo<T> {
     const current = this.entries.get(orgId);
     if (current?.tenant === tenant) return current.value;
     if (current) this.retireStale(orgId, current);
-    return this.build(orgId, tenant).value;
+    this.assertRebuildAllowed(orgId);
+    const entry = this.build(orgId, tenant);
+    this.evictedInFence.delete(orgId);
+    return entry.value;
   }
 
   take(orgId: string): S3LlmCache | undefined {
@@ -38,11 +47,24 @@ export class TenantInferenceMemo<T> {
   }
 
   async evict(orgId: string): Promise<void> {
+    this.recordEviction(orgId);
     await this.take(orgId)?.close();
   }
 
   orgIds(): string[] {
     return [...this.entries.keys()];
+  }
+
+  private recordEviction(orgId: string): void {
+    const epoch = this.deps.fenceEpoch?.(orgId);
+    if (epoch === undefined) this.evictedInFence.delete(orgId);
+    else this.evictedInFence.set(orgId, epoch);
+  }
+
+  private assertRebuildAllowed(orgId: string): void {
+    const evictedIn = this.evictedInFence.get(orgId);
+    if (evictedIn === undefined || this.deps.fenceEpoch?.(orgId) !== evictedIn) return;
+    throw new ServiceUnavailableError('tenant inference fenced', TENANT_INFERENCE_FENCED);
   }
 
   private build(orgId: string, tenant: TenantContext): MemoEntry<T> {

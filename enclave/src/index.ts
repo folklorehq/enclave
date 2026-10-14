@@ -806,7 +806,6 @@ const evictTenantSubsystems = async (tenantId: string): Promise<void> => {
     [
       drainerRef.current?.evictTenant(tenantId),
       synthesisConsumer?.evictTenant(tenantId),
-      evictAnswerInference?.(tenantId),
       apiContainer?.evictCollabTenant(tenantId),
     ].filter((result): result is Promise<void> => result !== undefined),
   );
@@ -820,6 +819,10 @@ const tenantRequestQuiescence = new TenantRequestQuiescenceMonitor({
   tenantIds: () => registry.all().map((context) => context.tenantId),
   logger,
   onFence: evictTenantSubsystems,
+  // An admitted answer can rebuild this cache, so it is evicted only once requests have drained.
+  onDrained: async (tenantId) => {
+    await evictAnswerInference?.(tenantId);
+  },
   onActivate: (tenantId) => {
     drainerRef.current?.finishTenantEviction(tenantId);
     synthesisConsumer?.finishTenantEviction(tenantId);
@@ -1136,6 +1139,7 @@ try {
   const answerInference = new TenantInferenceMemo<InferenceModel>({
     s3,
     resolveTenant,
+    fenceEpoch: (orgId) => tenantRequests.currentFenceEpoch(orgId),
     bucketFor: (_orgId, tenant) => tenant.processedOutputsBucket || PROCESSED_OUTPUTS_BUCKET,
     build: policyWiring.answerInferenceBuilder(
       poolPolicyPortsFrom({

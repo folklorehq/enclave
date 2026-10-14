@@ -3,6 +3,7 @@ import type { Cache, Logger } from '@folklore/core';
 import type { TenantRequestQuiescer } from './TenantRequestQuiescer.js';
 
 const DEFAULT_POLL_INTERVAL_MS = 250;
+const STILL_DRAINING = Symbol('still_draining');
 
 export interface TenantRequestQuiescenceMonitorOptions {
   cache: Pick<Cache, 'get' | 'set'>;
@@ -10,6 +11,8 @@ export interface TenantRequestQuiescenceMonitorOptions {
   tenantIds: () => readonly string[];
   logger: Logger;
   onFence?: (tenantId: string) => Promise<void>;
+  // Runs after admitted requests drain, for state an admitted request could rebuild.
+  onDrained?: (tenantId: string) => Promise<void>;
   onActivate?: (tenantId: string) => void | Promise<void>;
   pollIntervalMs?: number;
 }
@@ -50,13 +53,7 @@ export class TenantRequestQuiescenceMonitor {
       }
       if (!requestId) return;
 
-      const requestDrain = this.options.quiescer.fence(tenantId);
-      const subsystemDrain = this.options.onFence?.(tenantId);
-      await Promise.all(
-        [requestDrain, subsystemDrain].filter(
-          (result): result is Promise<void> => result !== undefined,
-        ),
-      );
+      await this.drainAndEvict(tenantId);
 
       const [stillHalted, currentRequestId] = await Promise.all([
         this.options.cache.get<boolean>(tenantHaltKey(tenantId)),
@@ -69,6 +66,31 @@ export class TenantRequestQuiescenceMonitor {
       this.options.logger.error('tenant_quiescence_probe_failed', {
         error: error instanceof Error ? error.name : 'unknown',
       });
+    }
+  }
+
+  // A failed eviction must not wait on the drain it may be holding open, or onFence is never retried.
+  private async drainAndEvict(tenantId: string): Promise<void> {
+    const requestDrain = this.options.quiescer.fence(tenantId);
+    requestDrain.catch(() => undefined);
+    try {
+      await this.options.onFence?.(tenantId);
+    } catch (error: unknown) {
+      if (await this.hasDrained(requestDrain)) await this.options.onDrained?.(tenantId);
+      throw error;
+    }
+    await requestDrain;
+    await this.options.onDrained?.(tenantId);
+  }
+
+  // Racing the promise itself against an already-resolved sentinel observes a settled drain deterministically.
+  private async hasDrained(requestDrain: Promise<void>): Promise<boolean> {
+    try {
+      return (
+        (await Promise.race([requestDrain, Promise.resolve(STILL_DRAINING)])) !== STILL_DRAINING
+      );
+    } catch {
+      return false;
     }
   }
 
