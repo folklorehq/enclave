@@ -1,8 +1,9 @@
 import { tenantHaltAckKey, tenantHaltKey, tenantHaltRequestKey } from '@folklore/contracts';
 import type { Cache, Logger } from '@folklore/core';
-import type { TenantRequestQuiescer } from './TenantRequestQuiescer.js';
+import type { TenantQuiescenceHolder, TenantRequestQuiescer } from './TenantRequestQuiescer.js';
 
 const DEFAULT_POLL_INTERVAL_MS = 250;
+const HALT_FENCE_HOLDER: TenantQuiescenceHolder = 'halt';
 const STILL_DRAINING = Symbol('still_draining');
 
 export interface TenantRequestQuiescenceMonitorOptions {
@@ -47,8 +48,7 @@ export class TenantRequestQuiescenceMonitor {
         this.options.cache.get<string>(tenantHaltRequestKey(tenantId)),
       ]);
       if (halted !== true) {
-        await this.options.onActivate?.(tenantId);
-        this.options.quiescer.activate(tenantId);
+        await this.releaseHalt(tenantId);
         return;
       }
       if (!requestId) return;
@@ -69,9 +69,20 @@ export class TenantRequestQuiescenceMonitor {
     }
   }
 
+  // The applier fences and evicts too; only what this monitor closed for a halt reopens here.
+  private async releaseHalt(tenantId: string): Promise<void> {
+    const { quiescer } = this.options;
+    quiescer.activate(tenantId, HALT_FENCE_HOLDER);
+    if (!quiescer.isWorkHeldOnlyBy(tenantId, HALT_FENCE_HOLDER)) return;
+    if (quiescer.currentFenceEpoch(tenantId) !== undefined) return;
+    await this.options.onActivate?.(tenantId);
+    quiescer.releaseWork(tenantId, HALT_FENCE_HOLDER);
+  }
+
   // A failed eviction must not wait on the drain it may be holding open, or onFence is never retried.
   private async drainAndEvict(tenantId: string): Promise<void> {
-    const requestDrain = this.options.quiescer.fence(tenantId);
+    this.options.quiescer.holdWork(tenantId, HALT_FENCE_HOLDER);
+    const requestDrain = this.options.quiescer.fence(tenantId, HALT_FENCE_HOLDER);
     requestDrain.catch(() => undefined);
     try {
       await this.options.onFence?.(tenantId);

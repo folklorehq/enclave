@@ -24,6 +24,8 @@ import {
   isVerifiedAssignmentManifest,
   type VerifiedAssignmentManifest,
 } from './VerifiedAssignmentManifest.js';
+import { PolicyGenerationQuiescence } from './quiescence/PolicyGenerationQuiescence.js';
+import type { TenantEviction } from './quiescence/tenant-generation-quiescence.js';
 
 export type BuildTenantContext = (identity: TenantIdentity) => Promise<TenantContext>;
 export type TenantPolicyAssignment = VersionedTenantAssignment & {
@@ -32,12 +34,14 @@ export type TenantPolicyAssignment = VersionedTenantAssignment & {
 };
 export type SignedRecoveryKeyFor = (assignment: TenantPolicyAssignment) => string | undefined;
 const TENANT_TEARDOWN_TIMEOUT_MS = 10_000;
+// Covers a full queue sweep and a synthesis job's visibility window; requests stay admitted meanwhile.
+const GENERATION_WORK_TIMEOUT_MS = 120_000;
+const ACTIVATION_SUPERSEDED = 'assignment_generation_activation_superseded';
 
 // Called for every replaced or dropped context before it is zeroized so co-resident subsystems can
 // synchronously detach independently-held key material. Content-free: tenant id only.
 export type OnTenantTornDown = (tenantId: string) => void | Promise<void>;
 export type OnTenantActivated = (tenantId: string) => void;
-export type OnTenantGenerationChanged = (tenantId: string) => void | Promise<void>;
 export type OnTenantGenerationCommitted = (tenantId: string) => void;
 export type OnTenantQuiescenceFailure = (
   tenantId: string,
@@ -54,7 +58,17 @@ export interface TenantPolicyAssignmentApplierOptions<TSnapshot extends TenantPo
   readonly logger: Logger;
   readonly onTornDown?: OnTenantTornDown;
   readonly onActivated?: OnTenantActivated;
-  readonly onGenerationChanged?: OnTenantGenerationChanged;
+  readonly onGenerationChanged?: TenantEviction;
+  readonly onGenerationWorkQuiescing?: TenantEviction;
+}
+
+type StagedEntry = TenantGenerationEntry<TenantContext, TenantPolicySnapshotLike>;
+
+interface StageInputs {
+  readonly staged: Map<string, StagedEntry>;
+  readonly built: Set<TenantContext>;
+  readonly signedRecoveryKeys: ReadonlyMap<string, string>;
+  readonly snapshots: ReadonlyMap<string, TenantPolicySnapshotLike>;
 }
 
 interface TeardownHookResult {
@@ -70,6 +84,7 @@ export class TenantAssignmentApplier {
   private readonly assigned = new Map<string, TenantPolicyAssignment>();
   private applying = false;
   private policyApplyTail: Promise<void> = Promise.resolve();
+  private policyApplyInFlight = false;
   private lastAcceptedGeneration = 0;
   private lastAcceptedDigest: string | undefined;
   private activePolicyGeneration: number | undefined;
@@ -80,12 +95,13 @@ export class TenantAssignmentApplier {
   private readonly teardownTimeoutMs: number;
   private readonly defaultDeploymentId: string;
   private readonly onActivated: OnTenantActivated | undefined;
-  private readonly onGenerationChanged: OnTenantGenerationChanged | undefined;
+  private readonly onGenerationChanged: TenantEviction | undefined;
   private readonly onGenerationCommitted: OnTenantGenerationCommitted | undefined;
   private readonly onQuiescenceFailure: OnTenantQuiescenceFailure | undefined;
   private readonly policyMode:
     | TenantPolicyAssignmentApplierOptions<TenantPolicySnapshotLike>
     | undefined;
+  private readonly policyQuiescence: PolicyGenerationQuiescence | undefined;
 
   constructor(
     registryOrOptions:
@@ -97,7 +113,7 @@ export class TenantAssignmentApplier {
     teardownTimeoutMs: number = TENANT_TEARDOWN_TIMEOUT_MS,
     defaultDeploymentId = '',
     onActivated?: OnTenantActivated,
-    onGenerationChanged?: OnTenantGenerationChanged,
+    onGenerationChanged?: TenantEviction,
     onGenerationCommitted?: OnTenantGenerationCommitted,
     onQuiescenceFailure?: OnTenantQuiescenceFailure,
   ) {
@@ -113,6 +129,7 @@ export class TenantAssignmentApplier {
       this.onGenerationChanged = onGenerationChanged;
       this.onGenerationCommitted = onGenerationCommitted;
       this.onQuiescenceFailure = onQuiescenceFailure;
+      this.policyQuiescence = undefined;
       return;
     }
     this.registry = registryOrOptions.registry;
@@ -126,6 +143,13 @@ export class TenantAssignmentApplier {
     this.onGenerationCommitted = undefined;
     this.onQuiescenceFailure = undefined;
     this.policyMode = registryOrOptions;
+    this.policyQuiescence = new PolicyGenerationQuiescence({
+      quiesceWork: registryOrOptions.onGenerationWorkQuiescing,
+      quiesceRequests: registryOrOptions.onGenerationChanged,
+      workTimeoutMs: GENERATION_WORK_TIMEOUT_MS,
+      requestTimeoutMs: TENANT_TEARDOWN_TIMEOUT_MS,
+      logger: registryOrOptions.logger,
+    });
   }
 
   async applyAssignments(
@@ -140,13 +164,26 @@ export class TenantAssignmentApplier {
     >;
   }> {
     const result = this.policyApplyTail.then(() =>
-      this.applyPolicyAssignments(assignments, generation, digest),
+      this.applyWithInFlightMark(assignments, generation, digest),
     );
     this.policyApplyTail = result.then(
       () => undefined,
       () => undefined,
     );
     return result;
+  }
+
+  private async applyWithInFlightMark(
+    assignments: readonly TenantPolicyAssignment[],
+    generation: number,
+    digest?: string,
+  ) {
+    this.policyApplyInFlight = true;
+    try {
+      return await this.applyPolicyAssignments(assignments, generation, digest);
+    } finally {
+      this.policyApplyInFlight = false;
+    }
   }
 
   private async applyPolicyAssignments(
@@ -160,7 +197,8 @@ export class TenantAssignmentApplier {
       TenantGenerationRegistry<TenantContext, TenantPolicySnapshotLike>['read']
     >;
   }> {
-    if (!this.policyMode) throw new Error('tenant_policy_applier_mode_unavailable');
+    const quiescence = this.policyQuiescence;
+    if (!this.policyMode || !quiescence) throw new Error('tenant_policy_applier_mode_unavailable');
     const expectedGeneration = this.policyMode.generationRegistry.generation();
     if (generation === expectedGeneration) {
       if (
@@ -179,11 +217,9 @@ export class TenantAssignmentApplier {
     if (generation < expectedGeneration) {
       throw new Error('assignment_manifest_generation_mismatch');
     }
+    await quiescence.settleLate();
     const previous = this.policyMode.generationRegistry.read();
-    const staged = new Map<
-      string,
-      TenantGenerationEntry<TenantContext, TenantPolicySnapshotLike>
-    >();
+    const staged = new Map<string, StagedEntry>();
     const built = new Set<TenantContext>();
     const quiesced = new Set<string>();
     let published = false;
@@ -197,38 +233,21 @@ export class TenantAssignmentApplier {
         verifiedSnapshots.set(assignment.tenantId, await this.policyMode.verifyPolicy(assignment));
       }
       const stagedSnapshots = this.policyMode.snapshots.stage(verifiedSnapshots);
-      for (const assignment of assignments) {
-        const signedRecoveryPubkey = signedRecoveryKeys.get(assignment.tenantId);
-        const context = await this.build({
-          tenantId: assignment.tenantId,
-          deploymentId: assignment.deploymentId,
-          ...(assignment.tenantDeploymentId
-            ? { tenantDeploymentId: assignment.tenantDeploymentId }
-            : {}),
-          kmsKeyId: assignment.kmsKeyId,
-          activeStorageKeyVersion: assignment.activeStorageKeyVersion,
-          storageKeyHistory: assignment.storageKeyHistory,
-          recoveryPubkey: assignment.recoveryPubkey,
-          ...(signedRecoveryPubkey ? { signedRecoveryPubkey } : {}),
-          sealedBlobBucket: assignment.sealedBlobBucket,
-          rawPayloadsBucket: assignment.rawPayloadsBucket,
-          processedBucket: assignment.processedBucket,
-        });
-        built.add(context);
-        const snapshot = stagedSnapshots.get(assignment.tenantId);
-        if (!snapshot) throw new Error('tenant_policy_snapshot_missing');
-        staged.set(assignment.tenantId, { context, snapshot });
-      }
-      const nextState = new Map(
-        [...staged].map(([tenantId, entry]) => [
-          tenantId,
-          { context: entry.context, snapshot: entry.snapshot },
-        ]),
+      const previousTenantIds = [...previous.entries.keys()];
+      const onLateQuiesced = (tenantId: string, attempt: number) =>
+        this.queueLateReactivation(tenantId, previous.generation, attempt);
+      const stage: StageInputs = { staged, built, signedRecoveryKeys, snapshots: stagedSnapshots };
+      await this.stageBatch(
+        assignments.filter(({ tenantId }) => !previous.entries.has(tenantId)),
+        stage,
       );
-      for (const tenantId of previous.entries.keys()) {
-        await this.policyMode.onGenerationChanged?.(tenantId);
-        quiesced.add(tenantId);
-      }
+      await quiescence.quiesceWork(previousTenantIds, quiesced, onLateQuiesced);
+      await this.stageBatch(
+        assignments.filter(({ tenantId }) => previous.entries.has(tenantId)),
+        stage,
+      );
+      const nextState = this.inManifestOrder(assignments, staged);
+      await quiescence.quiesceRequests(previousTenantIds, quiesced, onLateQuiesced);
       this.policyMode.generationRegistry.replaceGeneration(
         previous.generation,
         nextState,
@@ -271,7 +290,9 @@ export class TenantAssignmentApplier {
     } catch (error) {
       if (!published) {
         for (const context of built) context.zeroize();
-        for (const tenantId of quiesced) this.onActivated?.(tenantId);
+        if (!this.keepsClosed(previous.generation)) {
+          for (const tenantId of quiesced) this.onActivated?.(tenantId);
+        }
       } else {
         for (const tenantId of this.policyMode.generationRegistry.read().entries.keys()) {
           this.onQuiescenceFailure?.(tenantId, 'teardown');
@@ -279,6 +300,73 @@ export class TenantAssignmentApplier {
       }
       throw error;
     }
+  }
+
+  private async stageBatch(
+    batch: readonly TenantPolicyAssignment[],
+    inputs: StageInputs,
+  ): Promise<void> {
+    for (const assignment of batch) {
+      inputs.staged.set(assignment.tenantId, await this.buildStaged(assignment, inputs));
+    }
+  }
+
+  private async buildStaged(
+    assignment: TenantPolicyAssignment,
+    { built, signedRecoveryKeys, snapshots }: StageInputs,
+  ): Promise<StagedEntry> {
+    const signedRecoveryPubkey = signedRecoveryKeys.get(assignment.tenantId);
+    const context = await this.build({
+      tenantId: assignment.tenantId,
+      deploymentId: assignment.deploymentId,
+      ...(assignment.tenantDeploymentId
+        ? { tenantDeploymentId: assignment.tenantDeploymentId }
+        : {}),
+      kmsKeyId: assignment.kmsKeyId,
+      activeStorageKeyVersion: assignment.activeStorageKeyVersion,
+      storageKeyHistory: assignment.storageKeyHistory,
+      recoveryPubkey: assignment.recoveryPubkey,
+      ...(signedRecoveryPubkey ? { signedRecoveryPubkey } : {}),
+      sealedBlobBucket: assignment.sealedBlobBucket,
+      rawPayloadsBucket: assignment.rawPayloadsBucket,
+      processedBucket: assignment.processedBucket,
+    });
+    built.add(context);
+    const snapshot = snapshots.get(assignment.tenantId);
+    if (!snapshot) throw new Error('tenant_policy_snapshot_missing');
+    return { context, snapshot };
+  }
+
+  private inManifestOrder(
+    assignments: readonly TenantPolicyAssignment[],
+    staged: ReadonlyMap<string, StagedEntry>,
+  ): Map<string, StagedEntry> {
+    const ordered = new Map<string, StagedEntry>();
+    for (const { tenantId } of assignments) {
+      const entry = staged.get(tenantId);
+      if (!entry) throw new Error('tenant_policy_staged_entry_missing');
+      ordered.set(tenantId, entry);
+    }
+    return ordered;
+  }
+
+  // Tenants stay closed only on a generation this applier published and has not yet activated.
+  private keepsClosed(generation: number): boolean {
+    return this.lastAcceptedGeneration === generation && this.activePolicyGeneration !== generation;
+  }
+
+  // A tenant that finished quiescing after its apply was refused reopens only on the generation it left.
+  private queueLateReactivation(tenantId: string, generation: number, attempt: number): void {
+    this.policyApplyTail = this.policyApplyTail.then(() => {
+      const live = this.policyMode?.generationRegistry;
+      if (!live || live.generation() !== generation || this.keepsClosed(generation)) return;
+      if (!live.get(tenantId) || this.policyQuiescence?.attemptOf(tenantId) !== attempt) return;
+      try {
+        this.onActivated?.(tenantId);
+      } catch {
+        this.logger.error('tenant generation reactivation failed', { tenant_id: tenantId });
+      }
+    });
   }
 
   // Runs before any policy check or build, so one bad binding refuses the generation untouched.
@@ -323,6 +411,8 @@ export class TenantAssignmentApplier {
       throw new Error('assignment_generation_activation_mismatch');
     }
     if (this.activePolicyGeneration === generation) return;
+    // A stalled refresh activating late would lift the holds a newer in-flight apply has taken.
+    if (this.policyApplyInFlight) throw new Error(ACTIVATION_SUPERSEDED);
     this.activePolicyGeneration = generation;
     for (const tenantId of this.policyMode.generationRegistry.read().entries.keys()) {
       this.onActivated?.(tenantId);

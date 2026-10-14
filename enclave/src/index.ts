@@ -24,6 +24,7 @@ import type { TenantPolicyAssignment } from './tenant/TenantAssignmentApplier.js
 import { signedRecoveryKeyFor } from './sealing/recovery-key-binding.js';
 import { TenantRequestQuiescer } from './tenant/TenantRequestQuiescer.js';
 import { TenantRequestQuiescenceMonitor } from './tenant/TenantRequestQuiescenceMonitor.js';
+import { createTenantGenerationQuiescence } from './tenant/quiescence/tenant-generation-quiescence.js';
 import { TenantMessageRouter } from './tenant/tenant-message-router.js';
 import { HttpCanaryAuthorizationConsumer } from './ingest/HttpCanaryAuthorizationConsumer.js';
 import { ControlPlaneTenantDirectorySource } from './directory/ControlPlaneTenantDirectorySource.js';
@@ -407,6 +408,7 @@ const assignmentApplier = new TenantAssignmentApplier(
   undefined,
   DEPLOYMENT_ID,
   (tenantId) => {
+    tenantRequests.releaseWork(tenantId);
     drainerRef.current?.finishTenantEviction(tenantId);
     synthesisConsumer?.finishTenantEviction(tenantId);
     tenantRequests.activate(tenantId);
@@ -432,6 +434,7 @@ const assignmentApplier = new TenantAssignmentApplier(
     }
   },
   (tenantId) => {
+    tenantRequests.releaseWork(tenantId);
     drainerRef.current?.finishTenantEviction(tenantId);
     synthesisConsumer?.finishTenantEviction(tenantId);
     tenantRequests.activate(tenantId);
@@ -499,6 +502,16 @@ activePolicyBindingForwarderFor = (tenantId) => async (binding, snapshot) => {
   if (forwarded.roleBinding !== binding) throw new Error('active_policy_binding_replaced');
 };
 
+const generationQuiescence = createTenantGenerationQuiescence({
+  fence: (tenantId) => tenantRequests.fence(tenantId),
+  holdWork: (tenantId) => tenantRequests.holdWork(tenantId),
+  evictWork: [
+    (tenantId) => drainerRef.current?.evictTenant(tenantId),
+    (tenantId) => synthesisConsumer?.evictTenant(tenantId),
+  ],
+  evictAlongsideDrain: [(tenantId) => apiContainer?.evictCollabTenant(tenantId)],
+  evictAfterDrain: (tenantId) => evictAnswerInference?.(tenantId),
+});
 const policyAssignmentApplier = new TenantAssignmentApplier({
   registry,
   generationRegistry,
@@ -527,15 +540,11 @@ const policyAssignmentApplier = new TenantAssignmentApplier({
     return snapshot;
   },
   logger,
-  onGenerationChanged: async (tenantId) => {
-    await tenantRequests.fence(tenantId);
-    await drainerRef.current?.evictTenant(tenantId);
-    await synthesisConsumer?.evictTenant(tenantId);
-    await evictAnswerInference?.(tenantId);
-    await apiContainer?.evictCollabTenant(tenantId);
-  },
+  onGenerationWorkQuiescing: generationQuiescence.quiesceWork,
+  onGenerationChanged: generationQuiescence.quiesceRequests,
   onTornDown: (tenantId) => evictMintedTokensForOrg(tenantId),
   onActivated: (tenantId) => {
+    tenantRequests.releaseWork(tenantId);
     drainerRef.current?.finishTenantEviction(tenantId);
     synthesisConsumer?.finishTenantEviction(tenantId);
     tenantRequests.activate(tenantId);
@@ -850,7 +859,7 @@ const beginTenantRequest = async (tenantId: string) => {
 // §4.3: the agent publishes this pool's content-free manifest to Redis on check-in; the enclave
 // re-reads it and rebuilds the registry (add/remove tenants, §2.2 pt 5). Idempotent, so a periodic
 // re-read reconverges to the latest assignment. Dedicated boxes have no POOL_ID and no manifest.
-async function refreshAssignments(): Promise<void> {
+async function refreshAssignments(epoch: number): Promise<void> {
   if (!isSharedPool) return;
   let refusalTarget: NormalizedAssignmentManifestV1 | undefined;
   try {
@@ -1013,6 +1022,10 @@ async function refreshAssignments(): Promise<void> {
         signature: Buffer.from(signed.signature).toString('base64'),
       },
     });
+    if (epoch !== refreshEpoch) {
+      logger.error('assignment refresh superseded', { pool_id: POOL_ID });
+      return;
+    }
     await haltCache.set(poolAssignmentAckKey(POOL_ID), acknowledgment);
     await assignmentRefusals.clear();
     if (isV4) {
@@ -1034,8 +1047,33 @@ async function refreshAssignments(): Promise<void> {
   }
 }
 
+const ASSIGNMENT_REFRESH_STALL_MS = 300_000;
+let refreshInFlight: Promise<void> | undefined;
+let refreshEpoch = 0;
+
+// Single-flight because overlap clears newer holds; the epoch voids a stalled flight's late ack.
+async function refreshAssignmentsOnce(): Promise<void> {
+  if (refreshInFlight) return;
+  const epoch = ++refreshEpoch;
+  const current = refreshAssignments(epoch);
+  refreshInFlight = current;
+  const releaseSlot = () => {
+    if (refreshInFlight === current) refreshInFlight = undefined;
+  };
+  const stallTimer = setTimeout(() => {
+    logger.error('assignment refresh stalled', { pool_id: POOL_ID });
+    releaseSlot();
+  }, ASSIGNMENT_REFRESH_STALL_MS);
+  try {
+    await current;
+  } finally {
+    clearTimeout(stallTimer);
+    releaseSlot();
+  }
+}
+
 bootStatus.begin('assignments_load');
-await refreshAssignments();
+await refreshAssignmentsOnce();
 bootStatus.reach('assignments_loaded');
 void tenantRequestQuiescence.runForever();
 bootStatus.begin('inference_configure');
@@ -1046,7 +1084,7 @@ const ASSIGNMENT_REFRESH_INTERVAL_MS = 30_000;
 // the fact-index save; on timeout we proceed WITHOUT freeing a still-pinned index (shred at exit).
 const SHUTDOWN_QUIESCE_TIMEOUT_MS = 10_000;
 const assignmentRefreshTimer = setInterval(
-  () => void refreshAssignments(),
+  () => void refreshAssignmentsOnce(),
   ASSIGNMENT_REFRESH_INTERVAL_MS,
 );
 
