@@ -22,9 +22,10 @@ import { createPublicAciOperationBackend } from './PublicAciOperationBackend.js'
 import { createPinnedInferenceTransport } from '../egress/inference.js';
 import { assertPublicInferenceEmbeddingDimension } from './phala.js';
 import { installedSnapshotHighWater } from './renewal-grace.js';
-
-// Leave ten seconds of headroom below the NSM checkpoint maximum age.
-const PUBLIC_ACI_OPERATION_BUDGET_MS = 50_000;
+import {
+  publicAciOperationLimits,
+  type InferenceLatencyProfile,
+} from './public-aci-operation-limits.js';
 
 export interface PublicAciRuntimeBackendFactoryOptions {
   readonly providerPolicy: unknown;
@@ -32,6 +33,7 @@ export interface PublicAciRuntimeBackendFactoryOptions {
   readonly freshness: TenantPolicyFreshnessPort;
   readonly bootEpoch: string;
   readonly apiKey?: string;
+  readonly latencyProfile?: InferenceLatencyProfile;
   readonly fetchFactory?: (policy: {
     origin: string;
     route: string;
@@ -118,11 +120,10 @@ export function createPublicAciRuntimeBackendFactory(
       throw new Error('public_aci_tenant_mismatch');
     const role = exactRole(binding, snapshot);
     assertPublicInferenceEmbeddingDimension(snapshot);
+    const limits = publicAciOperationLimits(binding.role, options.latencyProfile ?? 'batch');
     const startedAt = performance.now();
     const remainingBudget = () => {
-      const remaining = Math.floor(
-        PUBLIC_ACI_OPERATION_BUDGET_MS - (performance.now() - startedAt),
-      );
+      const remaining = Math.floor(limits.operationBudgetMs - (performance.now() - startedAt));
       if (remaining <= 0) throw new Error('public_aci_operation_deadline');
       return remaining;
     };
@@ -180,6 +181,7 @@ export function createPublicAciRuntimeBackendFactory(
           return transport.fetch(input, { ...init, signal });
         },
         apiKey: options.apiKey,
+        requestTimeoutMs: limits.requestTimeoutMs,
       });
     } catch (error) {
       await transport.close();

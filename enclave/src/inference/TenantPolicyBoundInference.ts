@@ -19,6 +19,7 @@ import type { SynthesisInference } from './CachedInference.js';
 import { llmCacheKey } from './llm-cache.js';
 import { TrustedTimeAuthorityError } from './TrustedTimeAuthority.js';
 import { TransientInferenceRetry } from './TransientInferenceRetry.js';
+import { transientRetryWindowMs } from './public-aci-operation-limits.js';
 import type { RecentGenerationHighWaterPort } from './ports.js';
 import {
   RENEWAL_GRACE_READ_COUNT,
@@ -157,13 +158,15 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     const { binding, snapshot } = await this.bindingFor('generate');
     const cache = this.operationCache;
     if (!cache)
-      return this.transientRetry.run(async () =>
-        (await this.backendFor(binding, snapshot)).generate(
-          prompt,
-          systemPrompt,
-          temperature,
-          shouldCache,
-        ),
+      return this.transientRetry.run(
+        async () =>
+          (await this.backendFor(binding, snapshot)).generate(
+            prompt,
+            systemPrompt,
+            temperature,
+            shouldCache,
+          ),
+        transientRetryWindowMs('generate'),
       );
     const resolvedTemperature = this.validateTemperature(snapshot, binding, temperature);
     const key = this.cacheKey(
@@ -178,13 +181,15 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     );
     const hit = await this.operationCacheGet(key, binding.modelId, 'generate');
     if (hit !== null) return hit;
-    const output = await this.transientRetry.run(async () =>
-      (await this.backendFor(binding, snapshot)).generate(
-        prompt,
-        systemPrompt,
-        resolvedTemperature,
-        shouldCache,
-      ),
+    const output = await this.transientRetry.run(
+      async () =>
+        (await this.backendFor(binding, snapshot)).generate(
+          prompt,
+          systemPrompt,
+          resolvedTemperature,
+          shouldCache,
+        ),
+      transientRetryWindowMs('generate'),
     );
     if ((shouldCache ?? (() => true))(output)) await this.options.operationCache?.set(key, output);
     return output;
@@ -198,8 +203,10 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     const { binding, snapshot } = await this.bindingFor('critique');
     const cache = this.operationCache;
     if (!cache)
-      return this.transientRetry.run(async () =>
-        (await this.backendFor(binding, snapshot)).critique(prompt, systemPrompt, shouldCache),
+      return this.transientRetry.run(
+        async () =>
+          (await this.backendFor(binding, snapshot)).critique(prompt, systemPrompt, shouldCache),
+        transientRetryWindowMs('critique'),
       );
     const critiqueTemperature = snapshot.policy.roles.critique.capabilities.temperature;
     const key = this.cacheKey(
@@ -214,8 +221,10 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     );
     const hit = await this.operationCacheGet(key, binding.modelId, 'generate');
     if (hit !== null) return hit;
-    const output = await this.transientRetry.run(async () =>
-      (await this.backendFor(binding, snapshot)).critique(prompt, systemPrompt, shouldCache),
+    const output = await this.transientRetry.run(
+      async () =>
+        (await this.backendFor(binding, snapshot)).critique(prompt, systemPrompt, shouldCache),
+      transientRetryWindowMs('critique'),
     );
     if ((shouldCache ?? (() => true))(output)) await this.options.operationCache?.set(key, output);
     return output;
@@ -238,7 +247,7 @@ export class TenantPolicyBoundInference implements SynthesisInference {
         );
       }
       return structured(prompt, tool, systemPrompt);
-    });
+    }, transientRetryWindowMs('judge'));
   }
 
   async authorize(role: InferenceModelRole): Promise<void> {

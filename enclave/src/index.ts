@@ -78,6 +78,10 @@ import { createPublicAciRuntimeBackendFactory } from './inference/PublicAciRunti
 import { poolPolicyPortsFrom } from './inference/tenant-inference-builders.js';
 import { TenantPolicyWiring } from './tenant/TenantPolicyWiring.js';
 import { createOperationTrustedTime } from './inference/OperationTrustedTime.js';
+import {
+  publicAciOperationLimits,
+  type InferenceLatencyProfile,
+} from './inference/public-aci-operation-limits.js';
 import { NsmTrustedTimeSource } from './inference/NsmTrustedTimeSource.js';
 import { installGlobalEgressDispatcher } from './egress/proxy.js';
 import {
@@ -294,8 +298,10 @@ let verifiedBootManifest: VerifiedBootManifest | undefined;
 type LiveTenantPolicySnapshot = TenantPolicySnapshotLike & VerifiedActivePolicySnapshotV1;
 let activePolicySnapshotFor: (tenantId: string) => LiveTenantPolicySnapshot | undefined = () =>
   undefined;
-let activePolicyFreshnessFor: (tenantId: string) => TenantPolicyFreshnessPort | undefined = () =>
-  undefined;
+let activePolicyFreshnessFor: (
+  tenantId: string,
+  checkpointAgeMs?: number,
+) => TenantPolicyFreshnessPort | undefined = () => undefined;
 let activePolicyBindingForwarderFor: (
   tenantId: string,
 ) => TenantPolicyVerifiedBindingForwarder | undefined = () => undefined;
@@ -307,11 +313,13 @@ function activePolicyRuntimeEvidenceFor(tenantId: string): TenantPolicyRuntimeEv
 
 function activePolicyBackendFor(
   tenantId: string,
+  latencyProfile: InferenceLatencyProfile = 'batch',
 ): TenantPolicyVerifiedBindingBackendFactory | undefined {
   const providerPolicy = verifiedBootManifest?.providerInferenceTrustPolicy;
   if (!providerPolicy) return undefined;
   return async (binding, snapshot) => {
-    const freshness = activePolicyFreshnessFor(tenantId);
+    const limits = publicAciOperationLimits(binding.role, latencyProfile);
+    const freshness = activePolicyFreshnessFor(tenantId, limits.checkpointAgeMs);
     if (!freshness || !runtimeAttestation || activePolicySnapshotFor(tenantId) !== snapshot) {
       throw new Error('public_aci_runtime_authority_unavailable');
     }
@@ -321,6 +329,7 @@ function activePolicyBackendFor(
       freshness,
       bootEpoch: String(runtimeAttestation.bootSessionState().bootEpoch),
       apiKey: process.env['TEE_API_KEY'],
+      latencyProfile,
     });
     return factory(binding, snapshot);
   };
@@ -446,7 +455,7 @@ const policyWiring = new TenantPolicyWiring<LiveTenantPolicySnapshot>({
   onPolicyRefusal: (code) => bootStatus.recordPolicyRefusal(code),
 });
 activePolicySnapshotFor = (tenantId) => policyWiring.snapshotFor(tenantId);
-activePolicyFreshnessFor = (tenantId) => {
+activePolicyFreshnessFor = (tenantId, checkpointAgeMs) => {
   const snapshot = activePolicySnapshotFor(tenantId);
   const highWater = durableGenerationHighWaterClient;
   if (!snapshot || !highWater || !runtimeAttestation) return undefined;
@@ -469,6 +478,7 @@ activePolicyFreshnessFor = (tenantId) => {
     {
       nsm: new NsmTrustedTimeSource({ nsm: { attest: getAttestationDoc } }),
       clock: { readNanoseconds: () => process.hrtime.bigint() },
+      maximumCheckpointAgeMs: checkpointAgeMs,
     },
   );
   return {
@@ -1146,7 +1156,8 @@ try {
         activePolicyFreshnessFor: (id) => activePolicyFreshnessFor(id),
         activePolicyRuntimeEvidenceFor: (id) => activePolicyRuntimeEvidenceFor(id),
         activePolicyBindingForwarderFor: (id) => activePolicyBindingForwarderFor(id),
-        activePolicyBackendFor: (id) => activePolicyBackendFor(id),
+        // A user is waiting on the answer, so it keeps the short bound batch synthesis outgrew.
+        activePolicyBackendFor: (id) => activePolicyBackendFor(id, 'interactive'),
       }),
       recordTokenUsage,
     ),

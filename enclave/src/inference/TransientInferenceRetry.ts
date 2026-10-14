@@ -18,24 +18,34 @@ const TRANSIENT_NETWORK_CODES: ReadonlySet<string> = new Set([
 export interface TransientInferenceRetryDeps {
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
+  now?: () => number;
 }
 
 /** Re-runs one inference operation through a provider gateway blip; every other refusal fails on its first throw. */
 export class TransientInferenceRetry {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly random: () => number;
+  private readonly now: () => number;
 
   constructor(deps: TransientInferenceRetryDeps = {}) {
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.random = deps.random ?? Math.random;
+    this.now = deps.now ?? (() => performance.now());
   }
 
-  async run<T>(operation: () => Promise<T>): Promise<T> {
+  /** A failure that lands after `retryWindowMs` from the first attempt is final, whatever its cause. */
+  async run<T>(operation: () => Promise<T>, retryWindowMs = Number.POSITIVE_INFINITY): Promise<T> {
+    const startedAt = this.now();
     for (let attempt = 1; ; attempt += 1) {
       try {
         return await operation();
       } catch (error: unknown) {
-        if (attempt >= TRANSIENT_INFERENCE_ATTEMPTS || !this.isTransient(error)) throw error;
+        if (
+          attempt >= TRANSIENT_INFERENCE_ATTEMPTS ||
+          this.now() - startedAt >= retryWindowMs ||
+          !this.isTransient(error)
+        )
+          throw error;
         await this.sleep(this.backoffMs(attempt));
       }
     }

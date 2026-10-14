@@ -14,10 +14,9 @@ import {
   type VerifiedActivePolicySnapshotV1,
 } from '@folklore/inference';
 import { recordTokenUsage } from './TokenUsageScope.js';
+import { SHORT_OPERATION_LIMITS } from './public-aci-operation-limits.js';
 
 import { createPublicDstackQuoteVerifier } from '../attestation/PublicDstackQuoteComposition.js';
-
-const PUBLIC_ACI_REQUEST_TIMEOUT_MS = 40_000;
 
 export interface PublicAciOperationBackendOptions {
   readonly providerPolicy: unknown;
@@ -28,6 +27,7 @@ export interface PublicAciOperationBackendOptions {
   readonly keysetHighWater: AciKeysetHighWaterAuthorityPort;
   readonly fetchImpl: typeof fetch;
   readonly apiKey?: string;
+  readonly requestTimeoutMs?: number;
 }
 
 /** One backend per already-authorized tenant operation. No process-global request state. */
@@ -148,7 +148,7 @@ export function createPublicAciOperationBackend(
     generateModelRevision: selected.revision,
     modelAllowlist: [binding.modelId],
     publicAciRequired: true,
-    timeoutMs: PUBLIC_ACI_REQUEST_TIMEOUT_MS,
+    timeoutMs: options.requestTimeoutMs ?? SHORT_OPERATION_LIMITS.requestTimeoutMs,
     usageSink: recordTokenUsage,
     responseVerifier: {
       ensureAttested: async (request) => {
