@@ -1220,6 +1220,7 @@ try {
     beginTenantRequest,
     ...(codebaseSettingsPort ? { codebaseSettings: codebaseSettingsPort } : {}),
     retrieverFactory: buildRetriever,
+    factExcerptReaderFactory: buildRetriever,
     // grounded answers reuse the same per-request gated retrieval spine, then feed only
     // audience-visible decrypted bodies to the in-enclave TEE model — nothing leaves the enclave.
     // Both seams resolve per request from the answer's own orgId: the retriever and the sealed

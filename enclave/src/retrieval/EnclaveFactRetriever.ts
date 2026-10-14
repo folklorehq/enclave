@@ -1,6 +1,8 @@
 import { GetObjectCommand, type S3Client } from '@aws-sdk/client-s3';
 import type {
   AudienceAccess,
+  FactExcerptParams,
+  FactExcerptReader,
   FactMetadata,
   FactRetriever,
   FactSearchParams,
@@ -8,11 +10,17 @@ import type {
   RetrievedFact,
   RetrieverDeps,
 } from '@folklore/api';
-import { SNIPPET_MAX_CHARS } from '@folklore/contracts';
+import {
+  FACT_EXCERPT_BATCH_MAX,
+  FACT_EXCERPT_MAX_CHARS,
+  SNIPPET_MAX_CHARS,
+} from '@folklore/contracts';
 import { isSensitivityWithin } from '@folklore/wiki';
 import type { EnclaveCrypto } from '../crypto/esdk.js';
 import { embedText } from '../inference/phala.js';
 import type { ResolveTenant } from '../tenant/tenant-resolver.js';
+
+const FACT_EXCERPT_BATCH_TOO_LARGE = 'fact_excerpt_batch_too_large';
 
 export interface FactRetrieverDeps extends RetrieverDeps {
   resolveTenant: ResolveTenant;
@@ -33,7 +41,7 @@ export interface GatedFact {
 // embedded and matched against the in-enclave index; matches are audience-gated
 // on content-free metadata before any body is decrypted, and a body is decrypted
 // (AAD-bound to its row) only to preview a fact the caller is allowed to see.
-export class EnclaveFactRetriever implements FactRetriever {
+export class EnclaveFactRetriever implements FactRetriever, FactExcerptReader {
   constructor(private readonly deps: FactRetrieverDeps) {}
 
   async search(params: FactSearchParams): Promise<RetrievedFact[]> {
@@ -60,24 +68,25 @@ export class EnclaveFactRetriever implements FactRetriever {
       this.deps.loadFactMetadata(orgId, factIds),
       this.deps.resolveAudienceAccess(orgId, userId),
     ]);
+    return this.decryptVisible(tenant.crypto, orgId, metaRows, access, SNIPPET_MAX_CHARS);
+  }
 
-    // Independent, fail-closed work (decryptBody returns null on failure), so the per-fact decrypts
-    // run concurrently instead of N serial S3 GET + decrypt round-trips for an N-row page.
-    const visible = metaRows.filter((meta) => this.isVisible(meta, access));
-    const decrypted = await Promise.all(
-      visible.map(async (meta) => ({
-        meta,
-        body: await this.decryptBody(tenant.crypto, orgId, meta, SNIPPET_MAX_CHARS),
-      })),
-    );
+  // Access is resolved fresh, never from the cache, and the batch is bounded.
+  async excerptsForFactIds(params: FactExcerptParams): Promise<Map<string, string>> {
+    const { orgId, userId, factIds } = params;
+    if (factIds.length === 0) return new Map();
+    if (factIds.length > FACT_EXCERPT_BATCH_MAX) throw new Error(FACT_EXCERPT_BATCH_TOO_LARGE);
+    const limit = this.clampExcerptChars(params.maxChars);
+    if (limit === 0) return new Map();
+    const resolveFreshAccess = this.deps.resolveFreshAudienceAccess;
+    if (!resolveFreshAccess) return new Map();
 
-    const snippets = new Map<string, string>();
-    for (const { meta, body } of decrypted) {
-      // decryptBody returns '' for a null bodyS3Key — a null body key means absent.
-      if (body === null || body === '') continue;
-      snippets.set(meta.id, body);
-    }
-    return snippets;
+    const tenant = this.deps.resolveTenant(orgId);
+    const [metaRows, access] = await Promise.all([
+      this.deps.loadFactMetadata(orgId, factIds),
+      resolveFreshAccess(orgId, userId),
+    ]);
+    return this.decryptVisible(tenant.crypto, orgId, metaRows, access, limit);
   }
 
   // Embed → ANN → audience-gate → decrypt, shared by snippet search and answer grounding.
@@ -115,6 +124,37 @@ export class EnclaveFactRetriever implements FactRetriever {
       results.push({ meta, distance: hit.distance, body });
     }
     return results;
+  }
+
+  // Independent, fail-closed work (decryptBody returns null on failure), so the per-fact decrypts
+  // run concurrently instead of N serial S3 GET + decrypt round-trips for an N-row page.
+  private async decryptVisible(
+    crypto: EnclaveCrypto,
+    orgId: string,
+    metaRows: FactMetadata[],
+    access: AudienceAccess,
+    bodyLimit: number,
+  ): Promise<Map<string, string>> {
+    const visible = metaRows.filter((meta) => this.isVisible(meta, access));
+    const decrypted = await Promise.all(
+      visible.map(async (meta) => ({
+        meta,
+        body: await this.decryptBody(crypto, orgId, meta, bodyLimit),
+      })),
+    );
+
+    const bodies = new Map<string, string>();
+    for (const { meta, body } of decrypted) {
+      // decryptBody returns '' for a null bodyS3Key, so an empty body means absent.
+      if (body === null || body === '') continue;
+      bodies.set(meta.id, body);
+    }
+    return bodies;
+  }
+
+  private clampExcerptChars(maxChars: number): number {
+    if (Number.isNaN(maxChars)) return 0;
+    return Math.max(0, Math.min(Math.trunc(maxChars), FACT_EXCERPT_MAX_CHARS));
   }
 
   private isVisible(meta: FactMetadata, access: AudienceAccess): boolean {
