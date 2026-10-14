@@ -190,6 +190,7 @@ export const MESSAGE_SENTENCE_REASONS: ReadonlyMap<string, string> = new Map([
   ['8af8b35e3b12425a', 'uuid_array_param_value_is_not_a_uuid'],
   ['c728dc487e8fd341', 'verified_provenance_subject_digest_not_match'],
   ['4205ab2b10d626bf', 'verified_provenance_subject_is_missing'],
+  ['1e3ff6103e253200', 'viewer_session_requires_non_empty_viewer_account_id'],
   ['53e3591c9a4f6a37', 'visibility_renewal_failed'],
   ['9e8f272df3508684', 'wiki_comment_thread_not_found'],
   ['ddd259517392e529', 'wiki_empty_content'],
