@@ -1,3 +1,4 @@
+import { isLowercaseRfcUuid } from '@folklore/utils';
 import {
   connectorOAuthMetadataUpdateSchema,
   type ConnectorOAuthMetadataUpdate,
@@ -6,6 +7,7 @@ import {
 } from '@folklore/contracts/enclave';
 import {
   memberIdentityLinkPersistenceSchema,
+  supportsPerPersonMode,
   type MemberIdentityLinkPersistence as MemberIdentityLinkPersistenceRecord,
 } from '@folklore/contracts';
 import { createHash, type KeyObject } from 'node:crypto';
@@ -43,6 +45,7 @@ export interface CredentialSealer {
     purpose: 'access' | 'refresh';
     generation: string;
     plaintext: Buffer;
+    ownerAccountId?: string;
   }): Promise<string>;
 }
 
@@ -94,6 +97,7 @@ export class EnclaveOAuthAuthorizationService {
     const grant = this.decryptGrant(submission);
     if (!this.matches(submission, grant, generation)) throw new EnclaveOAuthRedemptionError();
     if (Date.parse(grant.expiresAt) <= Date.now()) throw new EnclaveOAuthRedemptionError();
+    const owner = this.credentialOwner(grant);
     let response: ProviderTokenResponse | undefined;
     try {
       const config = this.requireProviderConfig(grant.sourceKind);
@@ -128,6 +132,7 @@ export class EnclaveOAuthAuthorizationService {
         purpose: 'access',
         generation: grant.attestationGeneration,
         plaintext: Buffer.from(response.accessToken, 'utf8'),
+        ...owner,
       });
       const encryptedRefreshToken = response.refreshToken
         ? await this.sealer.seal({
@@ -137,6 +142,7 @@ export class EnclaveOAuthAuthorizationService {
             purpose: 'refresh',
             generation: grant.attestationGeneration,
             plaintext: Buffer.from(response.refreshToken, 'utf8'),
+            ...owner,
           })
         : undefined;
       const metadata = connectorOAuthMetadataUpdateSchema.parse({
@@ -267,6 +273,15 @@ export class EnclaveOAuthAuthorizationService {
       grant.attestationGeneration === submission.attestationGeneration &&
       grant.stateBindingId === submission.stateBindingId
     );
+  }
+
+  // A personal-kind credential belongs to the account that connected it; no account or email means no credential.
+  private credentialOwner(grant: AuthorizationGrant): { ownerAccountId?: string } {
+    if (!supportsPerPersonMode(grant.sourceKind)) return {};
+    if (!grant.accountId || !isLowercaseRfcUuid(grant.accountId) || !grant.memberEmail) {
+      throw new EnclaveOAuthRedemptionError();
+    }
+    return { ownerAccountId: grant.accountId };
   }
 
   private requireConnectionId(grant: AuthorizationGrant): string {

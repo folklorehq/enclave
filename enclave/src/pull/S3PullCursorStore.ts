@@ -10,10 +10,7 @@ export interface S3PullCursorStoreDeps {
   deploymentId: string;
 }
 
-// ESDK-sealed `code` connector cursors in the tenant's processed bucket — the SSM path is
-// 4 KB Standard-tier capped and the cursor grows monotonically with install size. The worker
-// Lambda role can read this bucket, so nothing here is plaintext-readable without the tenant
-// keyring (same pattern as S3LlmCache).
+// Sealed `code` and member pull cursors; the worker role can read this bucket but not the plaintext.
 export class S3PullCursorStore {
   constructor(private readonly deps: S3PullCursorStoreDeps) {}
 
@@ -34,7 +31,7 @@ export class S3PullCursorStore {
       if (err instanceof NoSuchKey) return null;
       // Any other read failure (decrypt mismatch, corrupt blob) re-snapshots budget-capped
       // instead of wedging the pull; the log is count-only, never cursor content.
-      logger.warn('code pull-cursor: load failed, treating as fresh', {
+      logger.warn('sealed pull-cursor: load failed, treating as fresh', {
         error: err instanceof Error ? err.name : 'unknown',
       });
       return null;

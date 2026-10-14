@@ -128,6 +128,7 @@ export class TenantContextFactory {
           () => context.current?.activePolicySnapshot(),
           this.lateBoundNamer(context),
         ),
+        () => context.current?.personalIdentifierKey() ?? null,
       );
       const tenantContext = new TenantContext(
         identity.tenantId,

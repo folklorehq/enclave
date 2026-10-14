@@ -1,10 +1,11 @@
 /** Fetches ESDK-sealed source credentials and decrypts them in the owning tenant context. */
-import type { EnclaveCrypto } from '../crypto/esdk.js';
+import type { EnclaveCrypto, OAuthCredentialRef } from '../crypto/esdk.js';
 import { sha256Hex } from '@folklore/utils';
 import {
   type EnclaveSourceConnectionProjection,
   enclaveSourceConnectionProjectionSchema,
   enclaveSourceConnectionsResponseSchema,
+  enclaveMemberSourceConnectionsResponseSchema,
   type EncryptedSourceConnection,
   type GitHubCodebaseCapabilityProjection,
 } from '@folklore/contracts/enclave';
@@ -38,6 +39,19 @@ export interface SourceConnectionProjection {
 }
 
 type SourceConnectionsProtocol = 'legacy' | 'capabilities';
+
+const MEMBER_PROTOCOL_VERSION = '3';
+const SOURCE_CONNECTIONS_TIMEOUT_MS = 10_000;
+
+export interface MemberConnectionRequest {
+  controlPlaneUrl: string;
+  runtimeDeploymentId: string;
+  tenantDeploymentId: string;
+  agentToken: string;
+  orgId: string;
+  kind: string;
+  ownerAccountId: string;
+}
 
 export interface DecryptedSourceConnection {
   kind: string;
@@ -94,31 +108,18 @@ export async function fetchSourceConnections(
 ): Promise<
   { outcome: 'fetched'; projection: SourceConnectionProjection } | SourceConnectionResolution
 > {
-  assertControlPlaneOrigin(controlPlaneUrl);
-  // Fail closed: an org-scoped pull never makes a wide unfiltered connections fetch.
-  if (!orgId) throw new Error('source_connections_org_required');
-  let response: Response;
-  try {
-    const query = new URLSearchParams({ orgId, tenantDeploymentId });
-    if (protocol === 'capabilities') query.set('version', '2');
-    response = await fetchImpl(
-      `${controlPlaneUrl.replace(/\/$/, '')}/v1/deployments/${encodeURIComponent(runtimeDeploymentId)}/source-connections?${query.toString()}`,
-      {
-        headers: { authorization: `Bearer ${agentToken}` },
-        redirect: 'error',
-        signal: AbortSignal.timeout(10_000),
-      },
-    );
-  } catch {
-    return { outcome: 'not_processed', reason: 'connection_fetch_failed' };
-  }
-  if (!response.ok) return { outcome: 'not_processed', reason: 'connection_fetch_failed' };
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    return { outcome: 'not_processed', reason: 'connection_response_invalid' };
-  }
+  const query = new URLSearchParams({ orgId, tenantDeploymentId });
+  if (protocol === 'capabilities') query.set('version', '2');
+  const fetched = await requestSourceConnections(
+    controlPlaneUrl,
+    runtimeDeploymentId,
+    orgId,
+    query,
+    agentToken,
+    fetchImpl,
+  );
+  if (fetched.outcome !== 'body') return fetched;
+  const body = fetched.body;
   const rawConnections =
     typeof body === 'object' && body !== null && !Array.isArray(body)
       ? (body as { connections?: unknown }).connections
@@ -156,16 +157,85 @@ export async function fetchSourceConnections(
   return { outcome: 'fetched', projection: projection.data };
 }
 
+async function requestSourceConnections(
+  controlPlaneUrl: string,
+  runtimeDeploymentId: string,
+  orgId: string,
+  query: URLSearchParams,
+  agentToken: string,
+  fetchImpl: typeof globalThis.fetch,
+): Promise<{ outcome: 'body'; body: unknown } | SourceConnectionResolution> {
+  assertControlPlaneOrigin(controlPlaneUrl);
+  // Fail closed: an org-scoped pull never makes a wide unfiltered connections fetch.
+  if (!orgId) throw new Error('source_connections_org_required');
+  let response: Response;
+  try {
+    response = await fetchImpl(
+      `${controlPlaneUrl.replace(/\/$/, '')}/v1/deployments/${encodeURIComponent(runtimeDeploymentId)}/source-connections?${query.toString()}`,
+      {
+        headers: { authorization: `Bearer ${agentToken}` },
+        redirect: 'error',
+        signal: AbortSignal.timeout(SOURCE_CONNECTIONS_TIMEOUT_MS),
+      },
+    );
+  } catch {
+    return { outcome: 'not_processed', reason: 'connection_fetch_failed' };
+  }
+  if (!response.ok) return { outcome: 'not_processed', reason: 'connection_fetch_failed' };
+  try {
+    return { outcome: 'body', body: await response.json() };
+  } catch {
+    return { outcome: 'not_processed', reason: 'connection_response_invalid' };
+  }
+}
+
+/** The one member-owned connection for this owner and kind, decrypted under its owner-bound context. */
+export async function getDecryptedConnectionForMember(
+  request: MemberConnectionRequest,
+  crypto: EnclaveCrypto,
+  fetchImpl: typeof globalThis.fetch,
+): Promise<SourceConnectionResolution> {
+  const query = new URLSearchParams({
+    orgId: request.orgId,
+    tenantDeploymentId: request.tenantDeploymentId,
+    version: MEMBER_PROTOCOL_VERSION,
+    kind: request.kind,
+    ownerAccountId: request.ownerAccountId,
+  });
+  const fetched = await requestSourceConnections(
+    request.controlPlaneUrl,
+    request.runtimeDeploymentId,
+    request.orgId,
+    query,
+    request.agentToken,
+    fetchImpl,
+  );
+  if (fetched.outcome !== 'body') return fetched;
+  const parsed = enclaveMemberSourceConnectionsResponseSchema.safeParse(fetched.body);
+  if (!parsed.success) return { outcome: 'not_processed', reason: 'connection_response_invalid' };
+  const row = parsed.data.connections[0];
+  if (!row) return { outcome: 'missing' };
+  if (
+    row.deploymentId !== request.tenantDeploymentId ||
+    row.orgId !== request.orgId ||
+    row.kind !== request.kind ||
+    row.ownerAccountId !== request.ownerAccountId
+  ) {
+    return { outcome: 'not_processed', reason: 'connection_integrity_failed' };
+  }
+  return decryptSourceConnection(
+    row,
+    request.tenantDeploymentId,
+    request.orgId,
+    crypto,
+    request.ownerAccountId,
+  );
+}
+
 async function decryptToken(
   encrypted: string,
   crypto: EnclaveCrypto,
-  ref: {
-    orgId: string;
-    sourceKind: string;
-    connectionId: string;
-    purpose: 'access' | 'refresh';
-    generation: string;
-  },
+  ref: OAuthCredentialRef,
 ): Promise<string> {
   const ciphertext = Buffer.from(encrypted, 'base64');
   const plaintext = await crypto.decryptOAuthCredential(ciphertext, ref);
@@ -220,7 +290,9 @@ export async function decryptSourceConnection(
   tenantDeploymentId: string,
   orgId: string,
   crypto: EnclaveCrypto,
+  ownerAccountId?: string,
 ): Promise<SourceConnectionResolution> {
+  const owner = ownerAccountId === undefined ? {} : { ownerAccountId };
   if (
     match.deploymentId !== tenantDeploymentId ||
     match.orgId !== orgId ||
@@ -251,6 +323,7 @@ export async function decryptSourceConnection(
           connectionId: match.connectionId,
           purpose: 'access',
           generation: match.attestationGeneration,
+          ...owner,
         }),
         refreshToken: match.encryptedRefreshToken
           ? await decryptToken(match.encryptedRefreshToken, crypto, {
@@ -259,6 +332,7 @@ export async function decryptSourceConnection(
               connectionId: match.connectionId,
               purpose: 'refresh',
               generation: match.attestationGeneration,
+              ...owner,
             })
           : undefined,
         ...(match.encryptedRefreshToken

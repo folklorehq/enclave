@@ -12,6 +12,7 @@ export class EnclaveOAuthCredentialSealer implements CredentialSealer {
         connectionId: input.connectionId,
         purpose: input.purpose,
         generation: input.generation,
+        ...(input.ownerAccountId === undefined ? {} : { ownerAccountId: input.ownerAccountId }),
       });
       return ciphertext.toString('base64');
     } finally {

@@ -12,6 +12,7 @@ import {
   type PullOptions,
   type SyncCursor,
 } from '@folklore/connectors';
+import { supportsPerPersonMode } from '@folklore/contracts';
 import {
   oauthRefreshCommandSchema,
   type OAuthRefreshCommand,
@@ -22,15 +23,17 @@ import {
 } from '@folklore/contracts/enclave';
 import { externalHttpsProxyAgent } from '../egress/proxy.js';
 import { ProviderRejectedError } from '../egress/provider-token-fetch.js';
-import { deriveSourceId } from '@folklore/utils';
+import { deriveMemberSourceId, deriveSourceId } from '@folklore/utils';
 import { logger } from '../logger.js';
-import type { Pipeline, ProcessedFact } from '../pipeline/index.js';
+import type { MemberPullScope, Pipeline, ProcessedFact } from '../pipeline/index.js';
 import type { EnclaveCrypto } from '../crypto/esdk.js';
 import { GitHubCodebaseConnectionResolver } from '../codebase/GitHubCodebaseConnectionResolver.js';
 import type { CodebaseSelectionStore } from '../codebase/CodebaseSelectionStore.js';
 import {
   getDecryptedConnectionForKind,
+  getDecryptedConnectionForMember,
   type DecryptedSourceConnection,
+  type SourceConnectionResolution,
 } from './source-connections-client.js';
 import type { JiraWebhookLifecycleService } from './JiraWebhookLifecycleService.js';
 import { S3PullCursorStore } from './S3PullCursorStore.js';
@@ -236,26 +239,27 @@ async function saveCursor(
   );
 }
 
-// `code` cursors outgrow the 4 KB SSM Standard tier (per-repo completion map) and carry raw file
-// paths, so they persist ESDK-sealed in the tenant's processed bucket instead — enclave-write,
-// enclave-read, worker can't decrypt. The SSM medium stays untouched for every other kind.
-async function loadCodeCursor(
+// `code` cursors outgrow SSM and hold file paths, member cursors are personal sync tokens; both stay sealed in S3.
+async function loadSealedCursor(
   deps: PullRunnerDeps,
   message: PullDueMessage,
 ): Promise<string | null> {
-  return codeCursorStore(deps).load(message.sourceId);
+  return sealedCursorStore(deps, message).load(message.sourceId);
 }
 
-async function saveCodeCursor(
+async function saveSealedCursor(
   deps: PullRunnerDeps,
   message: PullDueMessage,
   value: string | null,
 ): Promise<void> {
-  await codeCursorStore(deps).save(message.sourceId, value);
+  await sealedCursorStore(deps, message).save(message.sourceId, value);
 }
 
-function codeCursorStore(deps: PullRunnerDeps): S3PullCursorStore {
-  if (!deps.s3 || !deps.processedBucket) throw new Error('code_pull_cursor_store_unavailable');
+function sealedCursorStore(deps: PullRunnerDeps, message: PullDueMessage): S3PullCursorStore {
+  if (!deps.s3 || !deps.processedBucket) {
+    if (message.kind === 'code') throw new Error('code_pull_cursor_store_unavailable');
+    throw new Error('member_pull_cursor_store_unavailable');
+  }
   return new S3PullCursorStore({
     s3: deps.s3,
     crypto: deps.crypto,
@@ -443,25 +447,13 @@ export async function runPull(
     codebaseSelection?: CodebaseRepositorySelection,
   ) => Connector | null = buildConnector,
 ): Promise<PullRunResult> {
-  if (
-    message.tenant_id !== deps.orgId ||
-    message.sourceId !== deriveSourceId(deps.orgId, message.kind)
-  ) {
-    return notProcessed(message, 'routing_invalid');
-  }
+  const routing = resolvePullRouting(message, deps.orgId);
+  if (routing === null) return notProcessed(message, 'routing_invalid');
+  const memberScope = routing.memberScope;
   const resolved =
     message.kind === 'code'
       ? await resolveCodebaseConnection(deps)
-      : await getDecryptedConnectionForKind(
-          deps.controlPlaneUrl,
-          deps.runtimeDeploymentId ?? deps.deploymentId,
-          deps.deploymentId,
-          deps.agentToken,
-          message.kind,
-          deps.orgId,
-          deps.crypto,
-          deps.controlPlaneFetch,
-        );
+      : await resolveSourceConnection(message, deps, memberScope);
   if (resolved.outcome === 'not_ready') return superseded(message);
   if (resolved.outcome === 'not_processed') {
     return notProcessed(message, resolved.reason);
@@ -480,8 +472,9 @@ export async function runPull(
   }
 
   const isCode = message.kind === 'code';
+  const usesSealedCursor = isCode || memberScope !== undefined;
   // The code cursor loads BEFORE the mint so a mint-403 early return can bump its tick.
-  const storedCursor = isCode ? await loadCodeCursor(deps, message) : null;
+  const storedCursor = usesSealedCursor ? await loadSealedCursor(deps, message) : null;
 
   const token = await resolveSourceToken(
     message.kind,
@@ -506,7 +499,9 @@ export async function runPull(
   const window = budgetedWindow(
     resolvePullWindow(
       message.backfill,
-      isCode ? storedCursor : await loadCursor(deps.ssm, message.tenant_id, message.sourceId),
+      usesSealedCursor
+        ? storedCursor
+        : await loadCursor(deps.ssm, message.tenant_id, message.sourceId),
     ),
   );
   const result = await pullWithRefresh(
@@ -517,18 +512,22 @@ export async function runPull(
     window,
     connectorBuilder,
     codebaseSelection,
+    memberScope,
   );
 
   const cursor = result.earlyReturn
     ? advanceCodeCursorTick(result.cursor.value)
     : result.cursor.value;
   await reconcileJiraWebhook(message, deps, result.connection);
-  const facts = await deps.pipeline.handlePulled(
-    result.facts,
-    result.containers,
-    message.kind,
-    deps.signal,
-  );
+  const facts = memberScope
+    ? await deps.pipeline.handlePulled(
+        result.facts,
+        result.containers,
+        message.kind,
+        deps.signal,
+        memberScope,
+      )
+    : await deps.pipeline.handlePulled(result.facts, result.containers, message.kind, deps.signal);
   return {
     outcome: 'processed',
     facts,
@@ -538,13 +537,68 @@ export async function runPull(
     sourceId: message.sourceId,
     sourceKind: message.kind,
     persistCursor: async () => {
-      if (isCode) {
-        await saveCodeCursor(deps, message, cursor);
+      if (usesSealedCursor) {
+        await saveSealedCursor(deps, message, cursor);
         return;
       }
       await saveCursor(deps.ssm, message.tenant_id, message.sourceId, cursor);
     },
   };
+}
+
+interface PullRouting {
+  memberScope?: MemberPullScope;
+}
+
+// A personal kind routes only with its owner, an owner only with a personal kind, each under its derived source id.
+function resolvePullRouting(message: PullDueMessage, orgId: string): PullRouting | null {
+  if (message.tenant_id !== orgId) return null;
+  const ownerAccountId = message.ownerAccountId;
+  const perPerson = supportsPerPersonMode(message.kind);
+  if (ownerAccountId === undefined) {
+    if (perPerson) return null;
+    return message.sourceId === deriveSourceId(orgId, message.kind) ? {} : null;
+  }
+  if (!perPerson) return null;
+  let memberSourceId: string;
+  try {
+    memberSourceId = deriveMemberSourceId(orgId, message.kind, ownerAccountId);
+  } catch {
+    return null;
+  }
+  return message.sourceId === memberSourceId ? { memberScope: { ownerAccountId } } : null;
+}
+
+function resolveSourceConnection(
+  message: PullDueMessage,
+  deps: PullRunnerDeps,
+  memberScope: MemberPullScope | undefined,
+): Promise<SourceConnectionResolution> {
+  if (memberScope) {
+    return getDecryptedConnectionForMember(
+      {
+        controlPlaneUrl: deps.controlPlaneUrl,
+        runtimeDeploymentId: deps.runtimeDeploymentId ?? deps.deploymentId,
+        tenantDeploymentId: deps.deploymentId,
+        agentToken: deps.agentToken,
+        orgId: deps.orgId,
+        kind: message.kind,
+        ownerAccountId: memberScope.ownerAccountId,
+      },
+      deps.crypto,
+      deps.controlPlaneFetch,
+    );
+  }
+  return getDecryptedConnectionForKind(
+    deps.controlPlaneUrl,
+    deps.runtimeDeploymentId ?? deps.deploymentId,
+    deps.deploymentId,
+    deps.agentToken,
+    message.kind,
+    deps.orgId,
+    deps.crypto,
+    deps.controlPlaneFetch,
+  );
 }
 
 function budgetedWindow(window: PullWindow): PullWindow {
@@ -616,6 +670,7 @@ export async function pullWithRefresh(
     codebaseSelection?: CodebaseRepositorySelection,
   ) => Connector | null = buildConnector,
   codebaseSelection?: CodebaseRepositorySelection,
+  memberScope?: MemberPullScope,
 ) {
   try {
     return {
@@ -647,6 +702,7 @@ export async function pullWithRefresh(
       attestationGeneration: connection.attestationGeneration,
       attemptId: randomBytes(32).toString('hex'),
       expectedRefreshCiphertextSha256: connection.refreshCiphertextSha256,
+      ...(memberScope === undefined ? {} : { ownerAccountId: memberScope.ownerAccountId }),
     });
     try {
       const refresh = await deps.refreshOAuthCredential(command);
@@ -654,16 +710,7 @@ export async function pullWithRefresh(
     } catch {
       throw error;
     }
-    const refreshedResolution = await getDecryptedConnectionForKind(
-      deps.controlPlaneUrl,
-      deps.runtimeDeploymentId ?? deps.deploymentId,
-      deps.deploymentId,
-      deps.agentToken,
-      message.kind,
-      deps.orgId,
-      deps.crypto,
-      deps.controlPlaneFetch,
-    );
+    const refreshedResolution = await resolveSourceConnection(message, deps, memberScope);
     if (refreshedResolution.outcome !== 'connected') throw error;
     const refreshed = refreshedResolution.connection;
     if (refreshed.activationGeneration !== connection.activationGeneration) throw error;

@@ -92,6 +92,7 @@ export class EnclaveOAuthRefreshService {
           purpose: 'access',
           generation: command.attestationGeneration,
           plaintext: accessTokenBytes,
+          ...this.owner(command),
         });
         encryptedRefreshToken = await this.sealer.seal({
           orgId: command.orgId,
@@ -100,6 +101,7 @@ export class EnclaveOAuthRefreshService {
           purpose: 'refresh',
           generation: command.attestationGeneration,
           plaintext: nextRefreshTokenBytes,
+          ...this.owner(command),
         });
       } finally {
         accessTokenBytes.fill(0);
@@ -211,11 +213,16 @@ export class EnclaveOAuthRefreshService {
           connectionId: input.connectionId,
           purpose: 'refresh',
           generation: input.attestationGeneration,
+          ...this.owner(input),
         },
       );
     } catch {
       throw new Error('refresh_ciphertext_invalid');
     }
+  }
+
+  private owner(command: RefreshCiphertextInput): { ownerAccountId?: string } {
+    return command.ownerAccountId === undefined ? {} : { ownerAccountId: command.ownerAccountId };
   }
 
   private hash(value: string | Buffer): string {

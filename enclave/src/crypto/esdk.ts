@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { buildClient, CommitmentPolicy, type KmsKeyringNode } from '@aws-crypto/client-node';
 import type { WikiCommentField } from '@folklore/contracts';
+import { isLowercaseRfcUuid } from '@folklore/utils';
 import {
   sealedContentEnvelopeV1Schema,
   type SealedContentEnvelopeV1,
@@ -22,12 +23,15 @@ const OAUTH_CREDENTIAL_PURPOSE = 'oauth-credential';
 const PULL_CURSOR_PURPOSE = 'pull-cursor';
 const CODEBASE_SELECTION_PURPOSE = 'codebase-selection';
 const JIRA_WEBHOOK_REPLAY_PURPOSE = 'jira-webhook-replay';
+const OWNER_ACCOUNT_ID_KEY = 'ownerAccountId';
+const OWNER_STRICT_KEYS = [OWNER_ACCOUNT_ID_KEY] as const;
 
 export const WIKI_PUBLICATION_ENVELOPE_FORMAT = 'esdk-wiki-publication-v1';
 
 export interface FactBodyRef {
   factId: string;
   orgId: string;
+  ownerAccountId?: string;
 }
 
 // A live-editing Yjs snapshot is the full current wiki prose; sealed to the fact key, bound to
@@ -81,6 +85,7 @@ export interface OAuthCredentialRef {
   connectionId: string;
   purpose: 'access' | 'refresh';
   generation: string;
+  ownerAccountId?: string;
 }
 
 // Derived-knowledge is encrypted to the same key as fact bodies, but
@@ -202,20 +207,27 @@ export class EnclaveCrypto {
     this.sealedContentKeyrings = sealedContentKeyrings;
   }
 
-  encryptFactBody(plaintext: Buffer, ref: FactBodyRef & { sha256: string }): Promise<Buffer> {
+  async encryptFactBody(plaintext: Buffer, ref: FactBodyRef & { sha256: string }): Promise<Buffer> {
     return this.seal(plaintext, {
       factId: ref.factId,
       orgId: ref.orgId,
       purpose: FACT_BODY_PURPOSE,
       sha256: ref.sha256,
+      ...this.ownerContext(ref.ownerAccountId),
     });
   }
 
-  decryptFactBody(ciphertext: Buffer, expected: FactBodyRef): Promise<Buffer> {
-    return this.open(ciphertext, FACT_BODY_PURPOSE, {
-      factId: expected.factId,
-      orgId: expected.orgId,
-    });
+  async decryptFactBody(ciphertext: Buffer, expected: FactBodyRef): Promise<Buffer> {
+    return this.open(
+      ciphertext,
+      FACT_BODY_PURPOSE,
+      {
+        factId: expected.factId,
+        orgId: expected.orgId,
+        ...this.ownerContext(expected.ownerAccountId),
+      },
+      OWNER_STRICT_KEYS,
+    );
   }
 
   encryptWikiArticle(plaintext: Buffer, ref: WikiArticleRef): Promise<Buffer> {
@@ -466,7 +478,7 @@ export class EnclaveCrypto {
     });
   }
 
-  encryptOAuthCredential(plaintext: Buffer, ref: OAuthCredentialRef): Promise<Buffer> {
+  async encryptOAuthCredential(plaintext: Buffer, ref: OAuthCredentialRef): Promise<Buffer> {
     return this.seal(plaintext, {
       orgId: ref.orgId,
       sourceKind: ref.sourceKind,
@@ -474,17 +486,24 @@ export class EnclaveCrypto {
       credentialPurpose: ref.purpose,
       generation: ref.generation,
       purpose: OAUTH_CREDENTIAL_PURPOSE,
+      ...this.ownerContext(ref.ownerAccountId),
     });
   }
 
-  decryptOAuthCredential(ciphertext: Buffer, expected: OAuthCredentialRef): Promise<Buffer> {
-    return this.open(ciphertext, OAUTH_CREDENTIAL_PURPOSE, {
-      orgId: expected.orgId,
-      sourceKind: expected.sourceKind,
-      connectionId: expected.connectionId,
-      credentialPurpose: expected.purpose,
-      generation: expected.generation,
-    });
+  async decryptOAuthCredential(ciphertext: Buffer, expected: OAuthCredentialRef): Promise<Buffer> {
+    return this.open(
+      ciphertext,
+      OAUTH_CREDENTIAL_PURPOSE,
+      {
+        orgId: expected.orgId,
+        sourceKind: expected.sourceKind,
+        connectionId: expected.connectionId,
+        credentialPurpose: expected.purpose,
+        generation: expected.generation,
+        ...this.ownerContext(expected.ownerAccountId),
+      },
+      OWNER_STRICT_KEYS,
+    );
   }
 
   encryptWikiPublicationSnapshot(
@@ -540,22 +559,32 @@ export class EnclaveCrypto {
     ciphertext: Buffer,
     purpose: string,
     identity: Record<string, string>,
+    strictKeys: readonly string[] = [],
   ): Promise<Buffer> {
-    return this.openContext(ciphertext, { purpose, ...identity }, purpose);
+    return this.openContext(ciphertext, { purpose, ...identity }, purpose, strictKeys);
   }
 
+  // A strict key absent from `expected` must be absent from the header, so an owner-bound ciphertext needs its owner.
   private async openContext(
     ciphertext: Buffer,
     expected: Record<string, string>,
     purpose: string,
+    strictKeys: readonly string[] = [],
   ): Promise<Buffer> {
     const { plaintext, messageHeader } = await decrypt(this.keyring, ciphertext);
     const ctx = messageHeader.encryptionContext;
     const mismatch =
       this.hasSealedEnvelopeMarker(ctx) ||
-      Object.entries(expected).some(([key, value]) => ctx[key] !== value);
+      Object.entries(expected).some(([key, value]) => ctx[key] !== value) ||
+      strictKeys.some((key) => expected[key] === undefined && ctx[key] !== undefined);
     if (mismatch) throw new EncryptionContextMismatchError(purpose);
     return Buffer.from(plaintext);
+  }
+
+  private ownerContext(ownerAccountId: string | undefined): Record<string, string> {
+    if (ownerAccountId === undefined) return {};
+    if (!isLowercaseRfcUuid(ownerAccountId)) throw new Error('owner_account_id_invalid');
+    return { [OWNER_ACCOUNT_ID_KEY]: ownerAccountId };
   }
 
   private async sealWithKeyring(

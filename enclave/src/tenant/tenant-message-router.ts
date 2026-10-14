@@ -324,7 +324,7 @@ export class TenantMessageRouter {
     }
   }
 
-  // A plain scheduled pull reads the stored cursor; a backfill flag here would restart from the window start.
+  // A backfill flag would restart from the window start; a member pull keeps its owner or routing refuses the chunk.
   private continuationOf(raw: PullDueMessage): PullDueMessage {
     return {
       type: 'pull-due',
@@ -332,6 +332,7 @@ export class TenantMessageRouter {
       tenant_id: raw.tenant_id,
       sourceId: raw.sourceId,
       kind: raw.kind,
+      ...(raw.ownerAccountId === undefined ? {} : { ownerAccountId: raw.ownerAccountId }),
       backfill: false,
     };
   }

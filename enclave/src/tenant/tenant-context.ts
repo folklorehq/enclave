@@ -5,7 +5,9 @@ import { EnclaveCrypto, type SealedContentKeyringConfig } from '../crypto/esdk.j
 import type { HnswStore } from '../hnsw/index.js';
 import type { Pipeline } from '../pipeline/index.js';
 import { llmCacheObjectName, type LlmCacheNamer } from '../inference/llm-cache.js';
-import { deriveIngestKeypair, deriveLlmCacheNameKey } from '../sealing/keygen.js';
+import { deriveIngestKeypair, deriveKey, deriveLlmCacheNameKey } from '../sealing/keygen.js';
+
+const PERSONAL_IDENTIFIER_KEY_PURPOSE = 'personal-source-identifier-v1';
 
 // Thrown when a torn-down tenant's key material is touched — a removed co-tenant fails closed rather
 // than decrypting with wiped material (shared-tier design §2.2 point 5). Content-free: id only.
@@ -89,6 +91,12 @@ export class TenantContext implements LlmCacheNamer {
 
   decryptStorageCanary(ciphertext: Buffer, generation: number): Promise<Buffer> {
     return this.crypto.decryptStorageCanary(ciphertext, this.tenantId, generation);
+  }
+
+  // Keyed on the nulled crypto handle, never the zero-filled master key, so a torn-down tenant yields no key.
+  personalIdentifierKey(): Buffer | null {
+    if (!this.cryptoOrNull) return null;
+    return deriveKey(this.masterKey, PERSONAL_IDENTIFIER_KEY_PURPOSE);
   }
 
   activePolicySnapshot(): VerifiedActivePolicySnapshotV1 | undefined {
