@@ -1,9 +1,11 @@
 import { ChangeMessageVisibilityCommand, type SQSClient } from '@aws-sdk/client-sqs';
 import type { Logger } from '@folklore/core';
 import { errorType } from '../logging/error-fields.js';
+import { ClassifiedCauseError } from '../tenant/message-failure/ClassifiedCauseError.js';
 
 const RENEWAL_ATTEMPTS = 3;
 const RENEWAL_RETRY_BASE_MS = 250;
+const FAILURE_REASON_PREFIX = 'visibility_renewal';
 
 export interface VisibilityHeartbeatTimers {
   setTimeout(callback: () => void, ms: number): unknown;
@@ -93,7 +95,7 @@ export class VisibilityHeartbeat {
   }
 
   private recordFailure(error: unknown): void {
-    this.failure = new Error(this.lease.failureCode);
+    this.failure = new ClassifiedCauseError(this.lease.failureCode, FAILURE_REASON_PREFIX, error);
     this.deps.logger.warn('sqs_visibility_renewal_failed', {
       code: this.lease.failureCode,
       error_type: errorType(error),

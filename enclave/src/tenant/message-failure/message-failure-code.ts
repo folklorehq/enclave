@@ -27,8 +27,22 @@ import type { PullNotProcessedReason } from '../../pull/pull-runner.js';
 import { TenantContextZeroizedError } from '../tenant-context.js';
 import { CrossTenantRoutingError, TenantMessageRouteError } from '../tenant-message-router.js';
 import { UnknownTenantError } from '../tenant-registry.js';
-import { ClassifiedUnavailableError, type FailureReason } from './ClassifiedUnavailableError.js';
+import { MESSAGE_SENTENCE_REASONS } from './message-failure-sentences.js';
+import { sentenceKey } from './sentence-key.js';
 import { MESSAGE_FAILURE_REASONS, NETWORK_ERROR_CODES } from './message-failure-reasons.js';
+
+const CLASS_PREFIX = 'class';
+const PLAIN_ERROR_CLASS = 'Error';
+const CLASS_NAME_SHAPE = /^[A-Z][A-Za-z0-9]{2,40}$/;
+// Longer than any table sentence, so an oversized message is never hashed.
+const MAX_SENTENCE_LENGTH = 512;
+export const WRAPPED_CAUSE_PREFIXES = ['theme_embed', 'visibility_renewal'] as const;
+export type WrappedCausePrefix = (typeof WRAPPED_CAUSE_PREFIXES)[number];
+const WRAPPED_CAUSE_PREFIX_SET: ReadonlySet<string> = new Set(WRAPPED_CAUSE_PREFIXES);
+// Module-private, so only `recordWrappedCause` can attach a reason to a wrapper.
+const WRAPPED_CAUSE_REASONS = new WeakMap<Error, string>();
+
+type Classification = { readonly reason: string } | { readonly className: string };
 
 export const MESSAGE_FAILURE_PHASES = [
   'parse',
@@ -127,23 +141,50 @@ const TYPED_CODE_PREFIXES: ReadonlyArray<readonly [ErrorClass, string]> = [
 ];
 
 /** A fixed `<phase>_<reason>` slug for a failed message attempt; no message text, URL or id enters it. */
-export function messageFailureCode(phase: MessageFailurePhase, error: unknown): string {
-  return joinCode(phase, safeFailureReason(error));
+export function messageFailureCode(
+  phase: MessageFailurePhase,
+  error: unknown,
+  step?: string,
+): string {
+  const classification = safeClassification(error);
+  if ('reason' in classification) return joinCode(phase, classification.reason);
+  return classCode(step === undefined ? phase : `${phase}_${step}`, classification.className);
 }
 
-/** The closed-set reason `messageFailureCode` would name `error` by; undefined when unclassified. */
-export function classifiedFailureReason(error: unknown): FailureReason | undefined {
-  const reason = safeFailureReason(error);
-  return reason === UNCLASSIFIED ? undefined : (reason as FailureReason);
+/** Keeps only the classified reason of `cause` against `wrapper`, never the cause itself. */
+export function recordWrappedCause(
+  wrapper: Error,
+  prefix: WrappedCausePrefix,
+  cause: unknown,
+): void {
+  if (!WRAPPED_CAUSE_PREFIX_SET.has(prefix)) return;
+  const classification = safeClassification(cause);
+  const reason =
+    'reason' in classification
+      ? classification.reason
+      : `${CLASS_PREFIX}_${classification.className}`;
+  if (reason === UNCLASSIFIED) return;
+  const combined = `${prefix}_${reason}`;
+  if (combined.length <= MAX_REASON_LENGTH && CODE_PATTERN.test(combined)) {
+    WRAPPED_CAUSE_REASONS.set(wrapper, combined);
+  }
 }
 
 // A thrown error can carry hostile getters or be a Proxy; naming it must never throw instead.
-function safeFailureReason(error: unknown): string {
+function safeClassification(error: unknown): Classification {
   try {
-    return failureReason(error);
+    return classification(error);
   } catch {
-    return UNCLASSIFIED;
+    return { reason: UNCLASSIFIED };
   }
+}
+
+// The class part is truncated, never the phase or step ahead of it.
+function classCode(head: string, className: string): string {
+  const prefix = `${head}_${CLASS_PREFIX}`;
+  const room = MAX_CODE_LENGTH - prefix.length - 1;
+  const name = className.slice(0, Math.max(room, 0)).replace(/_+$/, '');
+  return name === '' ? joinCode(head, UNCLASSIFIED) : joinCode(prefix, name);
 }
 
 /** The slug for a delivery the router declined to process, from its closed reason set only. */
@@ -162,11 +203,14 @@ function joinCode(prefix: string, reason: string): string {
 }
 
 // The innermost recognised link names the root cause; wrappers add only their phase.
-function failureReason(error: unknown): string {
+function classification(error: unknown): Classification {
   const chain = causeChain(error);
   let reason: string | undefined;
   for (const link of chain) reason = linkReason(link) ?? reason;
-  return reason ?? builtInClassReason(chain[chain.length - 1]);
+  reason ??= builtInClassReason(chain[chain.length - 1]);
+  if (reason !== undefined) return { reason };
+  const className = innermostClassName(chain);
+  return className === undefined ? { reason: UNCLASSIFIED } : { className };
 }
 
 function causeChain(error: unknown): unknown[] {
@@ -195,9 +239,9 @@ function linkReason(link: unknown): string | undefined {
   if (link instanceof TenantPolicyBoundInferenceError) {
     return known(link.reason) ?? known(link.code);
   }
+  const wrapped = WRAPPED_CAUSE_REASONS.get(link);
+  if (wrapped !== undefined) return wrapped;
   if (link instanceof TrustedTimeAuthorityError) return known(link.code);
-  if (link instanceof ClassifiedUnavailableError)
-    return wrappedCauseReason(link) ?? known(link.code);
   if (link instanceof TenantMessageRouteError) return known(link.errorType);
   for (const [errorClass, reason] of FIXED_CLASS_REASONS) {
     if (link instanceof errorClass) return reason;
@@ -207,7 +251,7 @@ function linkReason(link: unknown): string | undefined {
   }
   if (link instanceof AppError) return known(link.code);
   return (
-    known(link.message) ??
+    messageReason(link.message) ??
     fixedSentenceReason(link.message) ??
     networkCodeReason(link) ??
     abortReason(link) ??
@@ -215,10 +259,15 @@ function linkReason(link: unknown): string | undefined {
   );
 }
 
-function wrappedCauseReason(link: ClassifiedUnavailableError): string | undefined {
-  if (link.causeReason === undefined) return undefined;
-  const reason = `${link.reasonPrefix}_${link.causeReason}`;
-  return reason.length <= MAX_REASON_LENGTH && CODE_PATTERN.test(reason) ? reason : undefined;
+// Exact equality only: a registered slug, or the hash of a code-authored sentence in the table.
+function messageReason(message: unknown): string | undefined {
+  if (typeof message !== 'string') return undefined;
+  return (
+    known(message) ??
+    (message.length <= MAX_SENTENCE_LENGTH
+      ? MESSAGE_SENTENCE_REASONS.get(sentenceKey(message))
+      : undefined)
+  );
 }
 
 function fixedSentenceReason(message: string): string | undefined {
@@ -266,7 +315,27 @@ function known(value: unknown): string | undefined {
   return typeof value === 'string' && MESSAGE_FAILURE_REASONS.has(value) ? value : undefined;
 }
 
-function builtInClassReason(error: unknown): string {
+function builtInClassReason(error: unknown): string | undefined {
   const type = errorType(error);
-  return type !== BASE_ERROR_TYPE && BUILT_IN_ERROR_TYPES.has(type) ? type : UNCLASSIFIED;
+  return type !== BASE_ERROR_TYPE && BUILT_IN_ERROR_TYPES.has(type) ? type : undefined;
+}
+
+// A constructor name is a code identifier, never content; the innermost named class wins.
+function innermostClassName(chain: readonly unknown[]): string | undefined {
+  for (const link of [...chain].reverse()) {
+    if (!(link instanceof Error)) continue;
+    const name = (Object.getPrototypeOf(link) as { constructor?: { name?: unknown } } | null)
+      ?.constructor?.name;
+    if (typeof name === 'string' && name !== PLAIN_ERROR_CLASS && CLASS_NAME_SHAPE.test(name)) {
+      return snakeCase(name);
+    }
+  }
+  return undefined;
+}
+
+function snakeCase(identifier: string): string {
+  return identifier
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2')
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .toLowerCase();
 }

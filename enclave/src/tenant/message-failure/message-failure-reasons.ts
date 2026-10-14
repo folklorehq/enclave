@@ -4,9 +4,11 @@ import { OUTPUT_FAILURE_REASONS } from '../output/output-failure-reasons.js';
 
 const ACTIVE_POLICY_REASONS = [
   'active_policy_assignment_context_mismatch',
+  'active_policy_authority_identity_incomplete',
   'active_policy_binding_replaced',
   'active_policy_binding_tenant_mismatch',
   'active_policy_boot_context_mismatch',
+  'active_policy_epoch_invalid',
   'active_policy_freshness_config_invalid',
   'active_policy_freshness_context_mismatch',
   'active_policy_freshness_context_unavailable',
