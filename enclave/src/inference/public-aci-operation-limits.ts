@@ -1,4 +1,5 @@
 import type { InferenceModelRole } from '@folklore/contracts';
+import type { TransientRetryWindows } from './TransientInferenceRetry.js';
 
 export type InferenceLatencyProfile = 'batch' | 'interactive';
 
@@ -17,6 +18,8 @@ const LONG_REQUEST_TIMEOUT_MS = 180_000;
 const LONG_OPERATION_BUDGET_MS = 200_000;
 // A gateway blip fails within seconds; a failure later than this already spent a long budget.
 const LONG_ROLE_RETRY_WINDOW_MS = 30_000;
+// A short call may have a user waiting behind the web load balancer's 60 s idle timeout.
+const SHORT_RATE_LIMIT_WINDOW_MS = 10_000;
 
 export const SHORT_OPERATION_LIMITS: PublicAciOperationLimits = Object.freeze({
   requestTimeoutMs: SHORT_REQUEST_TIMEOUT_MS,
@@ -35,12 +38,26 @@ export function publicAciOperationLimits(
   role: InferenceModelRole,
   profile: InferenceLatencyProfile,
 ): PublicAciOperationLimits {
-  return role === 'embed' || profile === 'interactive'
-    ? SHORT_OPERATION_LIMITS
-    : LONG_OPERATION_LIMITS;
+  return isShortOperation(role, profile) ? SHORT_OPERATION_LIMITS : LONG_OPERATION_LIMITS;
 }
 
 /** How long after the first attempt began a transient failure may still be retried. */
 export function transientRetryWindowMs(role: InferenceModelRole): number {
   return role === 'embed' ? Number.POSITIVE_INFINITY : LONG_ROLE_RETRY_WINDOW_MS;
+}
+
+/** The retry window for `role`, with a rate-limit wait held short wherever a short call runs. */
+export function transientRetryWindows(
+  role: InferenceModelRole,
+  profile: InferenceLatencyProfile,
+): TransientRetryWindows {
+  const retryMs = transientRetryWindowMs(role);
+  return {
+    retryMs,
+    rateLimitMs: isShortOperation(role, profile) ? SHORT_RATE_LIMIT_WINDOW_MS : retryMs,
+  };
+}
+
+function isShortOperation(role: InferenceModelRole, profile: InferenceLatencyProfile): boolean {
+  return role === 'embed' || profile === 'interactive';
 }

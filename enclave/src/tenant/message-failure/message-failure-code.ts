@@ -1,19 +1,33 @@
 import {
   AciSessionVerificationError,
+  AciTrustStateError,
   AciVerificationError,
+  ActivePolicyCarrierVerificationError,
+  ControlledGatewayModelArtifactVerificationError,
+  ForwardLeaseStoreError,
+  GenerationContextFloorError,
+  ModelProvenanceGateError,
   OfficialAciExchangeError,
   OfficialAciReceiptVerificationError,
+  PreForwardAdmissionError,
+  PreForwardRouteProofVerificationError,
+  ProviderNativeModelArtifactVerificationError,
+  VerifiedActivePolicySnapshotVerifierError,
 } from '@folklore/inference';
 import { AppError } from '@folklore/errors';
 import { ZodError } from 'zod';
 import { ProviderEgressError, ProviderRejectedError } from '../../egress/provider-token-fetch.js';
+import { EvidenceAnchorVerifierError } from '../../inference/EvidenceAnchorVerifier.js';
+import { GatewayEvidenceRecorderError } from '../../inference/GatewayEvidenceRecorder.js';
 import { TenantPolicyBoundInferenceError } from '../../inference/TenantPolicyBoundInference.js';
+import { TrustedEvidenceContextError } from '../../inference/TrustedEvidenceContextProvider.js';
 import { TrustedTimeAuthorityError } from '../../inference/TrustedTimeAuthority.js';
 import { errorType } from '../../logging/error-fields.js';
 import type { PullNotProcessedReason } from '../../pull/pull-runner.js';
 import { TenantContextZeroizedError } from '../tenant-context.js';
 import { CrossTenantRoutingError, TenantMessageRouteError } from '../tenant-message-router.js';
 import { UnknownTenantError } from '../tenant-registry.js';
+import { ClassifiedUnavailableError, type FailureReason } from './ClassifiedUnavailableError.js';
 import { MESSAGE_FAILURE_REASONS, NETWORK_ERROR_CODES } from './message-failure-reasons.js';
 
 export const MESSAGE_FAILURE_PHASES = [
@@ -87,6 +101,7 @@ const FIXED_CLASS_REASONS: ReadonlyArray<readonly [ErrorClass, string]> = [
   [CrossTenantRoutingError, 'cross_tenant'],
   [UnknownTenantError, 'tenant_unassigned'],
   [TenantContextZeroizedError, 'tenant_zeroized'],
+  [PreForwardAdmissionError, 'aci_admission_refused'],
   // A schema refusal names no field: an issue path or message can echo the parsed value.
   [ZodError, 'schema_invalid'],
 ];
@@ -97,11 +112,29 @@ const TYPED_CODE_PREFIXES: ReadonlyArray<readonly [ErrorClass, string]> = [
   [AciSessionVerificationError, 'aci_session'],
   [OfficialAciReceiptVerificationError, 'aci_receipt'],
   [OfficialAciExchangeError, 'aci_exchange'],
+  [AciTrustStateError, 'aci_trust'],
+  [ActivePolicyCarrierVerificationError, 'policy_carrier'],
+  [GenerationContextFloorError, 'generation_floor'],
+  [VerifiedActivePolicySnapshotVerifierError, 'policy_snapshot'],
+  [ForwardLeaseStoreError, 'forward_lease'],
+  [ModelProvenanceGateError, 'provenance_gate'],
+  [ProviderNativeModelArtifactVerificationError, 'native_artifact'],
+  [ControlledGatewayModelArtifactVerificationError, 'gateway_artifact'],
+  [PreForwardRouteProofVerificationError, 'route_proof'],
+  [EvidenceAnchorVerifierError, 'anchor'],
+  [GatewayEvidenceRecorderError, 'gateway_evidence'],
+  [TrustedEvidenceContextError, 'context'],
 ];
 
 /** A fixed `<phase>_<reason>` slug for a failed message attempt; no message text, URL or id enters it. */
 export function messageFailureCode(phase: MessageFailurePhase, error: unknown): string {
   return joinCode(phase, safeFailureReason(error));
+}
+
+/** The closed-set reason `messageFailureCode` would name `error` by; undefined when unclassified. */
+export function classifiedFailureReason(error: unknown): FailureReason | undefined {
+  const reason = safeFailureReason(error);
+  return reason === UNCLASSIFIED ? undefined : (reason as FailureReason);
 }
 
 // A thrown error can carry hostile getters or be a Proxy; naming it must never throw instead.
@@ -163,6 +196,8 @@ function linkReason(link: unknown): string | undefined {
     return known(link.reason) ?? known(link.code);
   }
   if (link instanceof TrustedTimeAuthorityError) return known(link.code);
+  if (link instanceof ClassifiedUnavailableError)
+    return wrappedCauseReason(link) ?? known(link.code);
   if (link instanceof TenantMessageRouteError) return known(link.errorType);
   for (const [errorClass, reason] of FIXED_CLASS_REASONS) {
     if (link instanceof errorClass) return reason;
@@ -178,6 +213,12 @@ function linkReason(link: unknown): string | undefined {
     abortReason(link) ??
     awsHttpReason(link)
   );
+}
+
+function wrappedCauseReason(link: ClassifiedUnavailableError): string | undefined {
+  if (link.causeReason === undefined) return undefined;
+  const reason = `${link.reasonPrefix}_${link.causeReason}`;
+  return reason.length <= MAX_REASON_LENGTH && CODE_PATTERN.test(reason) ? reason : undefined;
 }
 
 function fixedSentenceReason(message: string): string | undefined {

@@ -203,6 +203,58 @@ const INFERENCE_TRANSPORT_REASONS = [
   'inference_transport_unconfigured',
 ] as const;
 
+// Fixed literals thrown as a bare Error on the inference and synthesis path.
+export const INFERENCE_PATH_REASONS = [
+  'admission_required',
+  'capacity_invalid',
+  'checkpoint_not_pinned',
+  'commitment_key_required',
+  'commitment_mismatch',
+  'commitment_replay',
+  'durable_state_required',
+  'durable_state_unavailable',
+  'enclave_active_policy_boot_trust_invalid',
+  'enclave_active_policy_key_unavailable',
+  'enclave_active_policy_kms_metadata_mismatch',
+  'enclave_active_policy_public_key_mismatch',
+  'enclave_active_policy_signature_invalid',
+  'enclave_active_policy_signer_identity_collision',
+  'enclave_output_authenticator_unavailable',
+  'forward_runtime_unavailable',
+  'generation_context_mismatch',
+  'generation_not_pinned',
+  'invalid_active_policy_role_binding',
+  'invalid_active_policy_snapshot',
+  'invalid_verified_active_policy_carrier',
+  'invalid_verified_active_policy_role_binding',
+  'invalid_verified_active_policy_snapshot',
+  'invalid_verified_boot_policy_state',
+  'journal_equivocation',
+  'journal_rollback',
+  'keyset_digest_invalid',
+  'lease_binding_mismatch',
+  'lease_expired',
+  'lease_invalid',
+  'lease_replay',
+  'native_send_cancelled',
+  'native_send_failed',
+  'proof_replay',
+  'provider_policy_generation_invalid',
+  'public_inference_requires_policy_assignment_v4',
+  'request_wire_mismatch',
+  'restart_recovery_required',
+  'synthesis_output_identity_changed',
+  'tenant_mismatch',
+  'tenant_teardown_in_progress',
+  'trusted_context_invalid',
+  'trusted_context_mismatch',
+  'write_boundary_unverified',
+  'write_cancelled',
+  'write_replay',
+] as const;
+
+const SYNTHESIS_REASONS = ['theme_grouping_embedding_unavailable'] as const;
+
 const ROUTE_REASONS = ['canary_authorization_invalid', 'message_deadline_exceeded'] as const;
 
 // Node and undici connection codes; the reason is the lower-cased code, never the message.
@@ -245,6 +297,8 @@ export const MESSAGE_FAILURE_REASONS: ReadonlySet<string> = new Set<string>([
   ...NOT_PROCESSED_REASONS,
   ...EVIDENCE_SESSION_REASONS,
   ...INFERENCE_TRANSPORT_REASONS,
+  ...INFERENCE_PATH_REASONS,
+  ...SYNTHESIS_REASONS,
   ...ROUTE_REASONS,
   ...OUTPUT_FAILURE_REASONS,
 ]);

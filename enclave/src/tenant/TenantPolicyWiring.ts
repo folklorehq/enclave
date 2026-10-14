@@ -88,6 +88,7 @@ export class TenantPolicyWiring<S extends VerifiedActivePolicySnapshotV1> {
             policy,
             operationCache: cache,
             usageSink,
+            latencyProfile: 'interactive',
           })
         : dedicatedCachedInference(cache, ANSWER_CACHE_VERSION);
   }

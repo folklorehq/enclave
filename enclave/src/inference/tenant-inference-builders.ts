@@ -11,6 +11,7 @@ import {
   type TenantPolicyVerifiedBindingForwarder,
 } from './TenantPolicyBoundInference.js';
 import { UnboundPoolInference } from './UnboundPoolInference.js';
+import type { InferenceLatencyProfile } from './public-aci-operation-limits.js';
 
 export interface PoolPolicyPorts {
   freshnessFor(orgId: string): TenantPolicyFreshnessPort | undefined;
@@ -49,6 +50,7 @@ export function poolPolicyBoundInference(input: {
   readonly policy: PoolPolicyPorts;
   readonly operationCache: Cache;
   readonly usageSink?: InferenceUsageSink;
+  readonly latencyProfile?: InferenceLatencyProfile;
 }): TenantPolicyBoundInference {
   const { orgId, policy } = input;
   return new TenantPolicyBoundInference(orgId, input.snapshot, new UnboundPoolInference(), {
@@ -61,6 +63,7 @@ export function poolPolicyBoundInference(input: {
     backendForVerifiedBinding: policy.backendFor(orgId),
     operationCache: input.operationCache,
     ...(input.usageSink ? { usageSink: input.usageSink } : {}),
+    ...(input.latencyProfile ? { latencyProfile: input.latencyProfile } : {}),
   });
 }
 
