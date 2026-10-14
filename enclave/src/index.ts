@@ -1363,6 +1363,7 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
       if (await poolHalt.isHalted()) return true;
       return new HaltGate(haltCache, tenantId, logger, [tenantHaltKey(tenantId)]).isHalted();
     },
+    onMessageFailure: (code) => bootStatus.recordMessageFailure(code),
   });
   synthesisConsumer.start();
 }

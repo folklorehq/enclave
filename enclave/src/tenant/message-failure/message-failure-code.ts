@@ -31,6 +31,7 @@ export const MESSAGE_FAILURE_PHASES = [
   'persist',
   'post_persist',
   'ack',
+  'synthesis',
 ] as const;
 
 export type MessageFailurePhase = (typeof MESSAGE_FAILURE_PHASES)[number];
