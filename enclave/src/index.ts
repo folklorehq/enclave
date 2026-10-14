@@ -20,6 +20,8 @@ import {
 } from './tenant/tenant-assignments.js';
 import { TenantAssignmentApplier } from './tenant/TenantAssignmentApplier.js';
 import { AssignmentRefusalRecorder } from './tenant/AssignmentRefusalRecorder.js';
+import { AssignmentRefreshFlight } from './tenant/assignment/AssignmentRefreshFlight.js';
+import type { IsCurrentRefresh } from './tenant/assignment/AssignmentRefreshFlight.js';
 import type { TenantPolicyAssignment } from './tenant/TenantAssignmentApplier.js';
 import { signedRecoveryKeyFor } from './sealing/recovery-key-binding.js';
 import { TenantRequestQuiescer } from './tenant/TenantRequestQuiescer.js';
@@ -859,7 +861,7 @@ const beginTenantRequest = async (tenantId: string) => {
 // §4.3: the agent publishes this pool's content-free manifest to Redis on check-in; the enclave
 // re-reads it and rebuilds the registry (add/remove tenants, §2.2 pt 5). Idempotent, so a periodic
 // re-read reconverges to the latest assignment. Dedicated boxes have no POOL_ID and no manifest.
-async function refreshAssignments(epoch: number): Promise<void> {
+async function refreshAssignments(isCurrent: IsCurrentRefresh): Promise<void> {
   if (!isSharedPool) return;
   let refusalTarget: NormalizedAssignmentManifestV1 | undefined;
   try {
@@ -921,16 +923,18 @@ async function refreshAssignments(epoch: number): Promise<void> {
         ? { applied: true as const, generation: parsed.generation }
         : await assignmentApplier.applyManifest(verified);
     if (!result.applied) return;
+    if (stopIfSuperseded(isCurrent)) return;
     const policyState = isV4 && 'state' in result ? result.state : undefined;
     if (process.env['NODE_ENV'] === 'production' && !verified.runtimeDatabase) {
       throw new Error(RUNTIME_DATABASE_SIGNED_CONFIG_UNAVAILABLE);
     }
     if (process.env['NODE_ENV'] === 'production' && verified.runtimeDatabase) {
       const recovery = await runtimeDatabaseLease.reconcile(verified.runtimeDatabase);
-      if (recovery === 'restart-requested') return;
+      if (recovery === 'restart-requested' || stopIfSuperseded(isCurrent)) return;
       if (!runtimeDatabaseLease.api() && activateRuntimeDatabase) {
         await activateRuntimeDatabase(verified.runtimeDatabase);
       }
+      if (stopIfSuperseded(isCurrent)) return;
       apiContainer = runtimeDatabaseLease.api();
     }
     if (!runtimeAttestation && !poolRuntimeAttestation) {
@@ -998,6 +1002,7 @@ async function refreshAssignments(epoch: number): Promise<void> {
       ),
     };
     const acknowledgmentPayload = Buffer.from(assignmentAckPayload(unsignedAcknowledgment), 'utf8');
+    if (stopIfSuperseded(isCurrent)) return;
     verifiedPoolManifest = verified;
     let signed: { publicKey: Uint8Array; signature: Uint8Array };
     try {
@@ -1010,7 +1015,7 @@ async function refreshAssignments(epoch: number): Promise<void> {
       }
     } catch (error: unknown) {
       if (error instanceof Error && error.message === 'runtime_attestation_not_ready') {
-        await assignmentRefusals.record(parsed, error);
+        if (!stopIfSuperseded(isCurrent)) await assignmentRefusals.record(parsed, error);
         return;
       }
       throw error;
@@ -1022,12 +1027,11 @@ async function refreshAssignments(epoch: number): Promise<void> {
         signature: Buffer.from(signed.signature).toString('base64'),
       },
     });
-    if (epoch !== refreshEpoch) {
-      logger.error('assignment refresh superseded', { pool_id: POOL_ID });
-      return;
-    }
+    if (stopIfSuperseded(isCurrent)) return;
     await haltCache.set(poolAssignmentAckKey(POOL_ID), acknowledgment);
+    if (stopIfSuperseded(isCurrent)) return;
     await assignmentRefusals.clear();
+    if (stopIfSuperseded(isCurrent)) return;
     if (isV4) {
       if (!policyState) throw new Error('active_policy_generation_unavailable');
       policyAssignmentApplier.activateGeneration(parsed.generation);
@@ -1043,37 +1047,27 @@ async function refreshAssignments(epoch: number): Promise<void> {
       pool_id: POOL_ID,
       error: err instanceof Error ? err.name : 'unknown',
     });
-    if (refusalTarget) await assignmentRefusals.record(refusalTarget, err);
+    if (refusalTarget && !stopIfSuperseded(isCurrent)) {
+      await assignmentRefusals.record(refusalTarget, err);
+    }
   }
+}
+
+function stopIfSuperseded(isCurrent: IsCurrentRefresh): boolean {
+  if (isCurrent()) return false;
+  logger.error('assignment refresh superseded', { pool_id: POOL_ID });
+  return true;
 }
 
 const ASSIGNMENT_REFRESH_STALL_MS = 300_000;
-let refreshInFlight: Promise<void> | undefined;
-let refreshEpoch = 0;
-
-// Single-flight because overlap clears newer holds; the epoch voids a stalled flight's late ack.
-async function refreshAssignmentsOnce(): Promise<void> {
-  if (refreshInFlight) return;
-  const epoch = ++refreshEpoch;
-  const current = refreshAssignments(epoch);
-  refreshInFlight = current;
-  const releaseSlot = () => {
-    if (refreshInFlight === current) refreshInFlight = undefined;
-  };
-  const stallTimer = setTimeout(() => {
-    logger.error('assignment refresh stalled', { pool_id: POOL_ID });
-    releaseSlot();
-  }, ASSIGNMENT_REFRESH_STALL_MS);
-  try {
-    await current;
-  } finally {
-    clearTimeout(stallTimer);
-    releaseSlot();
-  }
-}
+const assignmentRefreshFlight = new AssignmentRefreshFlight(
+  refreshAssignments,
+  ASSIGNMENT_REFRESH_STALL_MS,
+  () => logger.error('assignment refresh stalled', { pool_id: POOL_ID }),
+);
 
 bootStatus.begin('assignments_load');
-await refreshAssignmentsOnce();
+await assignmentRefreshFlight.run();
 bootStatus.reach('assignments_loaded');
 void tenantRequestQuiescence.runForever();
 bootStatus.begin('inference_configure');
@@ -1084,7 +1078,7 @@ const ASSIGNMENT_REFRESH_INTERVAL_MS = 30_000;
 // the fact-index save; on timeout we proceed WITHOUT freeing a still-pinned index (shred at exit).
 const SHUTDOWN_QUIESCE_TIMEOUT_MS = 10_000;
 const assignmentRefreshTimer = setInterval(
-  () => void refreshAssignmentsOnce(),
+  () => void assignmentRefreshFlight.run(),
   ASSIGNMENT_REFRESH_INTERVAL_MS,
 );
 
