@@ -9,6 +9,7 @@ import {
   type TenantPolicySnapshotProvider,
   type TenantPolicyVerifiedBindingBackendFactory,
   type TenantPolicyVerifiedBindingForwarder,
+  type UpstreamCallGate,
 } from './TenantPolicyBoundInference.js';
 import { UnboundPoolInference } from './UnboundPoolInference.js';
 import type { InferenceLatencyProfile } from './public-aci-operation-limits.js';
@@ -51,6 +52,7 @@ export function poolPolicyBoundInference(input: {
   readonly operationCache: Cache;
   readonly usageSink?: InferenceUsageSink;
   readonly latencyProfile?: InferenceLatencyProfile;
+  readonly upstreamGate?: UpstreamCallGate;
 }): TenantPolicyBoundInference {
   const { orgId, policy } = input;
   return new TenantPolicyBoundInference(orgId, input.snapshot, new UnboundPoolInference(), {
@@ -64,6 +66,7 @@ export function poolPolicyBoundInference(input: {
     operationCache: input.operationCache,
     ...(input.usageSink ? { usageSink: input.usageSink } : {}),
     ...(input.latencyProfile ? { latencyProfile: input.latencyProfile } : {}),
+    ...(input.upstreamGate ? { upstreamGate: input.upstreamGate } : {}),
   });
 }
 

@@ -82,6 +82,11 @@ export type TenantPolicyVerifiedBindingBackendFactory = (
   snapshot: VerifiedActivePolicySnapshotV1,
 ) => Promise<TenantPolicyOperationBackend>;
 
+/** Admits one tenant's upstream call, running it in the caller's own async context. */
+export interface UpstreamCallGate {
+  run<T>(tenantId: string, call: () => Promise<T>): Promise<T>;
+}
+
 export interface TenantPolicyBoundInferenceOptions {
   readonly operationCache?: Cache;
   readonly usageSink?: InferenceUsageSink;
@@ -95,6 +100,7 @@ export interface TenantPolicyBoundInferenceOptions {
   readonly backendForVerifiedBinding?: TenantPolicyVerifiedBindingBackendFactory;
   readonly transientRetry?: TransientInferenceRetry;
   readonly latencyProfile?: InferenceLatencyProfile;
+  readonly upstreamGate?: UpstreamCallGate;
   readonly structured?: (prompt: string, tool: ToolSpec, systemPrompt?: string) => Promise<unknown>;
   readonly onVerifiedBinding?: (
     binding: VerifiedActivePolicyRoleBindingV1,
@@ -174,9 +180,11 @@ export class TenantPolicyBoundInference implements SynthesisInference {
   }
 
   // The role is a closed policy name, so a failure code can say which provider call failed.
+  // The gate wraps binding and the trusted-time read too, so a queued call never ages a checkpoint.
   private async underRole<T>(role: InferenceModelRole, operation: () => Promise<T>): Promise<T> {
+    const gate = this.options.upstreamGate;
     try {
-      return await operation();
+      return await (gate ? gate.run(this.tenantId, operation) : operation());
     } catch (error: unknown) {
       tagInferenceRole(error, role);
       throw error;
