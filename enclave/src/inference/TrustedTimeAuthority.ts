@@ -17,7 +17,7 @@ import type {
 } from '@folklore/inference';
 
 import { USER_DATA_MAX_BYTES } from '../sealing/nsm.js';
-import { LONG_OPERATION_LIMITS } from './public-aci-operation-limits.js';
+import { LONGEST_CHECKPOINT_AGE_MS } from './public-aci-operation-limits.js';
 
 interface TrustedTimeCheckpoint {
   readonly binding: TrustedTimeBindingV1;
@@ -60,7 +60,7 @@ const DEFAULT_MAXIMUM_CHECKPOINT_AGE_MS = 60_000;
 const DEFAULT_MAXIMUM_RESAMPLE_DRIFT_MS = 2_000;
 const MAX_SAMPLE_WINDOW_BOUND_MS = 1_000;
 // The ceiling admits the longest per-operation budget; the default stays at the short one.
-const MAX_CHECKPOINT_AGE_MS = LONG_OPERATION_LIMITS.checkpointAgeMs;
+const MAX_CHECKPOINT_AGE_MS = LONGEST_CHECKPOINT_AGE_MS;
 const MAX_RESAMPLE_DRIFT_MS = 2_000;
 const DIGEST = /^[0-9a-f]{64}$/;
 const MEASUREMENT = /^[0-9a-f]{96}$/;
