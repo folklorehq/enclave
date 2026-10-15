@@ -5,7 +5,12 @@ import type { Duplex } from 'node:stream';
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
-import { COLLAB_DEFAULT_PORT, COLLAB_WS_PATH, MAX_TCP_PORT } from '@folklore/contracts';
+import {
+  COLLAB_DEFAULT_PORT,
+  COLLAB_WS_PATH,
+  MAX_TCP_PORT,
+  ROLL_SW_PATH,
+} from '@folklore/contracts';
 
 type FetchHandler = (req: Request) => Response | Promise<Response>;
 
@@ -30,6 +35,9 @@ const CLOSE_TIMEOUT_MS = 5_000;
 const REFUSED_UNCONFIGURED = 'unconfigured';
 const REFUSED_CAPACITY = 'capacity';
 const REFUSED_UPSTREAM = 'upstream_unreachable';
+const ROLL_SW_FILE = `./dist/box${ROLL_SW_PATH}`;
+const NO_CACHE = 'no-cache';
+const JAVASCRIPT_CONTENT_TYPE = 'text/javascript; charset=utf-8';
 
 export class BoxServer {
   private readonly app: Hono;
@@ -82,6 +90,19 @@ export class BoxServer {
       const api = this.api;
       return api ? api(c.req.raw) : c.json({ error: 'api_unavailable' }, 503);
     });
+
+    // Revalidated on every load so a fixed or disabled worker reaches browsers on their next visit.
+    this.app.get(
+      ROLL_SW_PATH,
+      serveStatic({
+        path: ROLL_SW_FILE,
+        onFound: (_path, c) => {
+          c.header('Cache-Control', NO_CACHE);
+          c.header('Content-Type', JAVASCRIPT_CONTENT_TYPE);
+        },
+      }),
+    );
+    this.app.get(ROLL_SW_PATH, (c) => c.notFound());
 
     this.app.use('/*', serveStatic({ root: './dist/box' }));
     this.app.get('/*', serveStatic({ path: './dist/box/index.html' }));

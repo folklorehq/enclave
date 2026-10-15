@@ -65,6 +65,7 @@ export const MESSAGE_SENTENCE_REASONS: ReadonlyMap<string, string> = new Map([
   ['fd3ea28ffd09ecee', 'inference_commissioning_unmet_tee_verifier'],
   ['25d6263ec9624b0f', 'inference_endpoint_not_match_offline_trust_policy'],
   ['a803a3f216588b15', 'ingest_visibility_renewal_failed'],
+  ['03e92793d6e57284', 'insert_conflicted_without_client_request_id'],
   ['210ab6fd6a2af620', 'invalid_controlled_gateway_model_artifact_binding'],
   ['6f93a32d7c826445', 'invalid_cypher_input'],
   ['ab1c7fc1f48701a2', 'invalid_cypher_limit'],
