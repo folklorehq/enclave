@@ -103,6 +103,11 @@ const PROVIDER_MESSAGE_REASONS: ReadonlyArray<readonly [RegExp, (status: string)
     () => 'provider_response_empty',
   ],
   [
+    /^OpenAI-compatible endpoint returned a malformed (?:embedding|chat|stream) response$/,
+    () => 'provider_response_malformed',
+  ],
+  [/^OpenAI-compatible endpoint exhausted its output tokens$/, () => 'provider_output_exhausted'],
+  [
     /^OpenAI-compatible endpoint returned [0-9]{1,6}-dim embedding, expected [0-9]{1,6}$/,
     () => 'provider_embedding_dimension_mismatch',
   ],
@@ -152,7 +157,11 @@ export function messageFailureCode(
   step?: string,
 ): string {
   const classification = safeClassification(error);
-  if ('reason' in classification) return joinCode(phase, classification.reason);
+  // A built-in class says nothing about where it was thrown, so the step is kept beside it.
+  if ('reason' in classification) {
+    const scoped = step !== undefined && BUILT_IN_ERROR_TYPES.has(classification.reason);
+    return joinCode(scoped ? `${phase}_${step}` : phase, classification.reason);
+  }
   return classCode(step === undefined ? phase : `${phase}_${step}`, classification.className);
 }
 
