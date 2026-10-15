@@ -1493,13 +1493,17 @@ const router = new TenantMessageRouter({
 
 // §2.2: write per-tenant pool usage to Redis after each drain cycle so the agent can
 // read it on check-in (content-free: byte counts and opaque tenant ids only).
+// A still-restoring index would report zero facts and read as fresh growth once it lands.
 const collectPoolUsage = (): PoolTenantUsage[] =>
-  registry.all().map((ctx) => ({
-    tenant_id: ctx.tenantId,
-    fact_count: ctx.hnsw.elementCount(),
-    index_bytes: ctx.hnsw.indexBytes(),
-    key_count: 1,
-  }));
+  registry
+    .all()
+    .filter((ctx) => ctx.hnsw.isReady())
+    .map((ctx) => ({
+      tenant_id: ctx.tenantId,
+      fact_count: ctx.hnsw.elementCount(),
+      index_bytes: ctx.hnsw.indexBytes(),
+      key_count: 1,
+    }));
 
 drainerRef.current = new QueueSetDrainer({
   sqs,

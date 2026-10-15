@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { buildClient, CommitmentPolicy, type KmsKeyringNode } from '@aws-crypto/client-node';
+import type { KmsKeyringNode } from '@aws-crypto/client-node';
 import type { WikiCommentField } from '@folklore/contracts';
 import { isLowercaseRfcUuid } from '@folklore/utils';
 import {
@@ -7,8 +7,7 @@ import {
   type SealedContentEnvelopeV1,
 } from '@folklore/contracts/enclave';
 import type { SensitivityLevel } from '@folklore/wiki';
-
-const { encrypt, decrypt } = buildClient(CommitmentPolicy.REQUIRE_ENCRYPT_REQUIRE_DECRYPT);
+import { esdkDecrypt, esdkEncrypt } from './esdk-client.js';
 
 const FACT_BODY_PURPOSE = 'fact-body';
 const WIKI_ARTICLE_PURPOSE = 'wiki-article';
@@ -536,8 +535,7 @@ export class EnclaveCrypto {
     plaintext: Buffer,
     encryptionContext: Record<string, string>,
   ): Promise<Buffer> {
-    const { result } = await encrypt(this.keyring, plaintext, { encryptionContext });
-    return result;
+    return esdkEncrypt(this.keyring, plaintext, encryptionContext);
   }
 
   private async sealBlockEnvelope(
@@ -571,7 +569,7 @@ export class EnclaveCrypto {
     purpose: string,
     strictKeys: readonly string[] = [],
   ): Promise<Buffer> {
-    const { plaintext, messageHeader } = await decrypt(this.keyring, ciphertext);
+    const { plaintext, messageHeader } = await esdkDecrypt(this.keyring, ciphertext);
     const ctx = messageHeader.encryptionContext;
     const mismatch =
       this.hasSealedEnvelopeMarker(ctx) ||
@@ -592,8 +590,7 @@ export class EnclaveCrypto {
     plaintext: Buffer,
     encryptionContext: Record<string, string>,
   ): Promise<Buffer> {
-    const { result } = await encrypt(keyring, plaintext, { encryptionContext });
-    return result;
+    return esdkEncrypt(keyring, plaintext, encryptionContext);
   }
 
   private async openSealedBlockContext(
@@ -601,7 +598,7 @@ export class EnclaveCrypto {
     expected: Record<string, string>,
     purpose: 'wiki-block' | 'team-onboarding-block',
   ): Promise<Buffer> {
-    const { plaintext, messageHeader } = await decrypt(
+    const { plaintext, messageHeader } = await esdkDecrypt(
       this.sealedContentKeyring(Number(expected.contentKeyVersion), purpose),
       ciphertext,
     );

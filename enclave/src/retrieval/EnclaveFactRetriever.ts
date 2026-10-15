@@ -102,6 +102,7 @@ export class EnclaveFactRetriever implements FactRetriever, FactExcerptReader {
     const queryVec = this.deps.embedQuery
       ? await this.deps.embedQuery(orgId, query)
       : await embedText(query);
+    await tenant.hnsw.whenReady();
     const hits = tenant.hnsw.query(orgId, queryVec, limit);
     if (hits.length === 0) return [];
 

@@ -112,8 +112,9 @@ export class TenantContextFactory {
     const keyring = sealedContentKeyrings.keyrings.get(sealedContentKeyrings.activeVersion);
     if (!keyring) throw new Error('sealed content keyring configuration is invalid');
     const masterKey = await this.bootMasterKey(identity);
+    let hnsw: HnswStore | undefined;
     try {
-      const hnsw = await HnswStore.load(this.deps.s3, keyring, processedBucket, identity.tenantId);
+      hnsw = HnswStore.deferred(this.deps.s3, keyring, processedBucket, identity.tenantId);
       const context: { current?: TenantContext } = {};
       const pipeline = new Pipeline(
         hnsw,
@@ -148,6 +149,7 @@ export class TenantContextFactory {
       context.current = tenantContext;
       return tenantContext;
     } catch (error) {
+      hnsw?.free();
       masterKey.fill(0);
       throw error;
     }
