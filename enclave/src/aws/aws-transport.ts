@@ -1,5 +1,5 @@
 import type { HttpsProxyAgent } from 'https-proxy-agent';
-import { externalHttpsProxyAgent } from '../egress/proxy.js';
+import { awsHttpsProxyAgent } from '../egress/proxy.js';
 
 const DEV_ENDPOINT_PORT_VAR = 'VSOCK_KMS_PROXY_PORT';
 const DEV_NODE_ENV = 'development';
@@ -28,11 +28,11 @@ function devEndpoint(): DevEndpointTransport | undefined {
 // SDK v3 uses node:http, not undici, so the global egress dispatcher misses it — hand the agent to
 // the client, which builds its own NodeHttpHandler from these options (HttpHandlerUserInput).
 export function awsClientTransport(): AwsClientTransport | DevEndpointTransport {
-  return devEndpoint() ?? { requestHandler: { httpsAgent: externalHttpsProxyAgent() } };
+  return devEndpoint() ?? { requestHandler: { httpsAgent: awsHttpsProxyAgent() } };
 }
 
 // aws-sdk v2's only proxy seam is httpOptions.agent; keeping the real hostname is what makes SNI
 // match the AWS cert, so the parent EC2 terminating the CONNECT tunnel cannot MITM the session.
 export function awsV2ClientTransport(): AwsV2ClientTransport | DevEndpointTransport {
-  return devEndpoint() ?? { httpOptions: { agent: externalHttpsProxyAgent() } };
+  return devEndpoint() ?? { httpOptions: { agent: awsHttpsProxyAgent() } };
 }

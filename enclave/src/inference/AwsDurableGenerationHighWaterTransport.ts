@@ -18,6 +18,7 @@ import {
   generationHighWaterSignatureInputV1,
   type GenerationHighWaterProgressionV1,
 } from '@folklore/nitro-attestation';
+import { mapWithConcurrency, sleep } from '@folklore/utils';
 import { decode, encode, rfc8949EncodeOptions } from 'cborg';
 import { createHash, createPublicKey, verify, type KeyObject } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -34,7 +35,12 @@ const MAX_HIGH_WATER_BODY_BYTES = 1_048_576;
 const MAX_HIGH_WATER_SCAN_PAGES = 1_024;
 const MAX_HIGH_WATER_SCAN_VERSIONS = 4_096;
 const MAX_HIGH_WATER_SCAN_OBJECT_BYTES = 67_108_864;
-const HIGH_WATER_FETCH_CONCURRENCY = 8;
+const HIGH_WATER_FETCH_CONCURRENCY = 16;
+const HIGH_WATER_FETCH_RETRIES = 2;
+const HIGH_WATER_RETRY_BASE_DELAY_MS = 250;
+const HIGH_WATER_REFUSAL_PREFIX = 'high_water_';
+const AWS_CLIENT_FAULT = 'client';
+const RETRYABLE_CLIENT_STATUSES: ReadonlySet<number> = new Set([408, 429]);
 const MAX_VERIFIED_SEQUENCE_PREFIXES = 64;
 const MAX_VERIFIED_CACHE_COST = MAX_HIGH_WATER_SCAN_OBJECT_BYTES;
 const HIGH_WATER_REQUEST_TIMEOUT_MS = 4_000;
@@ -72,10 +78,24 @@ interface ScanBytes {
   total: number;
 }
 
+interface FetchedObject {
+  readonly bytes: Uint8Array;
+  readonly objectBytes: number;
+}
+
+type SettledEntry =
+  | {
+      readonly ok: true;
+      readonly version: SequenceVersion;
+      readonly verified: VerifiedHighWaterEntry;
+    }
+  | { readonly ok: false; readonly reason: unknown };
+
 export interface AwsDurableGenerationHighWaterTransportConfig {
   readonly config: GenerationHighWaterRuntimeConfigV1;
   readonly s3: Pick<S3Client, 'send'>;
   readonly dynamodb: Pick<DynamoDBClient, 'send'>;
+  readonly wait?: (ms: number) => Promise<void>;
 }
 
 export class AwsDurableGenerationHighWaterTransport implements DurableGenerationHighWaterTransport {
@@ -135,6 +155,12 @@ export class AwsDurableGenerationHighWaterTransport implements DurableGeneration
     return recent.map(({ entry, bytes }) => ({ entry, bytes }));
   }
 
+  // Admits only individually verified entries; nothing is served, so no trust decision rests on it.
+  async warm(context: DurableGenerationHighWaterTransportContextV1): Promise<void> {
+    const versions = await this.listRetainedVersions(context);
+    await this.settleEntries(this.sequencePrefix(context), versions, { total: 0 });
+  }
+
   async commit(_input: {
     context: DurableGenerationHighWaterTransportContextV1;
     entry: HighWaterLogEntryV1;
@@ -147,34 +173,22 @@ export class AwsDurableGenerationHighWaterTransport implements DurableGeneration
     context: DurableGenerationHighWaterTransportContextV1,
     count: number,
   ): Promise<readonly (DurableGenerationHighWaterEnvelopeV1 & { versionId: string })[]> {
-    const versions = await this.listSequenceVersions(context);
+    const versions = await this.listRetainedVersions(context);
     const prefix = this.sequencePrefix(context);
-    this.verifiedEntries.retainListed(
-      prefix,
-      new Set(versions.map((version) => this.versionCacheId(version))),
-    );
     const scan: ScanBytes = { total: 0 };
+    const settled = await this.settleEntries(prefix, versions, scan);
     let previous: HighWaterLogEntryV1 | null = null;
     const chain: GenerationContextV1[] = [];
     const tail: { entry: HighWaterLogEntryV1; versionId: string }[] = [];
-    for (let start = 0; start < versions.length; start += HIGH_WATER_FETCH_CONCURRENCY) {
-      const window = versions.slice(start, start + HIGH_WATER_FETCH_CONCURRENCY);
-      const settled = await Promise.allSettled(
-        window.map(async (version) => ({
-          version,
-          verified: await this.verifiedEntry(prefix, version, scan),
-        })),
-      );
-      for (const result of settled) {
-        if (result.status === 'rejected') throw result.reason;
-        const { version, verified } = result.value;
-        const entry = verified.entry;
-        this.assertChainEntry(context, entry, version.sequence, previous);
-        chain.push(generationHighWaterEntryContextV1(entry));
-        tail.push({ entry, versionId: version.versionId });
-        if (tail.length > count) tail.shift();
-        previous = entry;
-      }
+    for (const result of settled) {
+      if (!result.ok) throw result.reason;
+      const { version, verified } = result;
+      const entry = verified.entry;
+      this.assertChainEntry(context, entry, version.sequence, previous);
+      chain.push(generationHighWaterEntryContextV1(entry));
+      tail.push({ entry, versionId: version.versionId });
+      if (tail.length > count) tail.shift();
+      previous = entry;
     }
     if (tail.length === 0) throw new Error('high_water_sequence_missing');
     this.assertProgression(chain);
@@ -206,14 +220,63 @@ export class AwsDurableGenerationHighWaterTransport implements DurableGeneration
     return fetched;
   }
 
+  private async listRetainedVersions(
+    context: DurableGenerationHighWaterTransportContextV1,
+  ): Promise<readonly SequenceVersion[]> {
+    const versions = await this.listSequenceVersions(context);
+    this.verifiedEntries.retainListed(
+      this.sequencePrefix(context),
+      new Set(versions.map((version) => this.versionCacheId(version))),
+    );
+    return versions;
+  }
+
   private versionCacheId(version: SequenceVersion): string {
     return `${version.key}\u0000${version.versionId}`;
+  }
+
+  // Every version is attempted even after one fails, so a single refresh warms as much of the cache as it can.
+  private async settleEntries(
+    prefix: string,
+    versions: readonly SequenceVersion[],
+    scan: ScanBytes,
+  ): Promise<readonly SettledEntry[]> {
+    return mapWithConcurrency(versions, HIGH_WATER_FETCH_CONCURRENCY, async (version) => {
+      try {
+        return { ok: true, version, verified: await this.verifiedEntry(prefix, version, scan) };
+      } catch (reason: unknown) {
+        return { ok: false, reason };
+      }
+    });
   }
 
   private async fetchVerifiedEntry(
     version: SequenceVersion,
     scan: ScanBytes,
   ): Promise<VerifiedHighWaterEntry> {
+    const fetched = await this.fetchObjectWithRetry(version, scan);
+    scan.total = this.addScanObjectBytes(scan.total, fetched.objectBytes);
+    const entry = this.decodeCanonicalEntry(fetched.bytes);
+    this.verifyEntrySignature(entry);
+    return { entry, objectBytes: fetched.objectBytes };
+  }
+
+  private async fetchObjectWithRetry(
+    version: SequenceVersion,
+    scan: ScanBytes,
+  ): Promise<FetchedObject> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.fetchObject(version, scan);
+      } catch (error: unknown) {
+        if (attempt >= HIGH_WATER_FETCH_RETRIES || !this.isRetryableFetchFailure(error))
+          throw error;
+        await (this.options.wait ?? sleep)(HIGH_WATER_RETRY_BASE_DELAY_MS * 2 ** attempt);
+      }
+    }
+  }
+
+  private async fetchObject(version: SequenceVersion, scan: ScanBytes): Promise<FetchedObject> {
     const response = await this.options.s3.send(
       new GetObjectCommand({
         Bucket: this.options.config.bucket,
@@ -226,15 +289,23 @@ export class AwsDurableGenerationHighWaterTransport implements DurableGeneration
       throw new Error('high_water_object_version_mismatch');
     }
     if (typeof response.ContentLength === 'number') {
-      scan.total = this.addScanObjectBytes(scan.total, response.ContentLength);
+      this.addScanObjectBytes(scan.total, response.ContentLength);
     }
     const bytes = await this.readBoundedBody(response.Body);
-    if (typeof response.ContentLength !== 'number') {
-      scan.total = this.addScanObjectBytes(scan.total, bytes.byteLength);
-    }
-    const entry = this.decodeCanonicalEntry(bytes);
-    this.verifyEntrySignature(entry);
-    return { entry, objectBytes: response.ContentLength ?? bytes.byteLength };
+    return { bytes, objectBytes: response.ContentLength ?? bytes.byteLength };
+  }
+
+  // A verification refusal or a definite AWS client rejection would fail the same way again.
+  private isRetryableFetchFailure(error: unknown): boolean {
+    if (!(error instanceof Error)) return false;
+    if (error.message.startsWith(HIGH_WATER_REFUSAL_PREFIX)) return false;
+    const { $fault: fault, $metadata: metadata } = error as Error & {
+      $fault?: unknown;
+      $metadata?: { httpStatusCode?: unknown };
+    };
+    if (fault !== AWS_CLIENT_FAULT) return true;
+    const status = metadata?.httpStatusCode;
+    return typeof status === 'number' && RETRYABLE_CLIENT_STATUSES.has(status);
   }
 
   // Per command, not on the shared egress agent: a stalled request must not outlive the refresh budget.

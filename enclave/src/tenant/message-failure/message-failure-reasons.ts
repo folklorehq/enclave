@@ -1,3 +1,4 @@
+import { HIGH_WATER_FAILURE_CODES } from '@folklore/inference';
 import type { EvidenceKeySessionErrorCode } from '../../inference/EvidenceKeySession.js';
 import type { PullNotProcessedReason } from '../../pull/pull-runner.js';
 import { OUTPUT_FAILURE_REASONS } from '../output/output-failure-reasons.js';
@@ -34,53 +35,6 @@ const ACTIVE_POLICY_REASONS = [
 ] as const;
 
 const CLOCK_RAW_REASONS = ['clock_raw_read_failed', 'clock_raw_rollback'] as const;
-
-const HIGH_WATER_REASONS = [
-  'high_water_body_invalid',
-  'high_water_body_noncanonical',
-  'high_water_body_oversized',
-  'high_water_cache_config_invalid',
-  'high_water_candidate_invalid',
-  'high_water_candidate_too_large',
-  'high_water_checkpoint_digest_mismatch',
-  'high_water_entry_digest_mismatch',
-  'high_water_entry_invalid',
-  'high_water_fork',
-  'high_water_generation_conflict',
-  'high_water_generation_regressed',
-  'high_water_missing',
-  'high_water_missing_predecessor',
-  'high_water_noncanonical',
-  'high_water_object_version_mismatch',
-  'high_water_pagination_invalid',
-  'high_water_pagination_repeated',
-  'high_water_pointer_context_invalid',
-  'high_water_pointer_invalid',
-  'high_water_pointer_missing',
-  'high_water_pointer_object_mismatch',
-  'high_water_pointer_omission',
-  'high_water_pointer_regressed',
-  'high_water_progression_invalid',
-  'high_water_recent_count_invalid',
-  'high_water_release_reentered',
-  'high_water_replay_mismatch',
-  'high_water_response_invalid',
-  'high_water_scan_bound_exceeded',
-  'high_water_sequence_context_invalid',
-  'high_water_sequence_fork',
-  'high_water_sequence_gap',
-  'high_water_sequence_invalid',
-  'high_water_sequence_missing',
-  'high_water_sequence_stale_finalized_state',
-  'high_water_signature_invalid',
-  'high_water_signer_fingerprint_mismatch',
-  'high_water_transport_read_only',
-  'high_water_transport_unavailable',
-  'high_water_unavailable',
-  'high_water_verifier_purpose_invalid',
-  'high_water_verifier_unavailable',
-  'high_water_wrong_context',
-] as const;
 
 const LLM_CACHE_REASONS = [
   'llm_cache_close_timeout',
@@ -290,7 +244,7 @@ export const NETWORK_ERROR_CODES: ReadonlySet<string> = new Set([
 export const MESSAGE_FAILURE_REASONS: ReadonlySet<string> = new Set<string>([
   ...ACTIVE_POLICY_REASONS,
   ...CLOCK_RAW_REASONS,
-  ...HIGH_WATER_REASONS,
+  ...HIGH_WATER_FAILURE_CODES,
   ...LLM_CACHE_REASONS,
   ...NSM_REASONS,
   ...PUBLIC_ACI_REASONS,

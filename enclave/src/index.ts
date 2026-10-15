@@ -142,6 +142,7 @@ import {
 } from './inference/DurableGenerationHighWaterClient.js';
 import { DurableGenerationHighWaterClientAdapter } from './inference/DurableGenerationHighWaterClientAdapter.js';
 import { AwsDurableGenerationHighWaterTransport } from './inference/AwsDurableGenerationHighWaterTransport.js';
+import { prewarmBootHighWater } from './inference/high-water/prewarm-boot-high-water.js';
 import { BootBoundGenerationHighWaterVerifier } from './inference/BootBoundGenerationHighWaterVerifier.js';
 import type { RecentGenerationHighWaterPort } from './inference/ports.js';
 import {
@@ -606,13 +607,14 @@ runtimeAttestation = await initializeRuntimeAttestationForBoot(
         carrierSigner: activePolicyTrust.carrierSigner,
       });
       const referenceVerifier = new BootStateActivePolicyReferenceVerifier(sharedCarrierVerifier);
+      const highWaterTransport = new AwsDurableGenerationHighWaterTransport({
+        config: generationHighWaterRuntimeConfig,
+        s3,
+        dynamodb,
+      });
       const highWaterAdapter = new DurableGenerationHighWaterClientAdapter(
         new DurableGenerationHighWaterClient(
-          new AwsDurableGenerationHighWaterTransport({
-            config: generationHighWaterRuntimeConfig,
-            s3,
-            dynamodb,
-          }),
+          highWaterTransport,
           new BootBoundGenerationHighWaterVerifier({
             config: generationHighWaterRuntimeConfig,
           }),
@@ -625,10 +627,12 @@ runtimeAttestation = await initializeRuntimeAttestationForBoot(
       });
       liveActivePolicySnapshotVerifier = snapshotVerifier;
       if (activePolicyCarrier) {
-        await new VerifiedBootPolicyStateLoader({
+        const bootPolicyState = await new VerifiedBootPolicyStateLoader({
           verifiedManifest: bootManifest,
           carrierVerifier: referenceVerifier,
         }).loadVerifiedBootPolicyState();
+        // The first manifest must verify the whole chain from genesis; start fetching it now.
+        void prewarmBootHighWater(highWaterTransport, bootPolicyState.generationContext, logger);
       }
     }
     const signedPolicy = verifiedBootManifest?.inferenceAttestation;
