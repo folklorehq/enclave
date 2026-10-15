@@ -38,6 +38,7 @@ export const MESSAGE_SENTENCE_REASONS: ReadonlyMap<string, string> = new Map([
   ['3931e0f3bacb8c71', 'enclave_output_payload_invalid'],
   ['31456d3b583e9524', 'enclave_output_type_invalid'],
   ['2d2466e79a97c223', 'ensure_page_requires_theme_id_or_team_id'],
+  ['60c48fadcb1a6192', 'entity_key_zeroized'],
   ['ec21b3b973a3a0e7', 'error_capacity'],
   ['f1234d75178d892a', 'error_invalid'],
   ['eacaad0349faed12', 'fact_body_is_not_text'],

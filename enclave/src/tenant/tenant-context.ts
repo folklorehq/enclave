@@ -8,6 +8,7 @@ import { llmCacheObjectName, type LlmCacheNamer } from '../inference/llm-cache.j
 import { deriveIngestKeypair, deriveKey, deriveLlmCacheNameKey } from '../sealing/keygen.js';
 
 const PERSONAL_IDENTIFIER_KEY_PURPOSE = 'personal-source-identifier-v1';
+const ENTITY_KEY_PURPOSE = 'entity-v1';
 
 // Thrown when a torn-down tenant's key material is touched — a removed co-tenant fails closed rather
 // than decrypting with wiped material (shared-tier design §2.2 point 5). Content-free: id only.
@@ -97,6 +98,11 @@ export class TenantContext implements LlmCacheNamer {
   personalIdentifierKey(): Buffer | null {
     if (!this.cryptoOrNull) return null;
     return deriveKey(this.masterKey, PERSONAL_IDENTIFIER_KEY_PURPOSE);
+  }
+
+  entityKey(): Buffer | null {
+    if (!this.cryptoOrNull) return null;
+    return deriveKey(this.masterKey, ENTITY_KEY_PURPOSE);
   }
 
   activePolicySnapshot(): VerifiedActivePolicySnapshotV1 | undefined {

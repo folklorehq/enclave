@@ -130,6 +130,7 @@ export class TenantContextFactory {
           this.lateBoundNamer(context),
         ),
         () => context.current?.personalIdentifierKey() ?? null,
+        { entityKey: () => context.current?.entityKey() ?? null },
       );
       const tenantContext = new TenantContext(
         identity.tenantId,
