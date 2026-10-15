@@ -211,6 +211,7 @@ export const INFERENCE_PATH_REASONS = [
 
 const SYNTHESIS_REASONS = [
   'synthesis_message_deadline_exceeded',
+  'synthesis_output_too_large',
   'theme_grouping_embedding_unavailable',
 ] as const;
 
