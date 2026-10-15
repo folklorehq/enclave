@@ -18,6 +18,7 @@ import { inferenceModel, inferenceModelRevision } from './phala.js';
 import type { SynthesisInference } from './CachedInference.js';
 import { llmCacheKey } from './llm-cache.js';
 import { TrustedTimeAuthorityError } from './TrustedTimeAuthority.js';
+import { tagInferenceRole } from '../tenant/message-failure/inference-role-tag.js';
 import { TransientInferenceRetry, type TransientRetryWindows } from './TransientInferenceRetry.js';
 import {
   transientRetryWindows,
@@ -140,6 +141,49 @@ export class TenantPolicyBoundInference implements SynthesisInference {
   }
 
   async embed(text: string): Promise<number[]> {
+    return this.underRole('embed', () => this.embedUnderPolicy(text));
+  }
+
+  async generate(
+    prompt: string,
+    systemPrompt?: string,
+    temperature?: number,
+    shouldCache?: (output: string) => boolean,
+  ): Promise<string> {
+    return this.underRole('generate', () =>
+      this.generateUnderPolicy(prompt, systemPrompt, temperature, shouldCache),
+    );
+  }
+
+  async critique(
+    prompt: string,
+    systemPrompt?: string,
+    shouldCache?: (output: string) => boolean,
+  ): Promise<string> {
+    return this.underRole('critique', () =>
+      this.critiqueUnderPolicy(prompt, systemPrompt, shouldCache),
+    );
+  }
+
+  async generateStructured(
+    prompt: string,
+    tool: ToolSpec,
+    systemPrompt?: string,
+  ): Promise<unknown> {
+    return this.underRole('judge', () => this.judgeUnderPolicy(prompt, tool, systemPrompt));
+  }
+
+  // The role is a closed policy name, so a failure code can say which provider call failed.
+  private async underRole<T>(role: InferenceModelRole, operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error: unknown) {
+      tagInferenceRole(error, role);
+      throw error;
+    }
+  }
+
+  private async embedUnderPolicy(text: string): Promise<number[]> {
     const { binding, snapshot } = await this.bindingFor('embed');
     const cache = this.operationCache;
     const embedOnce = () =>
@@ -156,7 +200,7 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     return output;
   }
 
-  async generate(
+  private async generateUnderPolicy(
     prompt: string,
     systemPrompt?: string,
     temperature?: number,
@@ -202,7 +246,7 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     return output;
   }
 
-  async critique(
+  private async critiqueUnderPolicy(
     prompt: string,
     systemPrompt?: string,
     shouldCache?: (output: string) => boolean,
@@ -237,7 +281,7 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     return output;
   }
 
-  async generateStructured(
+  private async judgeUnderPolicy(
     prompt: string,
     tool: ToolSpec,
     systemPrompt?: string,

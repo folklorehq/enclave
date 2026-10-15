@@ -27,6 +27,7 @@ import type { PullNotProcessedReason } from '../../pull/pull-runner.js';
 import { TenantContextZeroizedError } from '../tenant-context.js';
 import { CrossTenantRoutingError, TenantMessageRouteError } from '../tenant-message-router.js';
 import { UnknownTenantError } from '../tenant-registry.js';
+import { inferenceRoleOf } from './inference-role-tag.js';
 import { MESSAGE_SENTENCE_REASONS } from './message-failure-sentences.js';
 import { sentenceKey } from './sentence-key.js';
 import { MESSAGE_FAILURE_REASONS, NETWORK_ERROR_CODES } from './message-failure-reasons.js';
@@ -107,6 +108,10 @@ const PROVIDER_MESSAGE_REASONS: ReadonlyArray<readonly [RegExp, (status: string)
   ],
 ];
 
+// Reasons a provider call raises; the inference role they failed under is prefixed when known.
+const ROLE_TAGGED_REASON_PREFIXES = ['provider_', 'aci_'] as const;
+const ROLE_TAGGED_REASONS: ReadonlySet<string> = new Set(['request_aborted', 'request_timeout']);
+
 type ErrorClass = abstract new (...args: never[]) => Error;
 
 const FIXED_CLASS_REASONS: ReadonlyArray<readonly [ErrorClass, string]> = [
@@ -158,7 +163,7 @@ export function recordWrappedCause(
   cause: unknown,
 ): void {
   if (!WRAPPED_CAUSE_PREFIX_SET.has(prefix)) return;
-  const classification = safeClassification(cause);
+  const classification = safeClassification(cause, `${prefix}_`.length);
   const reason =
     'reason' in classification
       ? classification.reason
@@ -171,9 +176,9 @@ export function recordWrappedCause(
 }
 
 // A thrown error can carry hostile getters or be a Proxy; naming it must never throw instead.
-function safeClassification(error: unknown): Classification {
+function safeClassification(error: unknown, reservedLength = 0): Classification {
   try {
-    return classification(error);
+    return classification(error, reservedLength);
   } catch {
     return { reason: UNCLASSIFIED };
   }
@@ -203,14 +208,45 @@ function joinCode(prefix: string, reason: string): string {
 }
 
 // The innermost recognised link names the root cause; wrappers add only their phase.
-function classification(error: unknown): Classification {
+// `reservedLength` is room a wrapper's prefix takes ahead of the reason.
+function classification(error: unknown, reservedLength: number): Classification {
   const chain = causeChain(error);
   let reason: string | undefined;
   for (const link of chain) reason = linkReason(link) ?? reason;
-  reason ??= builtInClassReason(chain[chain.length - 1]);
+  if (reason !== undefined) return { reason: roleTaggedReason(chain, reason, reservedLength) };
+  reason = builtInClassReason(chain[chain.length - 1]);
   if (reason !== undefined) return { reason };
   const className = innermostClassName(chain);
   return className === undefined ? { reason: UNCLASSIFIED } : { className };
+}
+
+function roleTaggedReason(
+  chain: readonly unknown[],
+  reason: string,
+  reservedLength: number,
+): string {
+  if (!isRoleTaggable(reason)) return reason;
+  const role = chainRole(chain);
+  if (role === undefined) return reason;
+  const tagged = `${role}_${reason}`;
+  return reservedLength + tagged.length <= MAX_REASON_LENGTH && CODE_PATTERN.test(tagged)
+    ? tagged
+    : reason;
+}
+
+function isRoleTaggable(reason: string): boolean {
+  return (
+    ROLE_TAGGED_REASONS.has(reason) ||
+    ROLE_TAGGED_REASON_PREFIXES.some((prefix) => reason.startsWith(prefix))
+  );
+}
+
+function chainRole(chain: readonly unknown[]): string | undefined {
+  for (const link of [...chain].reverse()) {
+    const role = inferenceRoleOf(link);
+    if (role !== undefined) return role;
+  }
+  return undefined;
 }
 
 function causeChain(error: unknown): unknown[] {

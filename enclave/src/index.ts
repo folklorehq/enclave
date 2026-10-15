@@ -699,6 +699,13 @@ await loadAgentToken();
 bootStatus.begin('output_signer_load');
 const outputAuthenticator = createEnclaveOutputAuthenticator();
 
+// Ingest and synthesis both work only for the tenants of an applied, activated assignment.
+function activeQueueAssignments() {
+  return activePolicyGeneration > 0
+    ? policyAssignmentApplier.queueAssignments()
+    : assignmentApplier.queueAssignments();
+}
+
 function outputAssignmentGeneration(): number {
   const generation =
     POOL_ID && activePolicyGeneration > 0
@@ -1412,6 +1419,7 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
       return new HaltGate(haltCache, tenantId, logger, [tenantHaltKey(tenantId)]).isHalted();
     },
     onMessageFailure: (code) => bootStatus.recordMessageFailure(code),
+    hasAssignedTenants: () => activeQueueAssignments().length > 0,
   });
   synthesisConsumer.start();
 }
@@ -1493,10 +1501,7 @@ drainerRef.current = new QueueSetDrainer({
   sqs,
   s3,
   router,
-  assignments: () =>
-    activePolicyGeneration > 0
-      ? policyAssignmentApplier.queueAssignments()
-      : assignmentApplier.queueAssignments(),
+  assignments: activeQueueAssignments,
   processedQueueUrl: PROCESSED_QUEUE_URL,
   processedOutputsBucket: PROCESSED_OUTPUTS_BUCKET,
   rawPayloadsBucket: RAW_PAYLOADS_BUCKET,
