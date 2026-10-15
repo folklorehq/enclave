@@ -209,7 +209,10 @@ export const INFERENCE_PATH_REASONS = [
   'write_replay',
 ] as const;
 
-const SYNTHESIS_REASONS = ['theme_grouping_embedding_unavailable'] as const;
+const SYNTHESIS_REASONS = [
+  'synthesis_message_deadline_exceeded',
+  'theme_grouping_embedding_unavailable',
+] as const;
 
 const ROUTE_REASONS = ['canary_authorization_invalid', 'message_deadline_exceeded'] as const;
 
