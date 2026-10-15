@@ -149,6 +149,7 @@ export const MESSAGE_SENTENCE_REASONS: ReadonlyMap<string, string> = new Map([
   ['715c9871f3c72e0b', 'release_roll_signature_input_invalid'],
   ['d1defc301b4ca80c', 'scram_verifier_parameters_invalid'],
   ['057be1cb7d6fccac', 'sealed_content_keyring_configuration_invalid'],
+  ['b9eab450eeaa29d8', 'section_draft_empty'],
   ['f4dc043f299dfe45', 'signed_inference_attestation_changed'],
   ['fb0a592c4fcd5606', 'signed_inference_attestation_conflicts_public'],
   ['c70bb577389787e6', 'signed_inference_attestation_unavailable'],
