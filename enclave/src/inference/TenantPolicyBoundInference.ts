@@ -517,6 +517,8 @@ export class TenantPolicyBoundInference implements SynthesisInference {
         deploymentId: snapshot.deploymentId,
       };
       const timeoutMs = freshness.refreshTimeoutMs ?? DEFAULT_REFRESH_TIMEOUT_MS;
+      // Taken once before the first attempt and kept across retries; only overlapping reads are exempt.
+      const floor = this.lastTrustedNow;
       const sample = await this.readWithRetry(
         () => freshness.trustedTime.read(context),
         timeoutMs,
@@ -526,15 +528,17 @@ export class TenantPolicyBoundInference implements SynthesisInference {
         sample.orgId !== this.tenantId ||
         sample.deploymentId !== snapshot.deploymentId ||
         !Number.isSafeInteger(sample.trustedNow) ||
-        sample.trustedNow < this.lastTrustedNow
+        sample.trustedNow < floor
       ) {
         throw new Error('active_policy_trusted_time_invalid');
       }
-      this.lastTrustedNow = sample.trustedNow;
-      if (sample.trustedNow >= snapshot.policy.lifetime.snapshotExpiresAt) {
+      this.lastTrustedNow = Math.max(this.lastTrustedNow, sample.trustedNow);
+      // A late, smaller sample must never make an expired snapshot or a passed deadline look live.
+      const now = this.lastTrustedNow;
+      if (now >= snapshot.policy.lifetime.snapshotExpiresAt) {
         throw new TenantPolicyBoundInferenceError('active_policy_snapshot_expired');
       }
-      if (this.deadlineHolds(sample.trustedNow, snapshot, epoch)) return false;
+      if (this.deadlineHolds(now, snapshot, epoch)) return false;
       const expected = freshness.expectedContext();
       assertGenerationContextEqual(snapshot.generationContext, expected);
       const recent = await this.readWithRetry(
@@ -543,9 +547,7 @@ export class TenantPolicyBoundInference implements SynthesisInference {
         (error) => this.isTransientHighWaterFailure(error),
       );
       servingCheckpointForInstalled(recent, expected, snapshot.durableCheckpoint);
-      this.trustedDeadline = sample.trustedNow + freshness.refreshIntervalMs;
-      this.deadlineSnapshot = snapshot;
-      this.deadlineEpoch = epoch;
+      this.extendDeadline(now + freshness.refreshIntervalMs, snapshot, epoch);
       return true;
     } catch (error: unknown) {
       const refusal =
@@ -597,6 +599,24 @@ export class TenantPolicyBoundInference implements SynthesisInference {
       this.deadlineSnapshot === snapshot &&
       this.deadlineEpoch === epoch
     );
+  }
+
+  // A slower, older refresh of the same snapshot and epoch must not shorten a newer deadline.
+  private extendDeadline(
+    deadline: number,
+    snapshot: VerifiedActivePolicySnapshotV1,
+    epoch: number | undefined,
+  ): void {
+    if (
+      this.deadlineSnapshot === snapshot &&
+      this.deadlineEpoch === epoch &&
+      deadline <= this.trustedDeadline
+    ) {
+      return;
+    }
+    this.trustedDeadline = deadline;
+    this.deadlineSnapshot = snapshot;
+    this.deadlineEpoch = epoch;
   }
 
   private currentFreshness(): TenantPolicyFreshnessPort | undefined {
