@@ -108,6 +108,14 @@ const PROVIDER_MESSAGE_REASONS: ReadonlyArray<readonly [RegExp, (status: string)
   ],
   [/^OpenAI-compatible endpoint exhausted its output tokens$/, () => 'provider_output_exhausted'],
   [
+    /^OpenAI-compatible endpoint returned invalid structured output$/,
+    () => 'provider_structured_output_invalid',
+  ],
+  [
+    /^OpenAI-compatible endpoint returned no tool call for "[a-z][a-z0-9_]{0,63}"$/,
+    () => 'provider_tool_call_missing',
+  ],
+  [
     /^OpenAI-compatible endpoint returned [0-9]{1,6}-dim embedding, expected [0-9]{1,6}$/,
     () => 'provider_embedding_dimension_mismatch',
   ],
