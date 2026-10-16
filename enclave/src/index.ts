@@ -405,7 +405,11 @@ const assignmentApplier = new TenantAssignmentApplier(
         throw new Error('tenant_subsystem_teardown_failed');
       }
     } finally {
-      evictMintedTokensForOrg(tenantId);
+      try {
+        evictMintedTokensForOrg(tenantId);
+      } finally {
+        void synthesisConsumer?.forgetTenant(tenantId);
+      }
     }
   },
   undefined,
@@ -545,7 +549,13 @@ const policyAssignmentApplier = new TenantAssignmentApplier({
   logger,
   onGenerationWorkQuiescing: generationQuiescence.quiesceWork,
   onGenerationChanged: generationQuiescence.quiesceRequests,
-  onTornDown: (tenantId) => evictMintedTokensForOrg(tenantId),
+  onTornDown: (tenantId) => {
+    try {
+      evictMintedTokensForOrg(tenantId);
+    } finally {
+      void synthesisConsumer?.forgetTenant(tenantId);
+    }
+  },
   onActivated: (tenantId) => {
     tenantRequests.releaseWork(tenantId);
     drainerRef.current?.finishTenantEviction(tenantId);
@@ -1424,6 +1434,7 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
     },
     onMessageFailure: (code) => bootStatus.recordMessageFailure(code),
     hasAssignedTenants: () => activeQueueAssignments().length > 0,
+    isAssignedOrg: (orgId) => registry.has(orgId),
   });
   synthesisConsumer.start();
 }
