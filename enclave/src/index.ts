@@ -82,6 +82,14 @@ import { poolPolicyPortsFrom } from './inference/tenant-inference-builders.js';
 import { TenantPolicyWiring } from './tenant/TenantPolicyWiring.js';
 import { createOperationTrustedTime } from './inference/OperationTrustedTime.js';
 import {
+  NSM_TURN_REFRESH_TIMEOUT_CODE,
+  NsmAttestationTurnstile,
+} from './inference/NsmAttestationTurnstile.js';
+import {
+  HostUpstreamCallGate,
+  NSM_PASS_THROUGH_OVER_CEILING_CODE,
+} from './inference/HostUpstreamCallGate.js';
+import {
   publicAciOperationLimits,
   type InferenceLatencyProfile,
 } from './inference/public-aci-operation-limits.js';
@@ -339,6 +347,16 @@ function activePolicyBackendFor(
   };
 }
 
+const nsmAttestationTurn = new NsmAttestationTurnstile({
+  onQueuedTurnSkipped: () => bootStatus.recordAlarm(NSM_TURN_REFRESH_TIMEOUT_CODE),
+});
+const upstreamGate = isSharedPool
+  ? new HostUpstreamCallGate({
+      attestationCapacity: nsmAttestationTurn,
+      onPassThroughOverCeiling: () => bootStatus.recordAlarm(NSM_PASS_THROUGH_OVER_CEILING_CODE),
+    })
+  : undefined;
+
 const tenantFactory = new TenantContextFactory({
   s3,
   region: REGION,
@@ -355,6 +373,7 @@ const tenantFactory = new TenantContextFactory({
       : undefined,
   activePolicySnapshotFor: (tenantId) => activePolicySnapshotFor(tenantId),
   enforceTenantPolicy: isSharedPool,
+  upstreamGate: upstreamGate?.passThrough(),
   activePolicyFreshnessFor: (tenantId) => activePolicyFreshnessFor(tenantId),
   activePolicyRuntimeEvidenceFor: (tenantId) => activePolicyRuntimeEvidenceFor(tenantId),
   activePolicyBindingForwarderFor: (tenantId) => activePolicyBindingForwarderFor(tenantId),
@@ -489,6 +508,7 @@ activePolicyFreshnessFor = (tenantId, checkpointAgeMs) => {
       nsm: new NsmTrustedTimeSource({ nsm: { attest: getAttestationDoc } }),
       clock: { readNanoseconds: () => process.hrtime.bigint() },
       maximumCheckpointAgeMs: checkpointAgeMs,
+      attestationTurn: nsmAttestationTurn.run,
     },
   );
   return {
@@ -1213,6 +1233,7 @@ try {
         activePolicyBackendFor: (id) => activePolicyBackendFor(id, 'interactive'),
       }),
       recordTokenUsage,
+      upstreamGate?.passThrough(),
     ),
   });
   evictAnswerInference = (tenantId) => answerInference.evict(tenantId);
@@ -1419,6 +1440,7 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
     activePolicyBindingForwarderFor,
     activePolicyBackendFor,
     enforceTenantPolicy: isSharedPool,
+    upstreamGate,
     synthesisQueueUrl: SYNTHESIS_REQUEST_QUEUE_URL,
     processedQueueUrl: PROCESSED_QUEUE_URL,
     previewFetcher: fetchLinkPreview,
@@ -1433,6 +1455,7 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
       return new HaltGate(haltCache, tenantId, logger, [tenantHaltKey(tenantId)]).isHalted();
     },
     onMessageFailure: (code) => bootStatus.recordMessageFailure(code),
+    onAlarm: (code) => bootStatus.recordAlarm(code),
     hasAssignedTenants: () => activeQueueAssignments().length > 0,
     isAssignedOrg: (orgId) => registry.has(orgId),
   });

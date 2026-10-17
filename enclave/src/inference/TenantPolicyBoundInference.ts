@@ -3,6 +3,7 @@ import type {
   InferenceModelRole,
   TrustedTimeAuthorityPort,
   TrustedTimeReadContext,
+  TrustedTimeSample,
 } from '@folklore/inference';
 import type { Cache } from '@folklore/core';
 import { ServiceUnavailableError } from '@folklore/errors';
@@ -25,6 +26,8 @@ import { inferenceModel, inferenceModelRevision } from './phala.js';
 import type { SynthesisInference } from './CachedInference.js';
 import { llmCacheKey } from './llm-cache.js';
 import { TrustedTimeAuthorityError } from './TrustedTimeAuthority.js';
+import { DEFAULT_REFRESH_TIMEOUT_MS } from './attestation-turn-base.js';
+import { attestationTurnScope } from './AttestationTurnScope.js';
 import { tagInferenceRole } from '../tenant/message-failure/inference-role-tag.js';
 import {
   TransientInferenceRetry,
@@ -42,7 +45,6 @@ import {
   servingCheckpointForInstalled,
 } from './renewal-grace.js';
 
-const DEFAULT_REFRESH_TIMEOUT_MS = 5_000;
 const REFRESH_REASON_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 const REFRESH_REASON_PREFIXES = [
   'active_policy_',
@@ -93,9 +95,16 @@ export type TenantPolicyVerifiedBindingBackendFactory = (
   snapshot: VerifiedActivePolicySnapshotV1,
 ) => Promise<TenantPolicyOperationBackend>;
 
+export interface UpstreamCallAdmission {
+  /** One window per upstream: the role's configured model id. */
+  readonly upstream: string;
+  /** Wraps only a real wait, so an immediate admission records no span. */
+  readonly onWait?: (wait: () => Promise<void>) => Promise<void>;
+}
+
 /** Admits one tenant's upstream call, running it in the caller's own async context. */
 export interface UpstreamCallGate {
-  run<T>(tenantId: string, call: () => Promise<T>): Promise<T>;
+  run<T>(tenantId: string, call: () => Promise<T>, admission?: UpstreamCallAdmission): Promise<T>;
 }
 
 export interface TenantPolicyBoundInferenceOptions {
@@ -196,10 +205,24 @@ export class TenantPolicyBoundInference implements SynthesisInference {
   private async underRole<T>(role: InferenceModelRole, operation: () => Promise<T>): Promise<T> {
     const gate = this.options.upstreamGate;
     try {
-      return await (gate ? gate.run(this.tenantId, operation) : operation());
+      return await (gate
+        ? gate.run(this.tenantId, operation, {
+            upstream: this.upstreamOf(role),
+            onWait: (wait) => this.timed('gate_wait', role, wait),
+          })
+        : operation());
     } catch (error: unknown) {
       tagInferenceRole(error, role);
       throw error;
+    }
+  }
+
+  // An unconfigured role has no model to key a window by; its refusal is the binding's to raise.
+  private upstreamOf(role: InferenceModelRole): string {
+    try {
+      return inferenceModel(role);
+    } catch {
+      return `role:${role}`;
     }
   }
 
@@ -579,11 +602,7 @@ export class TenantPolicyBoundInference implements SynthesisInference {
       const timeoutMs = freshness.refreshTimeoutMs ?? DEFAULT_REFRESH_TIMEOUT_MS;
       // Taken once before the first attempt and kept across retries; only overlapping reads are exempt.
       const floor = this.lastTrustedNow;
-      const sample = await this.readWithRetry(
-        () => this.timed('trusted_time', role, () => freshness.trustedTime.read(context)),
-        timeoutMs,
-        (error) => this.isRefreshTimeout(error),
-      );
+      const sample = await this.readTrustedTime(role, freshness, context, timeoutMs);
       if (
         sample.orgId !== this.tenantId ||
         sample.deploymentId !== snapshot.deploymentId ||
@@ -619,6 +638,29 @@ export class TenantPolicyBoundInference implements SynthesisInference {
             );
       this.evictAfterRefreshFailure(snapshot, freshness, this.refusalCode(refusal));
       throw refusal;
+    }
+  }
+
+  // A settled read abandons its still-queued attestation turns, so an evicted read leaves none behind.
+  private async readTrustedTime(
+    role: InferenceModelRole,
+    freshness: TenantPolicyFreshnessPort,
+    context: TrustedTimeReadContext,
+    timeoutMs: number,
+  ): Promise<TrustedTimeSample> {
+    const abandonRead = new AbortController();
+    try {
+      return await this.readWithRetry(
+        (attemptSignal) =>
+          attestationTurnScope.run(
+            { priority: true, abandonRead: abandonRead.signal, abandonAttempt: attemptSignal },
+            () => this.timed('trusted_time', role, () => freshness.trustedTime.read(context)),
+          ),
+        timeoutMs,
+        (error) => this.isRefreshTimeout(error),
+      );
+    } finally {
+      abandonRead.abort();
     }
   }
 
@@ -706,13 +748,16 @@ export class TenantPolicyBoundInference implements SynthesisInference {
 
   // Only failures thrown by the read are retried, and only those `retryable` names; checks on its result are not.
   private async readWithRetry<T>(
-    read: () => Promise<T>,
+    read: (attemptSignal: AbortSignal) => Promise<T>,
     timeoutMs: number,
     retryable: (error: unknown) => boolean,
   ): Promise<T> {
     for (let attempt = 1; ; attempt += 1) {
+      const attemptAbort = new AbortController();
       try {
-        return await this.withTimeout(read(), timeoutMs);
+        return await this.withTimeout(read(attemptAbort.signal), timeoutMs, () =>
+          attemptAbort.abort(),
+        );
       } catch (error: unknown) {
         if (attempt >= REFRESH_READ_ATTEMPTS || !retryable(error)) throw error;
       }
@@ -732,13 +777,20 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     return !error.message.startsWith(HIGH_WATER_CODE_PREFIX);
   }
 
-  private async withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  private async withTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    onTimeout?: () => void,
+  ): Promise<T> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
         promise,
         new Promise<T>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(REFRESH_TIMEOUT_CODE)), timeoutMs);
+          timer = setTimeout(() => {
+            onTimeout?.();
+            reject(new Error(REFRESH_TIMEOUT_CODE));
+          }, timeoutMs);
           timer.unref?.();
         }),
       ]);

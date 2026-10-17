@@ -17,6 +17,8 @@ import type {
 } from '@folklore/inference';
 
 import { USER_DATA_MAX_BYTES } from '../sealing/nsm.js';
+import { AttestationTurnAbandoned } from './attestation-turn-base.js';
+import type { AttestationKind, AttestationTurn } from './NsmAttestationTurnstile.js';
 import { LONGEST_CHECKPOINT_AGE_MS } from './public-aci-operation-limits.js';
 
 interface TrustedTimeCheckpoint {
@@ -40,6 +42,7 @@ export interface TrustedTimeAuthorityOptions {
   readonly sampleWindowBoundMs?: number;
   readonly maximumCheckpointAgeMs?: number;
   readonly maximumResampleDriftMs?: number;
+  readonly attestationTurn?: AttestationTurn;
 }
 
 export type TrustedTimeAuthorityErrorCode =
@@ -62,6 +65,7 @@ const MAX_SAMPLE_WINDOW_BOUND_MS = 1_000;
 // The ceiling admits the longest per-operation budget; the default stays at the short one.
 const MAX_CHECKPOINT_AGE_MS = LONGEST_CHECKPOINT_AGE_MS;
 const MAX_RESAMPLE_DRIFT_MS = 2_000;
+const RUN_NOW: AttestationTurn = (_kind, step) => step();
 const DIGEST = /^[0-9a-f]{64}$/;
 const MEASUREMENT = /^[0-9a-f]{96}$/;
 const DECISION_REASONS = new Set<TrustedTimeDecisionReason>([
@@ -132,7 +136,7 @@ export class TrustedTimeAuthority implements TrustedTimeAuthorityV1Port {
     try {
       const rawBeforeSampleNs = this.readRawClock();
       this.assertCheckpointAge(checkpoint, rawBeforeSampleNs);
-      const attested = await this.attest(binding);
+      const attested = await this.attest(binding, 'sample');
       this.assertCheckpointAge(checkpoint, attested.rawAfterNs);
       this.assertFreshTimestamp(checkpoint, attested.rawAfterNs, attested.document.timestampMs);
       const bounds = this.boundsAt(checkpoint, attested.rawAfterNs);
@@ -149,6 +153,7 @@ export class TrustedTimeAuthority implements TrustedTimeAuthorityV1Port {
       if (!parsed.success) throw this.closeWithFailure('trusted_time_expired');
       return parsed.data;
     } catch (error: unknown) {
+      if (error instanceof AttestationTurnAbandoned) throw error;
       this.close();
       if (error instanceof TrustedTimeAuthorityError) throw error;
       throw this.failure('nsm_attestation_invalid');
@@ -180,7 +185,7 @@ export class TrustedTimeAuthority implements TrustedTimeAuthorityV1Port {
   }
 
   private async createCheckpoint(binding: TrustedTimeBindingV1): Promise<TrustedTimeCheckpoint> {
-    const attested = await this.attest(binding);
+    const attested = await this.attest(binding, 'checkpoint');
     return {
       binding,
       nsmTimestampMs: attested.document.timestampMs,
@@ -190,7 +195,11 @@ export class TrustedTimeAuthority implements TrustedTimeAuthorityV1Port {
     };
   }
 
-  private async attest(binding: TrustedTimeBindingV1): Promise<AttestedSample> {
+  private attest(binding: TrustedTimeBindingV1, kind: AttestationKind): Promise<AttestedSample> {
+    return (this.options.attestationTurn ?? RUN_NOW)(kind, () => this.attestInTurn(binding));
+  }
+
+  private async attestInTurn(binding: TrustedTimeBindingV1): Promise<AttestedSample> {
     const rawBeforeNs = this.readRawClock();
     const nonce = this.freshNonce();
     const userData = this.bindingUserData(binding);

@@ -31,6 +31,10 @@ const WITHHOLDING_REASON_PREFIXES = [
 ] as const;
 // An echo is attributed to the code before it only this long; after that it is reported as its own.
 const WITHHELD_SNAPSHOT_ECHO_WINDOW_MS = 15 * 60 * 1000;
+// The shared-host agent's check-in interval (infra AGENT_CHECKIN_INTERVAL_MS); a test pins it.
+export const SHARED_HOST_CHECKIN_INTERVAL_MS = 30_000;
+// At least two check-ins read an alarm code before an ordinary failure may replace it.
+export const ALARM_HOLD_MS = 2.5 * SHARED_HOST_CHECKIN_INTERVAL_MS;
 
 interface FatalMonitorTarget {
   on(event: 'uncaughtExceptionMonitor', listener: (error: unknown) => void): unknown;
@@ -47,6 +51,7 @@ export class EnclaveBootStatus {
   private lastMessageFailure: string | undefined;
   private messageFailures = 0;
   private causeRecordedAt = Number.NEGATIVE_INFINITY;
+  private alarmRaisedAt = Number.NEGATIVE_INFINITY;
 
   constructor(
     private readonly path: string = ENCLAVE_BOOT_STATUS_PATH,
@@ -75,23 +80,31 @@ export class EnclaveBootStatus {
   // A failed message never stops the enclave; its code only rides the next status lines.
   recordMessageFailure(code: string): void {
     const named = isFailureCodeSlug(code) ? code : MESSAGE_FAILURE_FALLBACK;
-    if (!this.isWithheldSnapshotEcho(named)) {
+    if (!this.alarmHolds() && !this.isWithheldSnapshotEcho(named)) {
       this.lastMessageFailure = named;
       this.causeRecordedAt = this.now();
     }
     this.messageFailures = Math.min(this.messageFailures + 1, MAX_MESSAGE_FAILURE_COUNT);
-    if (this.crashLine === undefined) this.recordPhase();
-    else this.record(this.crashLine);
+    this.writeStatus();
+  }
+
+  /** An alarm, not a message failure: it holds the last-failure slot for ALARM_HOLD_MS and is never counted. */
+  recordAlarm(code: string): void {
+    const named = isFailureCodeSlug(code) ? code : MESSAGE_FAILURE_FALLBACK;
+    if (named !== this.lastMessageFailure || !this.alarmHolds()) this.alarmRaisedAt = this.now();
+    this.lastMessageFailure = named;
+    this.writeStatus();
   }
 
   // A withhold can be raised off the message path (answers, synthesis), so its cause is named here too.
   recordPolicyRefusal(code: string | undefined): void {
     const reason = code !== undefined && MESSAGE_FAILURE_REASONS.has(code) ? `_${code}` : '';
     const named = `${POLICY_REFUSAL_PREFIX}${reason}`;
-    this.lastMessageFailure = isFailureCodeSlug(named) ? named : POLICY_REFUSAL_PREFIX;
-    this.causeRecordedAt = this.now();
-    if (this.crashLine === undefined) this.recordPhase();
-    else this.record(this.crashLine);
+    if (!this.alarmHolds()) {
+      this.lastMessageFailure = isFailureCodeSlug(named) ? named : POLICY_REFUSAL_PREFIX;
+      this.causeRecordedAt = this.now();
+    }
+    this.writeStatus();
   }
 
   isReady(): boolean {
@@ -157,6 +170,15 @@ export class EnclaveBootStatus {
     if (cause.startsWith(POLICY_REFUSAL_PREFIX)) return true;
     const phase = echo.slice(0, -WITHHELD_SNAPSHOT_SUFFIX.length);
     return WITHHOLDING_REASON_PREFIXES.some((prefix) => cause.startsWith(`${phase}_${prefix}`));
+  }
+
+  private alarmHolds(): boolean {
+    return this.now() - this.alarmRaisedAt < ALARM_HOLD_MS;
+  }
+
+  private writeStatus(): void {
+    if (this.crashLine === undefined) this.recordPhase();
+    else this.record(this.crashLine);
   }
 
   private messageFailureSuffix(): string {

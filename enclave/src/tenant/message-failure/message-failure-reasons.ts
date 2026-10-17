@@ -44,9 +44,12 @@ const LLM_CACHE_REASONS = [
 
 const NSM_REASONS = [
   'nsm_attestation_invalid',
+  'nsm_attestation_turn_abandoned',
   'nsm_invalid_entropy_request',
   'nsm_invalid_request',
   'nsm_invalid_response',
+  'nsm_pass_through_over_ceiling',
+  'nsm_turn_refresh_timeout',
   'nsm_unavailable',
 ] as const;
 
@@ -210,6 +213,7 @@ export const INFERENCE_PATH_REASONS = [
 ] as const;
 
 const SYNTHESIS_REASONS = [
+  'claude_usage_tokens_invalid',
   'synthesis_message_deadline_exceeded',
   'synthesis_output_too_large',
   'theme_grouping_embedding_unavailable',

@@ -14,6 +14,7 @@ import {
   type TokenUsage,
 } from '@folklore/contracts/enclave';
 import { InferenceTimeline, type SpanFailure } from './timing/InferenceTimeline.js';
+import { reportUpstreamUsage } from './upstream-observation.js';
 
 // A model id that is not a plain identifier is not a model id — never forward it, or the one free
 // string on the wire becomes a channel for customer text. Counted under a fixed label so the spend
@@ -226,7 +227,10 @@ export class TokenUsageScope {
 // per-call accumulator — it records into whichever run is active.
 export const tokenUsageScope = new TokenUsageScope();
 
-export const recordTokenUsage: InferenceUsageSink = (event) => tokenUsageScope.record(event);
+export const recordTokenUsage: InferenceUsageSink = (event) => {
+  tokenUsageScope.record(event);
+  reportUpstreamUsage(event.promptTokens, event.completionTokens);
+};
 
 export const timeInferenceStep: InferenceTimer = (phase, label, step) =>
   tokenUsageScope.time(phase, label, step);

@@ -15,6 +15,7 @@ import {
   type VerifiedActivePolicySnapshotV1,
 } from '@folklore/inference';
 import { recordTokenUsage, timeInferenceStep } from './TokenUsageScope.js';
+import { observeUpstreamFetch } from './upstream-observation.js';
 import { SHORT_OPERATION_LIMITS } from './public-aci-operation-limits.js';
 
 import { createPublicDstackQuoteVerifier } from '../attestation/PublicDstackQuoteComposition.js';
@@ -87,6 +88,11 @@ export function createPublicAciOperationBackend(
       throw new Error('public_aci_operation_time_invalid');
     return time.trustedNow;
   };
+  const observedFetch = observeUpstreamFetch(
+    options.fetchImpl,
+    (url, init) =>
+      (init?.method ?? 'GET').toUpperCase() === 'POST' && url.pathname.endsWith(endpoint),
+  );
   const transport: typeof fetch = async (input, init) => {
     const supplied =
       typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
@@ -94,7 +100,7 @@ export function createPublicAciOperationBackend(
     if (url.origin !== policy.origin) throw new Error('public_aci_origin_mismatch');
     const headers = new Headers(init?.headers);
     if (options.apiKey !== undefined) headers.set('authorization', `Bearer ${options.apiKey}`);
-    return options.fetchImpl(input, { ...init, headers, redirect: 'error' });
+    return observedFetch(input, { ...init, headers, redirect: 'error' });
   };
   const report = new PublicAciReportVerifier({
     baseUrl: `${policy.origin}${policy.route}`,

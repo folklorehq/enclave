@@ -29,6 +29,7 @@ import {
   type TenantPolicyVerifiedBindingForwarder,
   type TenantPolicyVerifiedBindingBackendFactory,
   type TenantPolicySnapshotProvider,
+  type UpstreamCallGate,
 } from '../inference/TenantPolicyBoundInference.js';
 import {
   dedicatedCachedInference,
@@ -77,6 +78,8 @@ export interface TenantContextFactoryDeps {
   unsealMasterKey?: UnsealMasterKeyFn;
   activePolicySnapshotFor?: (tenantId: string) => ReturnType<TenantContext['activePolicySnapshot']>;
   enforceTenantPolicy?: boolean;
+  /** Counts the pipeline's calls toward the host windows without ever making them wait. */
+  upstreamGate?: UpstreamCallGate;
   activePolicyFreshnessFor?: (tenantId: string) => TenantPolicyFreshnessPort | undefined;
   activePolicyRuntimeEvidenceFor?: (
     tenantId: string,
@@ -178,6 +181,7 @@ export class TenantContextFactory {
       snapshot: snapshotProvider,
       policy: poolPolicyPortsFrom(this.deps),
       operationCache: cache,
+      ...(this.deps.upstreamGate === undefined ? {} : { upstreamGate: this.deps.upstreamGate }),
     });
   }
 

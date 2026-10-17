@@ -7,6 +7,7 @@ import type { BootBoundGenerationContext } from '../inference/BootStateActivePol
 import { ANSWER_CACHE_VERSION, type InferenceModel } from '../inference/CachedInference.js';
 import { expectedTenantGenerationContext } from '../inference/expected-tenant-generation-context.js';
 import { SharedPoolRuntimeEvidence } from '../inference/SharedPoolRuntimeEvidence.js';
+import type { UpstreamCallGate } from '../inference/TenantPolicyBoundInference.js';
 import {
   dedicatedCachedInference,
   poolPolicyBoundInference,
@@ -79,6 +80,7 @@ export class TenantPolicyWiring<S extends VerifiedActivePolicySnapshotV1> {
   answerInferenceBuilder(
     policy: PoolPolicyPorts,
     usageSink: InferenceUsageSink,
+    upstreamGate?: UpstreamCallGate,
   ): AnswerInferenceBuild {
     return (orgId, tenant, cache) =>
       this.deps.sharedPool
@@ -89,6 +91,7 @@ export class TenantPolicyWiring<S extends VerifiedActivePolicySnapshotV1> {
             operationCache: cache,
             usageSink,
             latencyProfile: 'interactive',
+            ...(upstreamGate === undefined ? {} : { upstreamGate }),
           })
         : dedicatedCachedInference(cache, ANSWER_CACHE_VERSION);
   }
