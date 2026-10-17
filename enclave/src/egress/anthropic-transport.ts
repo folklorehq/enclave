@@ -1,4 +1,4 @@
-import { CLAUDE_ZDR_MODEL_IDS } from '@folklore/contracts';
+import { CLAUDE_ROUTE_MODEL_IDS } from '@folklore/contracts';
 import { ProxyAgent, fetch as undiciFetch } from 'undici';
 import { selectAnthropicRootPems } from './anthropic-roots.js';
 import { EGRESS_PROXY_PORT } from './proxy.js';
@@ -40,7 +40,7 @@ interface SuppliedRequest {
 export function createAnthropicTransport(
   options: AnthropicTransportOptions = {},
 ): AnthropicTransport {
-  const allowedModels = new Set<string>(options.allowedModels ?? CLAUDE_ZDR_MODEL_IDS);
+  const allowedModels = new Set<string>(options.allowedModels ?? CLAUDE_ROUTE_MODEL_IDS);
   const ca = [...(options.caPems ?? selectAnthropicRootPems())];
   const fetchImpl = options.fetchImpl ?? (undiciFetch as unknown as typeof globalThis.fetch);
   const dispatcher = new ProxyAgent({

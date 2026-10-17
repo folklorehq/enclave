@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import {
   CLAUDE_INFERENCE_PURPOSES,
-  CLAUDE_ZDR_MODEL_IDS,
+  CLAUDE_ROUTE_MODEL_IDS,
   type ClaudeArmId,
   type ClaudeEffort,
   type ClaudeInferencePurpose,
@@ -55,7 +55,6 @@ function invalid(rule: string): never {
 }
 
 function assertIdentity(identity: ClaudeRouteConfig['identity']): void {
-  if (identity.enabled && !identity.zdrAttested) invalid('zdr_not_attested');
   if (identity.enabled && !SHA256_HEX.test(identity.organizationIdSha256)) {
     invalid('organization_hash');
   }
@@ -88,8 +87,8 @@ function assertPairResolvable(
 
 function assertModelsAndTimeouts(config: ClaudeRouteConfig): void {
   const { identity } = config;
-  if (!identity.models.every((model) => CLAUDE_ZDR_MODEL_IDS.includes(model))) {
-    invalid('model_not_zdr_eligible');
+  if (!identity.models.every((model) => CLAUDE_ROUTE_MODEL_IDS.includes(model))) {
+    invalid('model_not_in_allowlist');
   }
   for (const purpose of CLAUDE_INFERENCE_PURPOSES) {
     assertPairResolvable(identity, purpose, config.purposes[purpose].model);
@@ -124,7 +123,6 @@ function sha256Hex(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-// not yet wired: the compiled identity keeps the route off until a reviewed change turns it on
 export class InferenceRouteResolver {
   readonly #config: ClaudeRouteConfig;
   readonly #invalidReason: string | undefined;
@@ -141,11 +139,7 @@ export class InferenceRouteResolver {
   }
 
   get enabled(): boolean {
-    return (
-      this.#config.identity.enabled &&
-      this.#config.identity.zdrAttested &&
-      this.#invalidReason === undefined
-    );
+    return this.#config.identity.enabled && this.#invalidReason === undefined;
   }
 
   get invalidReason(): string | undefined {
