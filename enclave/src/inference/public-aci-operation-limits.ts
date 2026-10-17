@@ -16,7 +16,7 @@ const SHORT_OPERATION_BUDGET_MS = 50_000;
 // The full 8192-token role cap, reasoning included, decodes in ~273 s at a sustained 30 tokens/s.
 const LONG_REQUEST_TIMEOUT_MS = 300_000;
 const LONG_OPERATION_BUDGET_MS = 320_000;
-// An uncapped batch draft gets the same 8192 tokens at a sustained ~17 tokens/s.
+// The 16384-token generate cap, reasoning included, needs a sustained ~35 tokens/s to finish here.
 const DRAFT_REQUEST_TIMEOUT_MS = 480_000;
 const DRAFT_OPERATION_BUDGET_MS = 500_000;
 // A gateway blip fails within seconds; a failure later than this already spent a long budget.
