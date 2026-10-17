@@ -1,5 +1,6 @@
 import { inferenceTrustPolicyV2Schema } from '@folklore/contracts';
 import {
+  INFERENCE_OPERATION_BY_ROLE,
   OpenAICompatBackend,
   PublicAciReportVerifier,
   PublicAciResponseVerifier,
@@ -13,7 +14,7 @@ import {
   type VerifiedActivePolicyRoleBindingV1,
   type VerifiedActivePolicySnapshotV1,
 } from '@folklore/inference';
-import { recordTokenUsage } from './TokenUsageScope.js';
+import { recordTokenUsage, timeInferenceStep } from './TokenUsageScope.js';
 import { SHORT_OPERATION_LIMITS } from './public-aci-operation-limits.js';
 
 import { createPublicDstackQuoteVerifier } from '../attestation/PublicDstackQuoteComposition.js';
@@ -61,8 +62,15 @@ export function createPublicAciOperationBackend(
     throw new Error('public_aci_tenant_policy_mismatch');
   }
   const context = Object.freeze({ ...options.trustedTimeContext });
+  const callLabel = Object.freeze({
+    model: binding.modelId,
+    role: binding.role,
+    operation: INFERENCE_OPERATION_BY_ROLE[binding.role],
+  });
   const readOperationTime = async (): Promise<number> => {
-    const time = await options.trustedTime.read(context);
+    const time = await timeInferenceStep('trusted_time', callLabel, () =>
+      options.trustedTime.read(context),
+    );
     const nowMs = time.trustedNow * 1_000;
     if (
       time.orgId !== context.orgId ||
@@ -103,41 +111,42 @@ export function createPublicAciOperationBackend(
     reportVerifier: report,
     policy,
     fetchImpl: transport,
-    verifySession: async ({ receipt, keyset, evidence }) => {
-      if (
-        evidence.model !== binding.modelId ||
-        evidence.modelRevision !== binding.modelRevision ||
-        (evidence.modelRole ?? 'generate') !== binding.role
-      )
-        throw new Error('public_aci_operation_binding_mismatch');
-      const trustedNow = await readOperationTime();
-      if (
-        receipt.served_at > trustedNow + policy.clockSkewSeconds ||
-        trustedNow - receipt.served_at > policy.maxSessionLifetimeSeconds ||
-        trustedNow >= keyset.notAfter
-      )
-        throw new Error('public_aci_response_time_invalid');
-      // Keyset, session and channel come from the verified quote chain; the tenant role pins none.
-      return sessions.verify({
-        receipt,
-        keyset,
-        trustedNow,
-        policy: {
-          origin: policy.origin,
-          workloadKeysetDigest: keyset.workloadKeysetDigest,
-          model: binding.modelId,
-          acceptedChannelBindings: policy.channelPolicy.acceptedBindings,
-          evidenceFreeVerifiers: policy.evidenceFreeSessionVerifiers ?? [],
-          maxSessionLifetimeSeconds: policy.maxSessionLifetimeSeconds,
-          requiredSessionClaims: [
-            ...new Set([...policy.requiredSessionClaims, ...role.requiredSessionClaims]),
-          ],
-          permittedClaimSources: policy.permittedClaimSources.filter((source) =>
-            role.permittedClaimSources.includes(source),
-          ),
-        },
-      });
-    },
+    verifySession: ({ receipt, keyset, evidence }) =>
+      timeInferenceStep('verify_session', callLabel, async () => {
+        if (
+          evidence.model !== binding.modelId ||
+          evidence.modelRevision !== binding.modelRevision ||
+          (evidence.modelRole ?? 'generate') !== binding.role
+        )
+          throw new Error('public_aci_operation_binding_mismatch');
+        const trustedNow = await readOperationTime();
+        if (
+          receipt.served_at > trustedNow + policy.clockSkewSeconds ||
+          trustedNow - receipt.served_at > policy.maxSessionLifetimeSeconds ||
+          trustedNow >= keyset.notAfter
+        )
+          throw new Error('public_aci_response_time_invalid');
+        // Keyset, session and channel come from the verified quote chain; the tenant role pins none.
+        return sessions.verify({
+          receipt,
+          keyset,
+          trustedNow,
+          policy: {
+            origin: policy.origin,
+            workloadKeysetDigest: keyset.workloadKeysetDigest,
+            model: binding.modelId,
+            acceptedChannelBindings: policy.channelPolicy.acceptedBindings,
+            evidenceFreeVerifiers: policy.evidenceFreeSessionVerifiers ?? [],
+            maxSessionLifetimeSeconds: policy.maxSessionLifetimeSeconds,
+            requiredSessionClaims: [
+              ...new Set([...policy.requiredSessionClaims, ...role.requiredSessionClaims]),
+            ],
+            permittedClaimSources: policy.permittedClaimSources.filter((source) =>
+              role.permittedClaimSources.includes(source),
+            ),
+          },
+        });
+      }),
   });
   return new OpenAICompatBackend({
     baseUrl: `${policy.origin}${policy.route}`,
@@ -150,6 +159,8 @@ export function createPublicAciOperationBackend(
     publicAciRequired: true,
     timeoutMs: options.requestTimeoutMs ?? SHORT_OPERATION_LIMITS.requestTimeoutMs,
     usageSink: recordTokenUsage,
+    // Each operation backend serves one bound role, which its callers do not always restate.
+    timer: (phase, label, step) => timeInferenceStep(phase, { ...label, role: binding.role }, step),
     responseVerifier: {
       ensureAttested: async (request) => {
         if (

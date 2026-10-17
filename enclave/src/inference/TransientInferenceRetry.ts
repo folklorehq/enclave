@@ -34,6 +34,10 @@ const UNBOUNDED_WINDOWS: TransientRetryWindows = Object.freeze({
   rateLimitMs: Number.POSITIVE_INFINITY,
 });
 
+export type BackoffObserver = (backoff: () => Promise<void>) => Promise<void>;
+
+const UNOBSERVED: BackoffObserver = (backoff) => backoff();
+
 export interface TransientInferenceRetryDeps {
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
@@ -56,6 +60,7 @@ export class TransientInferenceRetry {
   async run<T>(
     operation: () => Promise<T>,
     windows: TransientRetryWindows = UNBOUNDED_WINDOWS,
+    observeBackoff: BackoffObserver = UNOBSERVED,
   ): Promise<T> {
     const startedAt = this.now();
     for (let attempt = 1; ; attempt += 1) {
@@ -64,7 +69,7 @@ export class TransientInferenceRetry {
       } catch (error: unknown) {
         const delayMs = this.retryDelayMs(error, attempt, this.now() - startedAt, windows);
         if (delayMs === undefined) throw error;
-        await this.sleep(delayMs);
+        await observeBackoff(() => this.sleep(delayMs));
       }
     }
   }

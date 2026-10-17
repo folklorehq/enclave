@@ -6,9 +6,16 @@ import type {
 } from '@folklore/inference';
 import type { Cache } from '@folklore/core';
 import { ServiceUnavailableError } from '@folklore/errors';
-import type { InferenceOperation, InferenceUsageSink } from '@folklore/inference';
+import type {
+  InferenceCallLabel,
+  InferenceCallPhase,
+  InferenceOperation,
+  InferenceTimer,
+  InferenceUsageSink,
+} from '@folklore/inference';
 import type { ToolSpec } from '@folklore/inference';
 import {
+  INFERENCE_OPERATION_BY_ROLE,
   assertVerifiedActivePolicyRoleBindingV1,
   assertVerifiedActivePolicySnapshotV1,
   type VerifiedActivePolicyRoleBindingV1,
@@ -19,7 +26,11 @@ import type { SynthesisInference } from './CachedInference.js';
 import { llmCacheKey } from './llm-cache.js';
 import { TrustedTimeAuthorityError } from './TrustedTimeAuthority.js';
 import { tagInferenceRole } from '../tenant/message-failure/inference-role-tag.js';
-import { TransientInferenceRetry, type TransientRetryWindows } from './TransientInferenceRetry.js';
+import {
+  TransientInferenceRetry,
+  type BackoffObserver,
+  type TransientRetryWindows,
+} from './TransientInferenceRetry.js';
 import {
   transientRetryWindows,
   type InferenceLatencyProfile,
@@ -90,6 +101,7 @@ export interface UpstreamCallGate {
 export interface TenantPolicyBoundInferenceOptions {
   readonly operationCache?: Cache;
   readonly usageSink?: InferenceUsageSink;
+  readonly timer?: InferenceTimer;
   readonly freshness?: TenantPolicyFreshnessPort;
   readonly freshnessProvider?: () => TenantPolicyFreshnessPort | undefined;
   readonly requireFreshness?: boolean;
@@ -198,6 +210,7 @@ export class TenantPolicyBoundInference implements SynthesisInference {
       this.transientRetry.run(
         async () => (await this.backendFor(binding, snapshot)).embed(text),
         this.retryWindows('embed'),
+        this.backoffTimer('embed'),
       );
     if (!cache) return embedOnce();
     const key = this.cacheKey(binding, snapshot, 'embed', text);
@@ -226,6 +239,7 @@ export class TenantPolicyBoundInference implements SynthesisInference {
             shouldCache,
           ),
         this.retryWindows('generate'),
+        this.backoffTimer('generate'),
       );
     const resolvedTemperature = this.validateTemperature(snapshot, binding, temperature);
     const key = this.cacheKey(
@@ -249,6 +263,7 @@ export class TenantPolicyBoundInference implements SynthesisInference {
           shouldCache,
         ),
       this.retryWindows('generate'),
+      this.backoffTimer('generate'),
     );
     if ((shouldCache ?? (() => true))(output)) await this.options.operationCache?.set(key, output);
     return output;
@@ -266,6 +281,7 @@ export class TenantPolicyBoundInference implements SynthesisInference {
         async () =>
           (await this.backendFor(binding, snapshot)).critique(prompt, systemPrompt, shouldCache),
         this.retryWindows('critique'),
+        this.backoffTimer('critique'),
       );
     const critiqueTemperature = snapshot.policy.roles.critique.capabilities.temperature;
     const key = this.cacheKey(
@@ -284,6 +300,7 @@ export class TenantPolicyBoundInference implements SynthesisInference {
       async () =>
         (await this.backendFor(binding, snapshot)).critique(prompt, systemPrompt, shouldCache),
       this.retryWindows('critique'),
+      this.backoffTimer('critique'),
     );
     if ((shouldCache ?? (() => true))(output)) await this.options.operationCache?.set(key, output);
     return output;
@@ -295,22 +312,49 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     systemPrompt?: string,
   ): Promise<unknown> {
     const { binding, snapshot } = await this.bindingFor('judge');
-    return this.transientRetry.run(async () => {
-      const structured = this.options.backendForVerifiedBinding
-        ? (await this.backendFor(binding, snapshot)).generateStructured
-        : this.options.structured;
-      if (!structured) {
-        throw this.refuse(
-          snapshot,
-          new TenantPolicyBoundInferenceError('active_policy_snapshot_refresh_failed'),
-        );
-      }
-      return structured(prompt, tool, systemPrompt);
-    }, this.retryWindows('judge'));
+    return this.transientRetry.run(
+      async () => {
+        const structured = this.options.backendForVerifiedBinding
+          ? (await this.backendFor(binding, snapshot)).generateStructured
+          : this.options.structured;
+        if (!structured) {
+          throw this.refuse(
+            snapshot,
+            new TenantPolicyBoundInferenceError('active_policy_snapshot_refresh_failed'),
+          );
+        }
+        return structured(prompt, tool, systemPrompt);
+      },
+      this.retryWindows('judge'),
+      this.backoffTimer('judge'),
+    );
   }
 
   private retryWindows(role: InferenceModelRole): TransientRetryWindows {
     return transientRetryWindows(role, this.options.latencyProfile ?? 'batch');
+  }
+
+  private backoffTimer(role: InferenceModelRole): BackoffObserver {
+    return (backoff) => this.timed('retry_backoff', role, backoff);
+  }
+
+  private timed<T>(
+    phase: InferenceCallPhase,
+    role: InferenceModelRole,
+    step: () => Promise<T>,
+  ): Promise<T> {
+    const timer = this.options.timer;
+    return timer ? timer(phase, this.callLabel(role), step) : step();
+  }
+
+  // An unconfigured role has no model id to report; its refusal is the binding's to raise, not the label's.
+  private callLabel(role: InferenceModelRole): InferenceCallLabel {
+    const label = { role, operation: INFERENCE_OPERATION_BY_ROLE[role] };
+    try {
+      return { model: inferenceModel(role), ...label };
+    } catch {
+      return label;
+    }
   }
 
   async authorize(role: InferenceModelRole): Promise<void> {
@@ -392,6 +436,13 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     binding: VerifiedActivePolicyRoleBindingV1;
     snapshot: VerifiedActivePolicySnapshotV1;
   }> {
+    return this.timed('bind', role, () => this.bindUnderPolicy(role));
+  }
+
+  private async bindUnderPolicy(role: InferenceModelRole): Promise<{
+    binding: VerifiedActivePolicyRoleBindingV1;
+    snapshot: VerifiedActivePolicySnapshotV1;
+  }> {
     let snapshot: VerifiedActivePolicySnapshotV1 | undefined;
     try {
       snapshot = this.snapshotProvider();
@@ -426,7 +477,7 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     }
     const freshness = this.currentFreshness();
     const epoch = freshness?.refusalEpoch?.();
-    const verifiedInFull = await this.ensureFresh(snapshot, freshness, epoch);
+    const verifiedInFull = await this.ensureFresh(role, snapshot, freshness, epoch);
     try {
       if (!this.options.runtimeEvidence && this.options.requireRuntimeEvidence) {
         throw new Error('runtime_evidence_unavailable');
@@ -508,6 +559,7 @@ export class TenantPolicyBoundInference implements SynthesisInference {
 
   // True only when this call itself re-read the durable high-water and found the snapshot serving.
   private async ensureFresh(
+    role: InferenceModelRole,
     snapshot: VerifiedActivePolicySnapshotV1,
     freshness: TenantPolicyFreshnessPort | undefined,
     epoch: number | undefined,
@@ -528,7 +580,7 @@ export class TenantPolicyBoundInference implements SynthesisInference {
       // Taken once before the first attempt and kept across retries; only overlapping reads are exempt.
       const floor = this.lastTrustedNow;
       const sample = await this.readWithRetry(
-        () => freshness.trustedTime.read(context),
+        () => this.timed('trusted_time', role, () => freshness.trustedTime.read(context)),
         timeoutMs,
         (error) => this.isRefreshTimeout(error),
       );

@@ -1,5 +1,5 @@
 import type { Cache } from '@folklore/core';
-import type { InferenceUsageSink } from '@folklore/inference';
+import type { InferenceTimer, InferenceUsageSink } from '@folklore/inference';
 import { CachedInference } from './CachedInference.js';
 import { inferenceModel, phalaInference } from './phala.js';
 import {
@@ -51,6 +51,7 @@ export function poolPolicyBoundInference(input: {
   readonly policy: PoolPolicyPorts;
   readonly operationCache: Cache;
   readonly usageSink?: InferenceUsageSink;
+  readonly timer?: InferenceTimer;
   readonly latencyProfile?: InferenceLatencyProfile;
   readonly upstreamGate?: UpstreamCallGate;
 }): TenantPolicyBoundInference {
@@ -65,6 +66,7 @@ export function poolPolicyBoundInference(input: {
     backendForVerifiedBinding: policy.backendFor(orgId),
     operationCache: input.operationCache,
     ...(input.usageSink ? { usageSink: input.usageSink } : {}),
+    ...(input.timer ? { timer: input.timer } : {}),
     ...(input.latencyProfile ? { latencyProfile: input.latencyProfile } : {}),
     ...(input.upstreamGate ? { upstreamGate: input.upstreamGate } : {}),
   });
