@@ -61,13 +61,20 @@ export class TransientInferenceRetry {
     operation: () => Promise<T>,
     windows: TransientRetryWindows = UNBOUNDED_WINDOWS,
     observeBackoff: BackoffObserver = UNOBSERVED,
+    transientStatuses: ReadonlySet<number> = TRANSIENT_PROVIDER_STATUSES,
   ): Promise<T> {
     const startedAt = this.now();
     for (let attempt = 1; ; attempt += 1) {
       try {
         return await operation();
       } catch (error: unknown) {
-        const delayMs = this.retryDelayMs(error, attempt, this.now() - startedAt, windows);
+        const delayMs = this.retryDelayMs(
+          error,
+          attempt,
+          this.now() - startedAt,
+          windows,
+          transientStatuses,
+        );
         if (delayMs === undefined) throw error;
         await observeBackoff(() => this.sleep(delayMs));
       }
@@ -79,9 +86,10 @@ export class TransientInferenceRetry {
     attempt: number,
     elapsedMs: number,
     windows: TransientRetryWindows,
+    transientStatuses: ReadonlySet<number>,
   ): number | undefined {
     if (attempt >= TRANSIENT_INFERENCE_ATTEMPTS || elapsedMs >= windows.retryMs) return undefined;
-    const transient = this.transientLink(error);
+    const transient = this.transientLink(error, transientStatuses);
     if (!transient) return undefined;
     const backoffMs = this.backoffMs(attempt);
     if (!this.isRateLimit(transient)) return backoffMs;
@@ -106,18 +114,18 @@ export class TransientInferenceRetry {
   }
 
   // Only a gateway status, a rate limit, a timeout or a dropped connection; any other 4xx, a 500 or a verification refusal is final.
-  private transientLink(error: unknown): Error | undefined {
+  private transientLink(error: unknown, transientStatuses: ReadonlySet<number>): Error | undefined {
     let current = error;
     for (let depth = 0; depth < MAX_CAUSE_DEPTH && current instanceof Error; depth += 1) {
-      if (this.isTransientLink(current)) return current;
+      if (this.isTransientLink(current, transientStatuses)) return current;
       current = current.cause;
     }
     return undefined;
   }
 
-  private isTransientLink(error: Error): boolean {
+  private isTransientLink(error: Error, transientStatuses: ReadonlySet<number>): boolean {
     if (error instanceof DOMException) return error.name === TIMEOUT_ERROR;
-    if (error instanceof ProviderHttpError) return TRANSIENT_PROVIDER_STATUSES.has(error.status);
+    if (error instanceof ProviderHttpError) return transientStatuses.has(error.status);
     if (error.message === OPERATION_DEADLINE) return true;
     const code = (error as Error & { code?: unknown }).code;
     return typeof code === 'string' && TRANSIENT_NETWORK_CODES.has(code);

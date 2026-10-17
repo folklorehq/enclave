@@ -1,5 +1,5 @@
 import type { Cache } from '@folklore/core';
-import type { InferenceTimer, InferenceUsageSink } from '@folklore/inference';
+import type { InferenceModelRole, InferenceTimer, InferenceUsageSink } from '@folklore/inference';
 import { CachedInference } from './CachedInference.js';
 import { inferenceModel, phalaInference } from './phala.js';
 import {
@@ -12,6 +12,7 @@ import {
   type UpstreamCallGate,
 } from './TenantPolicyBoundInference.js';
 import { UnboundPoolInference } from './UnboundPoolInference.js';
+import type { InferenceRouteResolver } from './claude/InferenceRouteResolver.js';
 import type { InferenceLatencyProfile } from './public-aci-operation-limits.js';
 
 export interface PoolPolicyPorts {
@@ -19,6 +20,7 @@ export interface PoolPolicyPorts {
   runtimeEvidenceFor(orgId: string): TenantPolicyRuntimeEvidencePort | undefined;
   bindingForwarderFor(orgId: string): TenantPolicyVerifiedBindingForwarder | undefined;
   backendFor(orgId: string): TenantPolicyVerifiedBindingBackendFactory | undefined;
+  readonly routeResolver?: InferenceRouteResolver;
 }
 
 export interface ActivePolicyPortDeps {
@@ -32,6 +34,7 @@ export interface ActivePolicyPortDeps {
   readonly activePolicyBackendFor?: (
     orgId: string,
   ) => TenantPolicyVerifiedBindingBackendFactory | undefined;
+  readonly claudeRoutes?: InferenceRouteResolver;
 }
 
 /** Each port reads its dependency when asked; poolPolicyBoundInference asks once, at construction. */
@@ -41,6 +44,7 @@ export function poolPolicyPortsFrom(deps: ActivePolicyPortDeps): PoolPolicyPorts
     runtimeEvidenceFor: (orgId) => deps.activePolicyRuntimeEvidenceFor?.(orgId),
     bindingForwarderFor: (orgId) => deps.activePolicyBindingForwarderFor?.(orgId),
     backendFor: (orgId) => deps.activePolicyBackendFor?.(orgId),
+    ...(deps.claudeRoutes === undefined ? {} : { routeResolver: deps.claudeRoutes }),
   };
 }
 
@@ -69,6 +73,12 @@ export function poolPolicyBoundInference(input: {
     ...(input.timer ? { timer: input.timer } : {}),
     ...(input.latencyProfile ? { latencyProfile: input.latencyProfile } : {}),
     ...(input.upstreamGate ? { upstreamGate: input.upstreamGate } : {}),
+    ...(policy.routeResolver === undefined
+      ? {}
+      : {
+          routeResolver: policy.routeResolver,
+          upstreamKeyFor: (role: InferenceModelRole) => policy.routeResolver?.upstreamKeyFor(role),
+        }),
   });
 }
 

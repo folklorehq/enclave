@@ -8,12 +8,16 @@ const PARAMETER_ARN = 'PARAMETER_ARN';
 export const ATTESTED_DECRYPT_KEY_REQUIRED = 'attested_decrypt_key_required';
 export const ATTESTED_DECRYPT_KEY_REFUSED = 'attested_decrypt_key_refused';
 
-/** Opens a ciphertext through a Nitro Recipient; an unpinned key is allowed only for an SSM parameter, and never a refused one. */
+/** Opens a ciphertext through a Nitro Recipient; an unpinned key is allowed only for an SSM parameter, and a refused key is never returned on either path. */
 export const attestedRecipientDecryptor: AttestedSecretDecryptorPort = {
   async decryptForRecipient({ ciphertext, keyId, encryptionContext, refusedKeyIds }) {
     if (keyId !== undefined) {
-      return (await decryptRecipientCiphertextWithKeyId(ciphertext, keyId, encryptionContext))
-        .plaintext;
+      const pinned = await decryptRecipientCiphertextWithKeyId(
+        ciphertext,
+        keyId,
+        encryptionContext,
+      );
+      return refuseKey(pinned, refusedKeyIds);
     }
     const parameterArn = encryptionContext[PARAMETER_ARN];
     if (
@@ -25,10 +29,15 @@ export const attestedRecipientDecryptor: AttestedSecretDecryptorPort = {
       throw new Error(ATTESTED_DECRYPT_KEY_REQUIRED);
     }
     const opened = await decryptParameterForRecipient(ciphertext, parameterArn);
-    if (refusedKeyIds.includes(opened.keyId)) {
-      opened.plaintext.fill(0);
-      throw new Error(ATTESTED_DECRYPT_KEY_REFUSED);
-    }
-    return opened.plaintext;
+    return refuseKey(opened, refusedKeyIds);
   },
 };
+
+function refuseKey(
+  opened: { readonly keyId: string; readonly plaintext: Buffer },
+  refusedKeyIds: readonly string[] | undefined,
+): Buffer {
+  if (!refusedKeyIds?.includes(opened.keyId)) return opened.plaintext;
+  opened.plaintext.fill(0);
+  throw new Error(ATTESTED_DECRYPT_KEY_REFUSED);
+}

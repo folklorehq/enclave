@@ -216,6 +216,10 @@ export class HostUpstreamCallGate implements UpstreamCallGate {
     this.armPauseTimer(lane);
   }
 
+  pauseRemainingMs(upstream: string): number {
+    return this.lanes.get(upstream)?.window.pauseRemainingMs() ?? 0;
+  }
+
   activeCount(upstream?: string): number {
     return upstream === undefined ? this.activeAll : (this.lanes.get(upstream)?.active ?? 0);
   }

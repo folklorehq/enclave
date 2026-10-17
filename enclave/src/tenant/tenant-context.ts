@@ -5,6 +5,7 @@ import { EnclaveCrypto, type SealedContentKeyringConfig } from '../crypto/esdk.j
 import type { HnswStore } from '../hnsw/index.js';
 import type { Pipeline } from '../pipeline/index.js';
 import { llmCacheObjectName, type LlmCacheNamer } from '../inference/llm-cache.js';
+import { TenantCacheSalt } from '../workers/page/draft/TenantCacheSalt.js';
 import { deriveIngestKeypair, deriveKey, deriveLlmCacheNameKey } from '../sealing/keygen.js';
 
 const PERSONAL_IDENTIFIER_KEY_PURPOSE = 'personal-source-identifier-v1';
@@ -24,6 +25,7 @@ export class TenantContextZeroizedError extends Error {
 // process-global, and each context owns a single-CMK keyring — never a union keyring — so tenant
 // A's ciphertext can never decrypt under tenant B's key material.
 export class TenantContext implements LlmCacheNamer {
+  readonly cacheSalt = new TenantCacheSalt();
   private cryptoOrNull: EnclaveCrypto | null;
   private ingestKeyOrNull: KeyObject | null;
   private llmCacheNameKeyOrNull: Buffer | null;
@@ -124,6 +126,7 @@ export class TenantContext implements LlmCacheNamer {
   // §2.2 point 5: fill owned key buffers and null every key-bearing handle behind its getter.
   zeroize(): void {
     this.masterKey.fill(0);
+    this.cacheSalt.zeroize();
     this.llmCacheNameKeyOrNull?.fill(0);
     this.llmCacheNameKeyOrNull = null;
     const hnsw = this.hnswOrNull;

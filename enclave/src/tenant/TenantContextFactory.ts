@@ -36,6 +36,7 @@ import {
   poolPolicyBoundInference,
   poolPolicyPortsFrom,
 } from '../inference/tenant-inference-builders.js';
+import type { InferenceRouteResolver } from '../inference/claude/InferenceRouteResolver.js';
 import { TenantContext } from './tenant-context.js';
 
 export interface TenantIdentity {
@@ -90,6 +91,7 @@ export interface TenantContextFactoryDeps {
   activePolicyBackendFor?: (
     tenantId: string,
   ) => TenantPolicyVerifiedBindingBackendFactory | undefined;
+  claudeRoutes?: InferenceRouteResolver;
 }
 
 const MASTER_KEY_BYTES = 32;

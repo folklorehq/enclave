@@ -78,6 +78,12 @@ import {
   type TenantPolicyVerifiedBindingBackendFactory,
 } from './inference/TenantPolicyBoundInference.js';
 import { createPublicAciRuntimeBackendFactory } from './inference/PublicAciRuntimeBackendFactory.js';
+import { OperationAuthority } from './inference/OperationAuthority.js';
+import { AttestedSsmParameterReader } from './attestation/AttestedSsmParameterReader.js';
+import { ClaudeRouteComposition } from './inference/claude/ClaudeRouteComposition.js';
+import { CLAUDE_ROUTE_CONFIG_INVALID } from './inference/claude/claude-route-errors.js';
+import { InferenceRouteResolver } from './inference/claude/InferenceRouteResolver.js';
+import { claudeCredentialLoadErrors } from './inference/claude/ClaudeCredentialSource.js';
 import { poolPolicyPortsFrom } from './inference/tenant-inference-builders.js';
 import { TenantPolicyWiring } from './tenant/TenantPolicyWiring.js';
 import { createOperationTrustedTime } from './inference/OperationTrustedTime.js';
@@ -117,6 +123,7 @@ import {
   assignmentAckPayload,
   assignmentPolicyVerificationDigest,
   assignmentAckSchema,
+  inferenceTrustPolicyV2Schema,
   assignmentStorageProofPayload,
   poolAssignmentAckKey,
   poolAssignmentGenerationFloorKey,
@@ -323,23 +330,48 @@ function activePolicyRuntimeEvidenceFor(tenantId: string): TenantPolicyRuntimeEv
   return policyWiring.runtimeEvidenceFor(tenantId);
 }
 
+const claudeRoutes = new InferenceRouteResolver();
+if (claudeRoutes.invalidReason !== undefined) bootStatus.recordAlarm(CLAUDE_ROUTE_CONFIG_INVALID);
+const claudeComposition = new ClaudeRouteComposition({
+  resolver: claudeRoutes,
+  reader: () =>
+    new AttestedSsmParameterReader(
+      new AwsBootManifestSsmParameters(ssm),
+      attestedRecipientDecryptor,
+      claudeCredentialLoadErrors,
+    ),
+  manifest: () => verifiedBootManifest,
+  onAlarm: (code: string) => bootStatus.recordAlarm(code),
+});
+
 function activePolicyBackendFor(
   tenantId: string,
   latencyProfile: InferenceLatencyProfile = 'batch',
 ): TenantPolicyVerifiedBindingBackendFactory | undefined {
   const providerPolicy = verifiedBootManifest?.providerInferenceTrustPolicy;
   if (!providerPolicy) return undefined;
-  return async (binding, snapshot) => {
+  return async (binding, snapshot, route) => {
     const limits = publicAciOperationLimits(binding.role, latencyProfile);
     const freshness = activePolicyFreshnessFor(tenantId, limits.checkpointAgeMs);
     if (!freshness || !runtimeAttestation || activePolicySnapshotFor(tenantId) !== snapshot) {
       throw new Error('public_aci_runtime_authority_unavailable');
     }
+    const bootEpoch = String(runtimeAttestation.bootSessionState().bootEpoch);
+    if (route?.kind === 'claude') {
+      const authority = new OperationAuthority({
+        tenantId,
+        freshness,
+        bootEpoch,
+        latencyProfile,
+        providerPolicyGeneration: inferenceTrustPolicyV2Schema.parse(providerPolicy).generation,
+      });
+      return claudeComposition.backendFactory(authority)(binding, snapshot, route);
+    }
     const factory = createPublicAciRuntimeBackendFactory({
       providerPolicy,
       tenantId,
       freshness,
-      bootEpoch: String(runtimeAttestation.bootSessionState().bootEpoch),
+      bootEpoch,
       apiKey: process.env['TEE_API_KEY'],
       latencyProfile,
     });
@@ -378,6 +410,7 @@ const tenantFactory = new TenantContextFactory({
   activePolicyRuntimeEvidenceFor: (tenantId) => activePolicyRuntimeEvidenceFor(tenantId),
   activePolicyBindingForwarderFor: (tenantId) => activePolicyBindingForwarderFor(tenantId),
   activePolicyBackendFor,
+  claudeRoutes,
   ...(devKmsStub
     ? devMasterKeySealers(process.env['NODE_ENV'] ?? '', process.env['DATA_KEK'])
     : {}),
@@ -1208,6 +1241,7 @@ try {
   // index, decrypt, and audience-gate, all in-process. The retriever resolves its tenant's
   // index + keyring per request from `params.orgId` (§4.2), so it serves every assigned
   // tenant from one instance without a union keyring.
+  const wikiContentDecryptor = new EnclaveWikiContentDecryptor(resolveTenant);
   const buildRetriever = (retrieverDeps: RetrieverDeps) =>
     new EnclaveFactRetriever({
       ...retrieverDeps,
@@ -1231,6 +1265,7 @@ try {
         activePolicyBindingForwarderFor: (id) => activePolicyBindingForwarderFor(id),
         // A user is waiting on the answer, so it keeps the short bound batch synthesis outgrew.
         activePolicyBackendFor: (id) => activePolicyBackendFor(id, 'interactive'),
+        claudeRoutes,
       }),
       recordTokenUsage,
       upstreamGate?.passThrough(),
@@ -1269,7 +1304,8 @@ try {
       ),
     // synthesized wiki text is ciphertext at rest; the read path decrypts audience-visible
     // blocks here, in-enclave, over the requesting tenant's sealed key (resolved from `ref.orgId`).
-    wikiContentDecryptor: new EnclaveWikiContentDecryptor(resolveTenant),
+    wikiContentDecryptor,
+    shadowContentDecryptor: wikiContentDecryptor,
     // mined draft→edit prose is sealed to the requesting tenant's key, in-enclave only.
     wikiEditSealer: new EnclaveWikiEditSealer(resolveTenant),
     wikiPublicationSealer: new EnclaveWikiPublicationSealer(resolveTenant),
@@ -1439,6 +1475,8 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
     activePolicyRuntimeEvidenceFor,
     activePolicyBindingForwarderFor,
     activePolicyBackendFor,
+    claudeRoutes,
+    upstreamPaused: (upstream) => (upstreamGate?.pauseRemainingMs(upstream) ?? 0) > 0,
     enforceTenantPolicy: isSharedPool,
     upstreamGate,
     synthesisQueueUrl: SYNTHESIS_REQUEST_QUEUE_URL,

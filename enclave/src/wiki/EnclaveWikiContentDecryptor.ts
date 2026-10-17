@@ -1,12 +1,14 @@
 import {
   isLegacyEncryptedBlockBody,
   type EncryptedBlockBody,
+  type ShadowContentDecryptor,
   type TeamOnboardingBlockContentRef,
   type TeamOnboardingContentDecryptor,
   type WikiBlockContentRef,
   type WikiContentDecryptor,
+  type WikiShadowContentRef,
 } from '@folklore/api';
-import type { EncryptedBody } from '@folklore/contracts/enclave';
+import type { EncryptedBody, SealedContentEnvelopeV1 } from '@folklore/contracts/enclave';
 import type { ResolveTenant } from '../tenant/tenant-resolver.js';
 
 // derived knowledge is decrypted only here, inside the enclave. The API read
@@ -16,7 +18,7 @@ import type { ResolveTenant } from '../tenant/tenant-resolver.js';
 // own key. The AAD binds the ciphertext to its (org, theme, audience, type) — a body relocated
 // to another row (or another tenant) fails to decrypt and is surfaced as unreadable.
 export class EnclaveWikiContentDecryptor
-  implements WikiContentDecryptor, TeamOnboardingContentDecryptor
+  implements WikiContentDecryptor, TeamOnboardingContentDecryptor, ShadowContentDecryptor
 {
   constructor(private readonly resolveTenant: ResolveTenant) {}
 
@@ -45,6 +47,21 @@ export class EnclaveWikiContentDecryptor
         ref,
       );
       return JSON.parse(plaintext.toString('utf8'));
+    } catch {
+      return null;
+    }
+  }
+
+  async decryptShadowBody(
+    ref: WikiShadowContentRef,
+    body: SealedContentEnvelopeV1,
+  ): Promise<string | null> {
+    try {
+      const plaintext = await this.resolveTenant(ref.orgId).crypto.openWikiShadowEnvelope(
+        body,
+        ref,
+      );
+      return plaintext.toString('utf8');
     } catch {
       return null;
     }

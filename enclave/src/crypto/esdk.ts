@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { KmsKeyringNode } from '@aws-crypto/client-node';
-import type { WikiCommentField } from '@folklore/contracts';
+import type { ShadowArm, WikiCommentField } from '@folklore/contracts';
 import { isLowercaseRfcUuid } from '@folklore/utils';
 import {
   sealedContentEnvelopeV1Schema,
@@ -14,6 +14,8 @@ const WIKI_ARTICLE_PURPOSE = 'wiki-article';
 const WIKI_BLOCK_PURPOSE = 'wiki-block';
 const TEAM_ONBOARDING_ARTICLE_PURPOSE = 'team-onboarding-article';
 const TEAM_ONBOARDING_BLOCK_PURPOSE = 'team-onboarding-block';
+const WIKI_PAGE_STATE_PURPOSE = 'wiki-page-state';
+const WIKI_SHADOW_PURPOSE = 'wiki-shadow';
 const COLLAB_SNAPSHOT_PURPOSE = 'collab-snapshot';
 const WIKI_COMMENT_PURPOSE = 'wiki-comment';
 const WIKI_FEEDBACK_PURPOSE = 'wiki-feedback';
@@ -114,8 +116,24 @@ export interface TeamOnboardingBlockRef extends TeamOnboardingArticleRef {
   blockType: string;
 }
 
+export type WikiPageStateRef = WikiArticleRef;
+
+// The floor is bound so a plaintext floor lowered after sealing no longer opens the envelope.
+export interface WikiShadowRef extends WikiArticleRef {
+  wikiRequestId: string;
+  arm: ShadowArm;
+  side: 'variant' | 'production';
+  sensitivityFloor: SensitivityLevel;
+}
+
+export type SealedEnvelopePurpose =
+  | 'wiki-block'
+  | 'team-onboarding-block'
+  | 'wiki-page-state'
+  | 'wiki-shadow';
+
 type SealedBlockHeader = Omit<SealedContentEnvelopeV1, 'ciphertext' | 'purpose'> & {
-  purpose: 'wiki-block' | 'team-onboarding-block';
+  purpose: SealedEnvelopePurpose;
 };
 
 export interface SealedContentKeyringConfig {
@@ -282,18 +300,12 @@ export class EnclaveCrypto {
   }
 
   async openWikiBlockEnvelope(envelope: unknown, expected: WikiBlockRef): Promise<Buffer> {
-    const sealed = sealedContentEnvelopeV1Schema.parse(envelope);
-    this.requireSealedBlockIdentity(sealed, expected.orgId, WIKI_BLOCK_PURPOSE);
-    return this.openSealedBlockContext(
-      Buffer.from(sealed.ciphertext, 'base64'),
-      this.sealedBlockContext(sealed, {
-        orgId: expected.orgId,
-        themeId: expected.themeId,
-        audienceId: audienceKey(expected.audienceId),
-        blockType: expected.blockType,
-      }),
-      WIKI_BLOCK_PURPOSE,
-    );
+    return this.openIdentifiedEnvelope(envelope, expected.orgId, WIKI_BLOCK_PURPOSE, {
+      orgId: expected.orgId,
+      themeId: expected.themeId,
+      audienceId: audienceKey(expected.audienceId),
+      blockType: expected.blockType,
+    });
   }
 
   encryptTeamOnboardingArticle(plaintext: Buffer, ref: TeamOnboardingArticleRef): Promise<Buffer> {
@@ -358,17 +370,51 @@ export class EnclaveCrypto {
     envelope: unknown,
     expected: TeamOnboardingBlockRef,
   ): Promise<Buffer> {
-    const sealed = sealedContentEnvelopeV1Schema.parse(envelope);
-    this.requireSealedBlockIdentity(sealed, expected.orgId, TEAM_ONBOARDING_BLOCK_PURPOSE);
-    return this.openSealedBlockContext(
-      Buffer.from(sealed.ciphertext, 'base64'),
-      this.sealedBlockContext(sealed, {
-        orgId: expected.orgId,
-        teamId: expected.teamId,
-        audienceId: audienceKey(expected.audienceId),
-        blockType: expected.blockType,
-      }),
-      TEAM_ONBOARDING_BLOCK_PURPOSE,
+    return this.openIdentifiedEnvelope(envelope, expected.orgId, TEAM_ONBOARDING_BLOCK_PURPOSE, {
+      orgId: expected.orgId,
+      teamId: expected.teamId,
+      audienceId: audienceKey(expected.audienceId),
+      blockType: expected.blockType,
+    });
+  }
+
+  async sealWikiPageStateEnvelope(
+    plaintext: Buffer,
+    ref: WikiPageStateRef,
+  ): Promise<SealedContentEnvelopeV1> {
+    return this.sealBlockEnvelope(
+      plaintext,
+      this.sealedBlockHeader(ref.orgId, WIKI_PAGE_STATE_PURPOSE),
+      this.pageStateIdentity(ref),
+    );
+  }
+
+  async openWikiPageStateEnvelope(envelope: unknown, expected: WikiPageStateRef): Promise<Buffer> {
+    return this.openIdentifiedEnvelope(
+      envelope,
+      expected.orgId,
+      WIKI_PAGE_STATE_PURPOSE,
+      this.pageStateIdentity(expected),
+    );
+  }
+
+  async sealWikiShadowEnvelope(
+    plaintext: Buffer,
+    ref: WikiShadowRef,
+  ): Promise<SealedContentEnvelopeV1> {
+    return this.sealBlockEnvelope(
+      plaintext,
+      this.sealedBlockHeader(ref.orgId, WIKI_SHADOW_PURPOSE),
+      this.shadowIdentity(ref),
+    );
+  }
+
+  async openWikiShadowEnvelope(envelope: unknown, expected: WikiShadowRef): Promise<Buffer> {
+    return this.openIdentifiedEnvelope(
+      envelope,
+      expected.orgId,
+      WIKI_SHADOW_PURPOSE,
+      this.shadowIdentity(expected),
     );
   }
 
@@ -596,7 +642,7 @@ export class EnclaveCrypto {
   private async openSealedBlockContext(
     ciphertext: Buffer,
     expected: Record<string, string>,
-    purpose: 'wiki-block' | 'team-onboarding-block',
+    purpose: SealedEnvelopePurpose,
   ): Promise<Buffer> {
     const { plaintext, messageHeader } = await esdkDecrypt(
       this.sealedContentKeyring(Number(expected.contentKeyVersion), purpose),
@@ -641,10 +687,7 @@ export class EnclaveCrypto {
     };
   }
 
-  private sealedBlockHeader(
-    orgId: string,
-    purpose: 'wiki-block' | 'team-onboarding-block',
-  ): SealedBlockHeader {
+  private sealedBlockHeader(orgId: string, purpose: SealedEnvelopePurpose): SealedBlockHeader {
     return {
       version: 1,
       algorithm: 'ALG_AES256_GCM_IV12_TAG16_HKDF_SHA512_COMMIT_KEY_ECDSA_P384',
@@ -654,6 +697,39 @@ export class EnclaveCrypto {
       formatVersion: 1,
       contentKeyVersion: this.sealedContentKeyrings.activeVersion,
     };
+  }
+
+  private pageStateIdentity(ref: WikiPageStateRef): Record<string, string> {
+    return {
+      orgId: ref.orgId,
+      themeId: ref.themeId,
+      audienceId: audienceKey(ref.audienceId),
+    };
+  }
+
+  private shadowIdentity(ref: WikiShadowRef): Record<string, string> {
+    return {
+      ...this.pageStateIdentity(ref),
+      wikiRequestId: ref.wikiRequestId,
+      arm: ref.arm,
+      side: ref.side,
+      sensitivityFloor: ref.sensitivityFloor,
+    };
+  }
+
+  private async openIdentifiedEnvelope(
+    envelope: unknown,
+    orgId: string,
+    purpose: SealedEnvelopePurpose,
+    identity: Record<string, string>,
+  ): Promise<Buffer> {
+    const sealed = sealedContentEnvelopeV1Schema.parse(envelope);
+    this.requireSealedBlockIdentity(sealed, orgId, purpose);
+    return this.openSealedBlockContext(
+      Buffer.from(sealed.ciphertext, 'base64'),
+      this.sealedBlockContext(sealed, identity),
+      purpose,
+    );
   }
 
   private sealedBlockContext(
@@ -675,19 +751,14 @@ export class EnclaveCrypto {
   private requireSealedBlockIdentity(
     envelope: SealedContentEnvelopeV1,
     orgId: string,
-    purpose: 'wiki-block' | 'team-onboarding-block',
-  ): asserts envelope is SealedContentEnvelopeV1 & {
-    purpose: 'wiki-block' | 'team-onboarding-block';
-  } {
+    purpose: SealedEnvelopePurpose,
+  ): asserts envelope is SealedContentEnvelopeV1 & { purpose: SealedEnvelopePurpose } {
     if (envelope.orgId !== orgId || envelope.purpose !== purpose) {
       throw new EncryptionContextMismatchError(purpose);
     }
   }
 
-  private sealedContentKeyring(
-    version: number,
-    purpose: 'wiki-block' | 'team-onboarding-block',
-  ): KmsKeyringNode {
+  private sealedContentKeyring(version: number, purpose: SealedEnvelopePurpose): KmsKeyringNode {
     const keyring = this.sealedContentKeyrings.keyrings.get(version);
     if (!keyring) throw new EncryptionContextMismatchError(purpose);
     return keyring;

@@ -6,6 +6,8 @@ export interface UpstreamCallContext {
   /** An in-enclave counter naming one message's calls for rotation; it never leaves the enclave. */
   readonly message: number;
   readonly signal?: AbortSignal;
+  /** When the message's timer fires; work that must finish inside the message budgets against it. */
+  readonly deadlineAtMs?: number;
 }
 
 export class UpstreamCallScope {

@@ -13,6 +13,8 @@ import {
   type InferenceTiming,
   type TokenUsage,
 } from '@folklore/contracts/enclave';
+import type { ClaudeInferencePurpose, InferenceUsageOutcome } from '@folklore/contracts';
+import { inferencePurposeScope } from './InferencePurposeScope.js';
 import { InferenceTimeline, type SpanFailure } from './timing/InferenceTimeline.js';
 import { reportUpstreamUsage } from './upstream-observation.js';
 
@@ -25,6 +27,9 @@ const UNKNOWN_MODEL = 'unknown';
 const KEY_SEPARATOR = '|';
 
 const OK = 'ok';
+const SHADOW = 'shadow';
+const UNTAGGED = 'untagged';
+const PRIMARY_ARM = 'D';
 
 type TimedSum = 'trustedTimeMs' | 'bindMs' | 'requestMs' | 'responseMs' | 'verifyMs';
 type TimedMax = 'trustedTimeMaxMs' | 'bindMaxMs' | 'requestMaxMs' | 'responseMaxMs' | 'verifyMaxMs';
@@ -40,6 +45,11 @@ const AGGREGATED_PHASES: ReadonlyMap<InferenceSpanPhase, readonly [TimedSum, Tim
 ]);
 
 export type SpanFailureClassifier = (error: unknown) => SpanFailure;
+
+interface UsageLabel {
+  readonly purpose: ClaudeInferencePurpose | typeof UNTAGGED;
+  readonly outcome: InferenceUsageOutcome;
+}
 
 const UNCLASSIFIED: SpanFailureClassifier = () => ({ outcome: 'error_code' });
 
@@ -67,12 +77,14 @@ export class TokenUsageScope {
     run: () => Promise<T>,
     onPartial?: (usage: TokenUsage[]) => void,
     classify: SpanFailureClassifier = UNCLASSIFIED,
+    onStart?: (peek: () => TokenUsage[]) => void,
   ): Promise<MeasuredRun<T>> {
     const current: UsageRun = {
       totals: new Map(),
       timeline: new InferenceTimeline(this.now()),
       classify,
     };
+    onStart?.(() => this.snapshot(current.totals));
     try {
       const result = await this.runs.run(current, run);
       return {
@@ -89,11 +101,30 @@ export class TokenUsageScope {
   record(event: InferenceUsageEvent): void {
     const current = this.runs.getStore();
     if (!current) return;
-    const total = this.totalFor(current, this.safeModel(event.model), event.operation);
+    const label = this.usageLabel();
+    const total = this.totalFor(current, this.safeModel(event.model), event.operation, {
+      purpose: event.purpose ?? label.purpose,
+      outcome: event.outcome ?? label.outcome,
+    });
     total.calls += 1;
     if (event.cached) total.cachedCalls += 1;
     total.promptTokens += event.promptTokens;
     total.completionTokens += event.completionTokens;
+    if (event.cacheReadTokens !== undefined) {
+      total.cacheReadTokens = (total.cacheReadTokens ?? 0) + event.cacheReadTokens;
+    }
+    if (event.cacheWriteTokens !== undefined) {
+      total.cacheWriteTokens = (total.cacheWriteTokens ?? 0) + event.cacheWriteTokens;
+    }
+  }
+
+  // One reader for both the token entry and its timing, so the two never land on different keys.
+  private usageLabel(): UsageLabel {
+    const context = inferencePurposeScope.current();
+    return {
+      purpose: context?.purpose ?? UNTAGGED,
+      outcome: this.inShadowArm() ? SHADOW : OK,
+    };
   }
 
   /** Times one step of a provider call into the active run; outside a run the step runs untimed. */
@@ -115,8 +146,15 @@ export class TokenUsageScope {
     }
   }
 
+  // A shadow arm's stages would read as the message's own on the timeline the worker alarms from.
   async stage<T>(phase: InferenceSpanPhase, step: () => Promise<T>): Promise<T> {
+    if (this.inShadowArm()) return step();
     return this.time(phase, {}, step);
+  }
+
+  private inShadowArm(): boolean {
+    const arm = inferencePurposeScope.current()?.arm;
+    return arm !== undefined && arm !== PRIMARY_ARM;
   }
 
   // Telemetry must never decide a call's outcome, so a recording fault is dropped silently.
@@ -164,7 +202,7 @@ export class TokenUsageScope {
   ): void {
     const fields = AGGREGATED_PHASES.get(phase);
     if (!fields) return;
-    const total = this.totalFor(current, model, operation);
+    const total = this.totalFor(current, model, operation, this.usageLabel());
     const timing = (total.timing ??= this.emptyTiming());
     const [sum, max] = fields;
     timing[sum] += durationMs;
@@ -176,8 +214,9 @@ export class TokenUsageScope {
     current: UsageRun,
     model: string,
     operation: TokenUsage['operation'],
+    label: UsageLabel,
   ): TokenUsage {
-    const key = `${model}${KEY_SEPARATOR}${operation}`;
+    const key = [model, operation, label.purpose, label.outcome].join(KEY_SEPARATOR);
     const existing = current.totals.get(key);
     if (existing) return existing;
     const total: TokenUsage = {
@@ -187,6 +226,8 @@ export class TokenUsageScope {
       cachedCalls: 0,
       promptTokens: 0,
       completionTokens: 0,
+      purpose: label.purpose,
+      outcome: label.outcome,
     };
     current.totals.set(key, total);
     return total;

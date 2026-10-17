@@ -49,6 +49,11 @@ export class PublicAciPinnedKeysetAuthority implements AciKeysetHighWaterAuthori
     throw new Error('public_aci_high_water_read_unsupported');
   }
 
+  async assertPinned(context: AciTrustContext): Promise<void> {
+    this.assertAciContext(context);
+    await this.readPinnedCheckpoint();
+  }
+
   async admitKeyset(input: {
     readonly context: AciTrustContext;
     readonly keysetDigest: string;

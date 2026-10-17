@@ -23,6 +23,13 @@ import {
   type VerifiedActivePolicySnapshotV1,
 } from '@folklore/inference';
 import { inferenceModel, inferenceModelRevision } from './phala.js';
+import { inferencePurposeScope } from './InferencePurposeScope.js';
+import { CLAUDE_TRANSIENT_STATUSES } from './claude/claude-route-errors.js';
+import {
+  ACI_ROUTE,
+  type InferenceRoute,
+  type InferenceRouteResolver,
+} from './claude/InferenceRouteResolver.js';
 import type { SynthesisInference } from './CachedInference.js';
 import { llmCacheKey } from './llm-cache.js';
 import { TrustedTimeAuthorityError } from './TrustedTimeAuthority.js';
@@ -93,6 +100,7 @@ export type TenantPolicyOperationBackend = SynthesisInference & {
 export type TenantPolicyVerifiedBindingBackendFactory = (
   binding: VerifiedActivePolicyRoleBindingV1,
   snapshot: VerifiedActivePolicySnapshotV1,
+  route?: InferenceRoute,
 ) => Promise<TenantPolicyOperationBackend>;
 
 export interface UpstreamCallAdmission {
@@ -122,6 +130,8 @@ export interface TenantPolicyBoundInferenceOptions {
   readonly transientRetry?: TransientInferenceRetry;
   readonly latencyProfile?: InferenceLatencyProfile;
   readonly upstreamGate?: UpstreamCallGate;
+  readonly upstreamKeyFor?: (role: InferenceModelRole) => string | undefined;
+  readonly routeResolver?: InferenceRouteResolver;
   readonly structured?: (prompt: string, tool: ToolSpec, systemPrompt?: string) => Promise<unknown>;
   readonly onVerifiedBinding?: (
     binding: VerifiedActivePolicyRoleBindingV1,
@@ -219,6 +229,8 @@ export class TenantPolicyBoundInference implements SynthesisInference {
 
   // An unconfigured role has no model to key a window by; its refusal is the binding's to raise.
   private upstreamOf(role: InferenceModelRole): string {
+    const keyed = this.options.upstreamKeyFor?.(role);
+    if (keyed !== undefined) return keyed;
     try {
       return inferenceModel(role);
     } catch {
@@ -230,13 +242,11 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     const { binding, snapshot } = await this.bindingFor('embed');
     const cache = this.operationCache;
     const embedOnce = () =>
-      this.transientRetry.run(
-        async () => (await this.backendFor(binding, snapshot)).embed(text),
-        this.retryWindows('embed'),
-        this.backoffTimer('embed'),
+      this.runTransient('embed', ACI_ROUTE, async () =>
+        (await this.backendFor(binding, snapshot, ACI_ROUTE)).embed(text),
       );
     if (!cache) return embedOnce();
-    const key = this.cacheKey(binding, snapshot, 'embed', text);
+    const key = this.cacheKey(binding, snapshot, 'embed', text, ACI_ROUTE);
     const hit = await this.operationCacheGet(key, binding.modelId, 'embed');
     if (hit !== null) return JSON.parse(hit) as number[];
     const output = await embedOnce();
@@ -251,20 +261,22 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     shouldCache?: (output: string) => boolean,
   ): Promise<string> {
     const { binding, snapshot } = await this.bindingFor('generate');
+    const route = this.routeFor('generate');
     const cache = this.operationCache;
-    if (!cache)
-      return this.transientRetry.run(
-        async () =>
-          (await this.backendFor(binding, snapshot)).generate(
-            prompt,
-            systemPrompt,
-            temperature,
-            shouldCache,
-          ),
-        this.retryWindows('generate'),
-        this.backoffTimer('generate'),
+    const generateOnce = (resolvedTemperature: number | undefined) =>
+      this.runTransient('generate', route, async () =>
+        (await this.backendFor(binding, snapshot, route)).generate(
+          prompt,
+          systemPrompt,
+          resolvedTemperature,
+          shouldCache,
+        ),
       );
-    const resolvedTemperature = this.validateTemperature(snapshot, binding, temperature);
+    if (!cache) return generateOnce(temperature);
+    const resolvedTemperature =
+      route.kind === 'claude'
+        ? undefined
+        : this.validateTemperature(snapshot, binding, temperature);
     const key = this.cacheKey(
       binding,
       snapshot,
@@ -272,22 +284,13 @@ export class TenantPolicyBoundInference implements SynthesisInference {
       JSON.stringify({
         prompt,
         systemPrompt: systemPrompt ?? null,
-        temperature: resolvedTemperature,
+        temperature: resolvedTemperature ?? null,
       }),
+      route,
     );
-    const hit = await this.operationCacheGet(key, binding.modelId, 'generate');
+    const hit = await this.operationCacheGet(key, this.modelOf(binding, route), 'generate');
     if (hit !== null) return hit;
-    const output = await this.transientRetry.run(
-      async () =>
-        (await this.backendFor(binding, snapshot)).generate(
-          prompt,
-          systemPrompt,
-          resolvedTemperature,
-          shouldCache,
-        ),
-      this.retryWindows('generate'),
-      this.backoffTimer('generate'),
-    );
+    const output = await generateOnce(resolvedTemperature);
     if ((shouldCache ?? (() => true))(output)) await this.options.operationCache?.set(key, output);
     return output;
   }
@@ -298,14 +301,17 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     shouldCache?: (output: string) => boolean,
   ): Promise<string> {
     const { binding, snapshot } = await this.bindingFor('critique');
+    const route = this.routeFor('critique');
     const cache = this.operationCache;
-    if (!cache)
-      return this.transientRetry.run(
-        async () =>
-          (await this.backendFor(binding, snapshot)).critique(prompt, systemPrompt, shouldCache),
-        this.retryWindows('critique'),
-        this.backoffTimer('critique'),
+    const critiqueOnce = () =>
+      this.runTransient('critique', route, async () =>
+        (await this.backendFor(binding, snapshot, route)).critique(
+          prompt,
+          systemPrompt,
+          shouldCache,
+        ),
       );
+    if (!cache) return critiqueOnce();
     const critiqueTemperature = snapshot.policy.roles.critique.capabilities.temperature;
     const key = this.cacheKey(
       binding,
@@ -316,15 +322,11 @@ export class TenantPolicyBoundInference implements SynthesisInference {
         systemPrompt: systemPrompt ?? null,
         temperature: critiqueTemperature,
       }),
+      route,
     );
-    const hit = await this.operationCacheGet(key, binding.modelId, 'generate');
+    const hit = await this.operationCacheGet(key, this.modelOf(binding, route), 'generate');
     if (hit !== null) return hit;
-    const output = await this.transientRetry.run(
-      async () =>
-        (await this.backendFor(binding, snapshot)).critique(prompt, systemPrompt, shouldCache),
-      this.retryWindows('critique'),
-      this.backoffTimer('critique'),
-    );
+    const output = await critiqueOnce();
     if ((shouldCache ?? (() => true))(output)) await this.options.operationCache?.set(key, output);
     return output;
   }
@@ -335,22 +337,40 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     systemPrompt?: string,
   ): Promise<unknown> {
     const { binding, snapshot } = await this.bindingFor('judge');
+    const route = this.routeFor('judge');
+    return this.runTransient('judge', route, async () => {
+      const structured = this.options.backendForVerifiedBinding
+        ? (await this.backendFor(binding, snapshot, route)).generateStructured
+        : this.options.structured;
+      if (!structured) {
+        throw this.refuse(
+          snapshot,
+          new TenantPolicyBoundInferenceError('active_policy_snapshot_refresh_failed'),
+        );
+      }
+      return structured(prompt, tool, systemPrompt);
+    });
+  }
+
+  private runTransient<T>(
+    role: InferenceModelRole,
+    route: InferenceRoute,
+    operation: () => Promise<T>,
+  ): Promise<T> {
     return this.transientRetry.run(
-      async () => {
-        const structured = this.options.backendForVerifiedBinding
-          ? (await this.backendFor(binding, snapshot)).generateStructured
-          : this.options.structured;
-        if (!structured) {
-          throw this.refuse(
-            snapshot,
-            new TenantPolicyBoundInferenceError('active_policy_snapshot_refresh_failed'),
-          );
-        }
-        return structured(prompt, tool, systemPrompt);
-      },
-      this.retryWindows('judge'),
-      this.backoffTimer('judge'),
+      operation,
+      this.retryWindows(role),
+      this.backoffTimer(role),
+      route.kind === 'claude' ? CLAUDE_TRANSIENT_STATUSES : undefined,
     );
+  }
+
+  private routeFor(role: InferenceModelRole): InferenceRoute {
+    return this.options.routeResolver?.resolve(role, inferencePurposeScope.current()) ?? ACI_ROUTE;
+  }
+
+  private modelOf(binding: VerifiedActivePolicyRoleBindingV1, route: InferenceRoute): string {
+    return route.kind === 'claude' ? route.model : binding.modelId;
   }
 
   private retryWindows(role: InferenceModelRole): TransientRetryWindows {
@@ -373,6 +393,8 @@ export class TenantPolicyBoundInference implements SynthesisInference {
   // An unconfigured role has no model id to report; its refusal is the binding's to raise, not the label's.
   private callLabel(role: InferenceModelRole): InferenceCallLabel {
     const label = { role, operation: INFERENCE_OPERATION_BY_ROLE[role] };
+    const route = this.routeFor(role);
+    if (route.kind === 'claude') return { model: route.model, ...label };
     try {
       return { model: inferenceModel(role), ...label };
     } catch {
@@ -387,9 +409,10 @@ export class TenantPolicyBoundInference implements SynthesisInference {
   private async backendFor(
     binding: VerifiedActivePolicyRoleBindingV1,
     snapshot: VerifiedActivePolicySnapshotV1,
+    route: InferenceRoute,
   ): Promise<TenantPolicyOperationBackend> {
     return this.options.backendForVerifiedBinding
-      ? this.options.backendForVerifiedBinding(binding, snapshot)
+      ? this.options.backendForVerifiedBinding(binding, snapshot, route)
       : this.backend;
   }
 
@@ -398,6 +421,7 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     snapshot: VerifiedActivePolicySnapshotV1,
     operation: string,
     input: string,
+    route: InferenceRoute,
   ): string {
     const namespace = JSON.stringify({
       tenantId: this.tenantId,
@@ -411,8 +435,23 @@ export class TenantPolicyBoundInference implements SynthesisInference {
       modelArtifactDigest: binding.modelArtifactDigest,
       routeIdentityDigest: binding.routeIdentityDigest,
       operation,
+      ...this.routeNamespace(route),
     });
-    return llmCacheKey(binding.modelId, namespace, input);
+    return llmCacheKey(this.modelOf(binding, route), namespace, input);
+  }
+
+  // A route that is not the policy's own adds its identity, so an entry never crosses routes.
+  private routeNamespace(route: InferenceRoute): Record<string, unknown> {
+    if (route.kind !== 'claude') return {};
+    const prefix = inferencePurposeScope.current()?.cachedSystemPrefix;
+    return {
+      route: route.kind,
+      routeModel: route.model,
+      purpose: route.purpose,
+      effort: route.effort,
+      arm: route.arm,
+      prefixDigest: prefix?.digest ?? null,
+    };
   }
 
   private async operationCacheGet(

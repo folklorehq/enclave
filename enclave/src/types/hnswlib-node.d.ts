@@ -11,6 +11,7 @@ declare module 'hnswlib-node' {
     getMaxElements(): number;
     getCurrentCount(): number;
     getNumDimensions(): number;
+    getPoint(label: number): number[];
     resizeIndex(newMaxElements: number): void;
   }
   export default { HierarchicalNSW };
