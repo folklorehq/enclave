@@ -38,8 +38,19 @@ import {
   TenantEntitlementProjectionRunner,
   type ProjectionTenant,
 } from './directory/TenantEntitlementProjectionRunner.js';
+import { ControlPlaneTenantMemberIdentityLinkSource } from './identity/ControlPlaneTenantMemberIdentityLinkSource.js';
+import { MemberIdentityLinkAppliedReader } from './identity/MemberIdentityLinkAppliedReader.js';
+import { MemberIdentityLinkEmitter } from './identity/MemberIdentityLinkEmitter.js';
+import {
+  MEMBER_LINK_MAX_BACKOFF_MS,
+  MEMBER_LINK_SETTLED_OUTCOMES,
+  MemberIdentityLinkRelay,
+  type MemberLinkRelayOutcome,
+} from './identity/MemberIdentityLinkRelay.js';
+import { TenantPeriodicRunner } from './tenant/TenantPeriodicRunner.js';
 import { QueueSetDrainer } from './tenant/QueueSetDrainer.js';
 import { saveAllTenantIndices } from './tenant/index-persistence.js';
+import { HNSW_INDEX_UNREADABLE_CODE } from './hnsw/index.js';
 import { createTenantResolver } from './tenant/tenant-resolver.js';
 import { BoxServer } from './http/BoxServer.js';
 import { SynthesisConsumer } from './workers/SynthesisConsumer.js';
@@ -95,6 +106,10 @@ import {
   HostUpstreamCallGate,
   NSM_PASS_THROUGH_OVER_CEILING_CODE,
 } from './inference/HostUpstreamCallGate.js';
+import {
+  BackgroundAwareUpstreamGate,
+  GATE_WAIT_STALLED_CODE,
+} from './inference/BackgroundAwareUpstreamGate.js';
 import {
   publicAciOperationLimits,
   type InferenceLatencyProfile,
@@ -405,12 +420,18 @@ const tenantFactory = new TenantContextFactory({
       : undefined,
   activePolicySnapshotFor: (tenantId) => activePolicySnapshotFor(tenantId),
   enforceTenantPolicy: isSharedPool,
-  upstreamGate: upstreamGate?.passThrough(),
+  emitAuthors: isSharedPool,
+  upstreamGate: upstreamGate
+    ? new BackgroundAwareUpstreamGate(upstreamGate, undefined, {
+        onWaitStalled: () => bootStatus.recordAlarm(GATE_WAIT_STALLED_CODE),
+      })
+    : undefined,
   activePolicyFreshnessFor: (tenantId) => activePolicyFreshnessFor(tenantId),
   activePolicyRuntimeEvidenceFor: (tenantId) => activePolicyRuntimeEvidenceFor(tenantId),
   activePolicyBindingForwarderFor: (tenantId) => activePolicyBindingForwarderFor(tenantId),
   activePolicyBackendFor,
   claudeRoutes,
+  onIndexUnreadable: () => bootStatus.recordAlarm(HNSW_INDEX_UNREADABLE_CODE),
   ...(devKmsStub
     ? devMasterKeySealers(process.env['NODE_ENV'] ?? '', process.env['DATA_KEK'])
     : {}),
@@ -1460,6 +1481,49 @@ const entitlementProjectionRunner =
       })
     : undefined;
 entitlementProjectionRunner?.start();
+const memberIdentityLinkEmitter = new MemberIdentityLinkEmitter({
+  sqs,
+  processedQueueUrl: PROCESSED_QUEUE_URL,
+  outputAuthenticator,
+  outputIdentity: () => ({
+    deploymentId: OUTPUT_DEPLOYMENT_ID,
+    assignmentGeneration: outputAssignmentGeneration(),
+  }),
+});
+const memberIdentityLinkRelay = new MemberIdentityLinkRelay({
+  reader: new MemberIdentityLinkAppliedReader(() => runtimeDatabaseLease.database()),
+  emit: (output) => memberIdentityLinkEmitter.emit(output),
+  logger: logger.child({ component: 'member_identity_link' }),
+});
+const memberIdentityLinkRunner =
+  isSharedPool && controlPlaneIdentity && controlPlaneFetch && DEPLOYMENT_ID && PROCESSED_QUEUE_URL
+    ? new TenantPeriodicRunner<ProjectionTenant, MemberLinkRelayOutcome>({
+        tenants: projectionTenants,
+        beginTenant: beginTenantRequest,
+        runTenant: ({ tenantId, tenantDeploymentId }) =>
+          memberIdentityLinkRelay.relay(
+            tenantId,
+            new ControlPlaneTenantMemberIdentityLinkSource({
+              controlPlaneUrl: controlPlaneIdentity.origin,
+              runtimeDeploymentId: DEPLOYMENT_ID,
+              tenantDeploymentId,
+              orgId: tenantId,
+              agentToken: () => process.env['AGENT_TOKEN'] ?? '',
+              fetchImpl: controlPlaneFetch,
+            }),
+          ),
+        settledOutcomes: MEMBER_LINK_SETTLED_OUTCOMES,
+        events: {
+          pass: 'member_identity_link_tenant_pass',
+          skipped: 'member_identity_link_tenant_skipped',
+          failed: 'member_identity_link_tenant_failed',
+          passFailed: 'member_identity_link_pass_failed',
+        },
+        backoff: { maxMs: MEMBER_LINK_MAX_BACKOFF_MS },
+        logger,
+      })
+    : undefined;
+memberIdentityLinkRunner?.start();
 bootStatus.begin('workers_start');
 
 // One consumer serves every assigned tenant: it resolves each request's keyring/crypto from the
@@ -1608,6 +1672,8 @@ async function shutdown(): Promise<void> {
   clearInterval(assignmentRefreshTimer);
   if ((await entitlementProjectionRunner?.stop(SHUTDOWN_QUIESCE_TIMEOUT_MS)) === false)
     logger.warn('entitlement_projection_stop_timeout');
+  if ((await memberIdentityLinkRunner?.stop(SHUTDOWN_QUIESCE_TIMEOUT_MS)) === false)
+    logger.warn('member_identity_link_stop_timeout');
   tenantRequestQuiescence.stop();
   // Quiesce synthesis (await the in-flight op) and shred its theme indices + LLM-cache RAM fronts
   // before the final save, so no synth runs concurrently with it (§2.2 pt 5).
@@ -1632,6 +1698,8 @@ async function shutdown(): Promise<void> {
       reason: err instanceof Error ? err.message : String(err),
     }),
   );
+  if ((await drainerRef.current?.stop(SHUTDOWN_QUIESCE_TIMEOUT_MS)) === false)
+    logger.warn('drainer_stop_timeout');
   await saveAllTenantIndices(registry.all(), s3, PROCESSED_OUTPUTS_BUCKET, logger);
   if (apiContainer)
     await apiContainer.close().catch((err) =>

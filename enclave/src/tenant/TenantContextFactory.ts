@@ -79,7 +79,8 @@ export interface TenantContextFactoryDeps {
   unsealMasterKey?: UnsealMasterKeyFn;
   activePolicySnapshotFor?: (tenantId: string) => ReturnType<TenantContext['activePolicySnapshot']>;
   enforceTenantPolicy?: boolean;
-  /** Counts the pipeline's calls toward the host windows without ever making them wait. */
+  emitAuthors?: boolean;
+  /** Queue-job calls wait in the host gate (up to 90 minutes, then fail); other calls only count toward its windows. */
   upstreamGate?: UpstreamCallGate;
   activePolicyFreshnessFor?: (tenantId: string) => TenantPolicyFreshnessPort | undefined;
   activePolicyRuntimeEvidenceFor?: (
@@ -92,6 +93,7 @@ export interface TenantContextFactoryDeps {
     tenantId: string,
   ) => TenantPolicyVerifiedBindingBackendFactory | undefined;
   claudeRoutes?: InferenceRouteResolver;
+  onIndexUnreadable?: () => void;
 }
 
 const MASTER_KEY_BYTES = 32;
@@ -119,7 +121,14 @@ export class TenantContextFactory {
     const masterKey = await this.bootMasterKey(identity);
     let hnsw: HnswStore | undefined;
     try {
-      hnsw = HnswStore.deferred(this.deps.s3, keyring, processedBucket, identity.tenantId);
+      hnsw = HnswStore.deferred(
+        this.deps.s3,
+        keyring,
+        processedBucket,
+        identity.tenantId,
+        undefined,
+        this.deps.onIndexUnreadable,
+      );
       const context: { current?: TenantContext } = {};
       const pipeline = new Pipeline(
         hnsw,
@@ -135,7 +144,10 @@ export class TenantContextFactory {
           this.lateBoundNamer(context),
         ),
         () => context.current?.personalIdentifierKey() ?? null,
-        { entityKey: () => context.current?.entityKey() ?? null },
+        {
+          entityKey: () => context.current?.entityKey() ?? null,
+          emitAuthors: this.deps.emitAuthors === true,
+        },
       );
       const tenantContext = new TenantContext(
         identity.tenantId,

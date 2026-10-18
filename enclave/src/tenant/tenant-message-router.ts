@@ -98,6 +98,8 @@ export interface RoutedResult {
   failureCode?: PullNotProcessedReason;
 }
 
+const PRE_NORMALIZED_MESSAGE_TYPE = 'pull-normalized';
+const MESSAGE_TYPE_UNSUPPORTED = 'message_type_unsupported';
 const GITHUB_SOURCE = 'github';
 const GITHUB_BINDING_MISMATCH = 'github_installation_binding_mismatch';
 
@@ -239,6 +241,9 @@ export class TenantMessageRouter {
       };
     }
 
+    if (raw.type === PRE_NORMALIZED_MESSAGE_TYPE) {
+      throw new TenantMessageRouteError('pipeline', MESSAGE_TYPE_UNSUPPORTED);
+    }
     const payload: EncryptedPayload = {
       ephemeralPublicKey: raw.ephemeralPublicKey,
       nonce: raw.nonce,
@@ -299,9 +304,7 @@ export class TenantMessageRouter {
       let facts: ProcessedFact[];
       try {
         facts = await withInferenceReceiptContext(receiptContext, () =>
-          raw.type === 'pull-normalized'
-            ? context.pipeline.handleNormalized(plaintext, raw.source)
-            : context.pipeline.handle(plaintext, raw.source, raw.eventType ?? ''),
+          context.pipeline.handle(plaintext, raw.source, raw.eventType ?? ''),
         );
       } catch (error) {
         if (error instanceof PipelineProcessingError) {

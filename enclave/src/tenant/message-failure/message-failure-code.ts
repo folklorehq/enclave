@@ -17,6 +17,7 @@ import {
 import { AppError } from '@folklore/errors';
 import { ZodError } from 'zod';
 import { ProviderEgressError, ProviderRejectedError } from '../../egress/provider-token-fetch.js';
+import { HnswBlobUnreadableError } from '../../hnsw/IndexObjectTransfer.js';
 import { EvidenceAnchorVerifierError } from '../../inference/EvidenceAnchorVerifier.js';
 import { GatewayEvidenceRecorderError } from '../../inference/GatewayEvidenceRecorder.js';
 import { TenantPolicyBoundInferenceError } from '../../inference/TenantPolicyBoundInference.js';
@@ -136,6 +137,7 @@ const FIXED_CLASS_REASONS: ReadonlyArray<readonly [ErrorClass, string]> = [
   [PreForwardAdmissionError, 'aci_admission_refused'],
   // A schema refusal names no field: an issue path or message can echo the parsed value.
   [ZodError, 'schema_invalid'],
+  [HnswBlobUnreadableError, 'hnsw_blob_unreadable'],
 ];
 
 // Each of these carries a code typed as a closed union; the prefix keeps the class distinguishable.

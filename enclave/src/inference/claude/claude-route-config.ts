@@ -38,7 +38,7 @@ const HAIKU: ClaudeModelId = 'claude-haiku-5-5';
 const SONNET: ClaudeModelId = 'claude-sonnet-5-5';
 const OPUS: ClaudeModelId = 'claude-opus-5-5';
 const REVIEW_SAMPLE_PERCENT = 10;
-const SHADOW_ORG_ID_SHA256 = '810e451ec9c7513f42ad026c53e97bafa4995188f1b8b2bcefb6713461a5df2c';
+const SHADOW_ORG_ID_SHA256 = '';
 
 const route = (model: ClaudeModelId, effort: ClaudeEffort): ClaudePurposeRoute => ({
   model,
@@ -46,7 +46,6 @@ const route = (model: ClaudeModelId, effort: ClaudeEffort): ClaudePurposeRoute =
 });
 
 const OPUS_MEDIUM = route(OPUS, 'medium');
-const OPUS_LOW = route(OPUS, 'low');
 
 function deepFreeze<T>(value: T): T {
   if (typeof value === 'object' && value !== null && !Object.isFrozen(value)) {
@@ -75,8 +74,8 @@ export const CLAUDE_ROUTE_CONFIG: ClaudeRouteConfig = deepFreeze({
     wiki_recovery: route(HAIKU, 'low'),
     wiki_repair: route(HAIKU, 'low'),
     theme_tagging: route(HAIKU, 'low'),
-    theme_topic_naming: route(HAIKU, 'low'),
-    theme_aggregate_naming: route(HAIKU, 'low'),
+    theme_topic_naming: route(SONNET, 'medium'),
+    theme_aggregate_naming: route(SONNET, 'medium'),
     theme_doctype: route(HAIKU, 'low'),
     association_judge: route(SONNET, 'low'),
     answer: route(SONNET, 'medium'),
@@ -84,48 +83,16 @@ export const CLAUDE_ROUTE_CONFIG: ClaudeRouteConfig = deepFreeze({
     wiki_section_add: route(SONNET, 'medium'),
     wiki_section_long: route(SONNET, 'medium'),
     wiki_outline_long: OPUS_MEDIUM,
+    wiki_page_check: OPUS_MEDIUM,
+    wiki_page_revise: route(SONNET, 'medium'),
+    wiki_article_check: OPUS_MEDIUM,
+    wiki_article_long: route(SONNET, 'medium'),
+    team_onboarding_long: route(SONNET, 'medium'),
   },
   arms: {
-    R: {
-      callGraph: 'reference',
-      purposes: allPurposes(OPUS_MEDIUM),
-    },
-    B: {
-      callGraph: 'v2',
-      purposes: allPurposes(OPUS_LOW),
-    },
+    R: { callGraph: 'reference', purposes: {} },
+    B: { callGraph: 'v2', purposes: {} },
   },
   shadowOrgIdSha256: SHADOW_ORG_ID_SHA256,
   reviewSamplePercent: REVIEW_SAMPLE_PERCENT,
 });
-
-function allPurposes(
-  value: ClaudePurposeRoute,
-): Readonly<Record<ClaudeInferencePurpose, ClaudePurposeRoute>> {
-  return {
-    wiki_outline: value,
-    wiki_section: value,
-    wiki_revise: value,
-    wiki_visual_warrant: value,
-    wiki_visual_draw: value,
-    wiki_article: value,
-    team_onboarding: value,
-    wiki_review: value,
-    wiki_critique: value,
-    citation_check: value,
-    theme_merge: value,
-    wiki_relevance: value,
-    wiki_recovery: value,
-    wiki_repair: value,
-    theme_tagging: value,
-    theme_topic_naming: value,
-    theme_aggregate_naming: value,
-    theme_doctype: value,
-    association_judge: value,
-    answer: value,
-    wiki_delta: value,
-    wiki_section_add: value,
-    wiki_section_long: value,
-    wiki_outline_long: value,
-  };
-}

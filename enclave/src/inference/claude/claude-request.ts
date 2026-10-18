@@ -1,6 +1,7 @@
 import type { ClaudeEffort } from '@folklore/contracts';
 import type { ToolSpec } from '@folklore/inference';
 import type { CachedSystemPrefix } from '../InferencePurposeScope.js';
+import { CLAUDE_CHECK_PURPOSES } from './claude-checker-rules.js';
 import { ClaudeRouteError } from './claude-route-errors.js';
 import {
   CLAUDE_PURPOSE_LIMITS,
@@ -72,7 +73,11 @@ function formatFor(tool: ToolSpec): NonNullable<ClaudeRequestBody['output_config
 }
 
 function offThinking(route: ClaudeRoute): boolean {
-  return route.model === SONNET_MODEL && !CLAUDE_WRITING_PURPOSES.has(route.purpose);
+  return (
+    route.model === SONNET_MODEL &&
+    !CLAUDE_WRITING_PURPOSES.has(route.purpose) &&
+    !CLAUDE_CHECK_PURPOSES.has(route.purpose)
+  );
 }
 
 function systemFor(input: ClaudeRequestInput): string | TextBlock[] | undefined {

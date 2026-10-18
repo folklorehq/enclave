@@ -19,7 +19,8 @@ import {
   type ClaudeCallGraph,
   type ClaudeRouteConfig,
 } from './claude-route-config.js';
-import { CLAUDE_WRITING_PURPOSES, claudeTimeoutMs } from './claude-purpose-limits.js';
+import { assertCheckerRules } from './claude-checker-rules.js';
+import { claudeTimeoutMs } from './claude-purpose-limits.js';
 import { CLAUDE_ROUTE_CONFIG_INVALID, ClaudeRouteConfigError } from './claude-route-errors.js';
 
 export type InferenceRoute =
@@ -39,7 +40,6 @@ export const ACI_ROUTE: InferenceRoute = Object.freeze({ kind: 'aci' });
 export const UPSTREAM_KEY_PREFIX = 'anthropic/';
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
-const CHECK_PURPOSES: readonly ClaudeInferencePurpose[] = ['wiki_review', 'wiki_critique'];
 const ARM_IDS: readonly string[] = ['B', 'R'];
 
 const CLAUDE_DEFAULT_PURPOSE_BY_ROLE: Readonly<
@@ -60,15 +60,6 @@ function assertIdentity(identity: ClaudeRouteConfig['identity']): void {
   }
   if (identity.workspaceIdSha256 !== '' && !SHA256_HEX.test(identity.workspaceIdSha256)) {
     invalid('workspace_hash');
-  }
-}
-
-function assertCheckersDifferFromWriters(config: ClaudeRouteConfig): void {
-  const writers = new Set(
-    [...CLAUDE_WRITING_PURPOSES].map((purpose) => config.purposes[purpose].model),
-  );
-  if (CHECK_PURPOSES.some((purpose) => writers.has(config.purposes[purpose].model))) {
-    invalid('check_model_shared');
   }
 }
 
@@ -111,7 +102,7 @@ function assertArms(config: ClaudeRouteConfig): void {
 export function assertClaudeRouteConfig(config: ClaudeRouteConfig): void {
   assertIdentity(config.identity);
   assertArms(config);
-  assertCheckersDifferFromWriters(config);
+  assertCheckerRules(config);
   assertModelsAndTimeouts(config);
 }
 

@@ -1,3 +1,4 @@
+import type { Duplex } from 'node:stream';
 import {
   AlgorithmSuiteIdentifier,
   buildClient,
@@ -37,4 +38,20 @@ export async function esdkDecrypt(
   ciphertext: Buffer,
 ): Promise<{ plaintext: Buffer; messageHeader: MessageHeader }> {
   return client.decrypt(keyring, ciphertext);
+}
+
+export function esdkEncryptStream(
+  keyring: KeyringNode,
+  encryptionContext: Record<string, string>,
+): Duplex {
+  return client.encryptStream(keyring, {
+    encryptionContext,
+    suiteId: ESDK_ALGORITHM_SUITE,
+    frameLength: ESDK_FRAME_LENGTH,
+  });
+}
+
+// Signed suite: plaintext is released before the signature check, so consume it only after the stream ends cleanly.
+export function esdkDecryptStream(keyring: KeyringNode): Duplex {
+  return client.decryptStream(keyring);
 }

@@ -42,6 +42,8 @@ const LLM_CACHE_REASONS = [
   'llm_cache_namer_unbound',
 ] as const;
 
+const HNSW_REASONS = ['hnsw_blob_unreadable', 'hnsw_index_unreadable'] as const;
+
 const NSM_REASONS = [
   'nsm_attestation_invalid',
   'nsm_attestation_turn_abandoned',
@@ -265,7 +267,13 @@ const SYNTHESIS_REASONS = [
   'theme_grouping_embedding_unavailable',
 ] as const;
 
-const ROUTE_REASONS = ['canary_authorization_invalid', 'message_deadline_exceeded'] as const;
+const PIPELINE_REASONS = ['org_key_unavailable'] as const;
+
+const ROUTE_REASONS = [
+  'canary_authorization_invalid',
+  'message_deadline_exceeded',
+  'upstream_gate_wait_stalled',
+] as const;
 
 // Node and undici connection codes; the reason is the lower-cased code, never the message.
 export const NETWORK_ERROR_CODES: ReadonlySet<string> = new Set([
@@ -300,6 +308,7 @@ export const MESSAGE_FAILURE_REASONS: ReadonlySet<string> = new Set<string>([
   ...CLOCK_RAW_REASONS,
   ...HIGH_WATER_FAILURE_CODES,
   ...LLM_CACHE_REASONS,
+  ...HNSW_REASONS,
   ...NSM_REASONS,
   ...PUBLIC_ACI_REASONS,
   ...RUNTIME_EVIDENCE_REASONS,
@@ -310,6 +319,7 @@ export const MESSAGE_FAILURE_REASONS: ReadonlySet<string> = new Set<string>([
   ...INFERENCE_PATH_REASONS,
   ...CLAUDE_REASONS,
   ...SYNTHESIS_REASONS,
+  ...PIPELINE_REASONS,
   ...ROUTE_REASONS,
   ...OUTPUT_FAILURE_REASONS,
 ]);
