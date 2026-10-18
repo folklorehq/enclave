@@ -80,6 +80,10 @@ export const CLAUDE_ROUTE_CONFIG: ClaudeRouteConfig = deepFreeze({
     theme_doctype: route(HAIKU, 'low'),
     association_judge: route(SONNET, 'low'),
     answer: route(SONNET, 'medium'),
+    wiki_delta: route(SONNET, 'medium'),
+    wiki_section_add: route(SONNET, 'medium'),
+    wiki_section_long: route(SONNET, 'medium'),
+    wiki_outline_long: OPUS_MEDIUM,
   },
   arms: {
     R: {
@@ -119,5 +123,9 @@ function allPurposes(
     theme_doctype: value,
     association_judge: value,
     answer: value,
+    wiki_delta: value,
+    wiki_section_add: value,
+    wiki_section_long: value,
+    wiki_outline_long: value,
   };
 }

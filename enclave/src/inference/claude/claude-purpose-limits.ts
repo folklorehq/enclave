@@ -15,6 +15,9 @@ export const CLAUDE_WRITING_PURPOSES: ReadonlySet<ClaudeInferencePurpose> = new 
   'wiki_article',
   'team_onboarding',
   'wiki_visual_draw',
+  'wiki_delta',
+  'wiki_section_add',
+  'wiki_section_long',
 ]);
 
 export interface ClaudePurposeLimit {
@@ -48,6 +51,10 @@ export const CLAUDE_PURPOSE_LIMITS: Readonly<Record<ClaudeInferencePurpose, Clau
   theme_doctype: limit(256),
   association_judge: limit(1_024),
   answer: limit(2_048),
+  wiki_delta: limit(4_096, true),
+  wiki_section_add: limit(4_096, true),
+  wiki_section_long: limit(4_096, true),
+  wiki_outline_long: limit(4_096),
 };
 
 const INTERACTIVE_MS = 40_000;
@@ -62,6 +69,11 @@ const SONNET_AND_OPUS = (sonnetMs: number, opusMs: number) => ({
   'claude-sonnet-5-5': sonnetMs,
   'claude-opus-5-5': opusMs,
 });
+const HAIKU_SONNET_AND_OPUS = (smallModelMs: number, opusMs: number) => ({
+  'claude-haiku-5-5': smallModelMs,
+  'claude-sonnet-5-5': smallModelMs,
+  'claude-opus-5-5': opusMs,
+});
 const HAIKU_AND_OPUS = (haikuMs: number, opusMs: number) => ({
   'claude-haiku-5-5': haikuMs,
   'claude-opus-5-5': opusMs,
@@ -70,8 +82,8 @@ const HAIKU_AND_OPUS = (haikuMs: number, opusMs: number) => ({
 export const CLAUDE_PURPOSE_TIMEOUT_MS: Readonly<
   Record<ClaudeInferencePurpose, Readonly<Partial<Record<ClaudeModelId, number>>>>
 > = {
-  wiki_outline: { 'claude-opus-5-5': MEDIUM_OPUS_MS },
-  wiki_section: SONNET_AND_OPUS(MEDIUM_MS, MEDIUM_OPUS_MS),
+  wiki_outline: HAIKU_AND_OPUS(MEDIUM_MS, MEDIUM_OPUS_MS),
+  wiki_section: HAIKU_SONNET_AND_OPUS(MEDIUM_MS, MEDIUM_OPUS_MS),
   wiki_revise: SONNET_AND_OPUS(LARGE_MS, LARGE_OPUS_MS),
   wiki_visual_warrant: SONNET_AND_OPUS(SMALL_MS, SMALL_OPUS_MS),
   wiki_visual_draw: SONNET_AND_OPUS(MEDIUM_MS, MEDIUM_OPUS_MS),
@@ -90,6 +102,10 @@ export const CLAUDE_PURPOSE_TIMEOUT_MS: Readonly<
   theme_doctype: HAIKU_AND_OPUS(SMALL_MS, SMALL_OPUS_MS),
   association_judge: SONNET_AND_OPUS(SMALL_MS, SMALL_OPUS_MS),
   answer: SONNET_AND_OPUS(INTERACTIVE_MS, INTERACTIVE_MS),
+  wiki_delta: HAIKU_SONNET_AND_OPUS(MEDIUM_MS, MEDIUM_OPUS_MS),
+  wiki_section_add: HAIKU_SONNET_AND_OPUS(MEDIUM_MS, MEDIUM_OPUS_MS),
+  wiki_section_long: SONNET_AND_OPUS(MEDIUM_MS, MEDIUM_OPUS_MS),
+  wiki_outline_long: { 'claude-opus-5-5': MEDIUM_OPUS_MS },
 };
 
 export function claudeMaxTokens(purpose: ClaudeInferencePurpose, effort: ClaudeEffort): number {

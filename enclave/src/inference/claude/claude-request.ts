@@ -16,6 +16,8 @@ const HAIKU_MODEL = 'claude-haiku-5-5';
 const SONNET_MODEL = 'claude-sonnet-5-5';
 const CHARS_PER_TOKEN_FLOOR = 3;
 
+export const CLAUDE_REQUEST_TOO_LARGE = 'claude_request_too_large_for_model';
+
 interface TextBlock {
   readonly type: 'text';
   readonly text: string;
@@ -46,7 +48,7 @@ export interface ClaudeRequestInput {
 export function buildClaudeRequest(input: ClaudeRequestInput): ClaudeRequestBody {
   const { route } = input;
   const system = systemFor(input);
-  assertFitsModel(route, [input.prompt, JSON.stringify(system ?? '')]);
+  if (!fitsModel(input)) throw new ClaudeRouteError(CLAUDE_REQUEST_TOO_LARGE);
   return {
     model: route.model,
     max_tokens: claudeMaxTokens(route.purpose, route.effort),
@@ -96,10 +98,9 @@ function text(value: string): TextBlock {
   return { type: 'text', text: value };
 }
 
-function assertFitsModel(route: ClaudeRoute, parts: readonly string[]): void {
-  if (route.model !== HAIKU_MODEL) return;
+export function fitsModel(input: ClaudeRequestInput): boolean {
+  if (input.route.model !== HAIKU_MODEL) return true;
+  const parts = [input.prompt, JSON.stringify(systemFor(input) ?? '')];
   const chars = parts.reduce((sum, part) => sum + part.length, 0);
-  if (Math.ceil(chars / CHARS_PER_TOKEN_FLOOR) > HAIKU_MAX_INPUT_TOKENS) {
-    throw new ClaudeRouteError('claude_request_too_large_for_model');
-  }
+  return Math.ceil(chars / CHARS_PER_TOKEN_FLOOR) <= HAIKU_MAX_INPUT_TOKENS;
 }
