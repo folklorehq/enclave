@@ -26,6 +26,7 @@ import { checkRateLimit } from '../rate-limiter.js';
 import { fetchDispatcherAuthSecret, computeDispatcherAuthHmac } from '../dispatcher-auth.js';
 import type { RoutingMode } from '../routing-allowlist.js';
 import { SQS_MAX_MESSAGE_BYTES } from '../encrypted-sqs-message-size.js';
+import { edgeLaneGroupId } from '../edge-lane.js';
 import { UUID_PATTERN } from '../uuid-pattern.js';
 import { normalizeHeaders, verifySignature, verifySvixSignature } from '../signature-verifier.js';
 
@@ -769,7 +770,12 @@ async function sealAndEnqueue(params: {
     new SendMessageCommand({
       QueueUrl: QUEUE_URL,
       MessageBody: messageBody,
-      MessageGroupId: params.tenantId,
+      MessageGroupId: edgeLaneGroupId(
+        params.tenantId,
+        params.source,
+        params.payloadBody,
+        params.messageType,
+      ),
       MessageDeduplicationId: params.dedupId,
     }),
   );
