@@ -26,6 +26,8 @@ export const OVERLOAD_STATUSES: ReadonlySet<number> = new Set([429, 503, 529]);
 export const MESSAGE_ROTATION_HISTORY_LIMIT = 1_024;
 export const NSM_PASS_THROUGH_OVER_CEILING_CODE = 'nsm_pass_through_over_ceiling';
 
+export const BACKGROUND_PRIORITY_AGE_MS = 5 * 60_000;
+
 const NEVER_ADMITTED = -1;
 const FIRST_SUCCESS_STATUS = 200;
 const LAST_SUCCESS_STATUS = 299;
@@ -46,6 +48,8 @@ interface Waiter {
   readonly tenantId: string;
   readonly messageKey: string;
   readonly message: number;
+  readonly background: boolean;
+  readonly enqueuedAt: number;
   readonly sequence: number;
   readonly signal: AbortSignal | undefined;
   readonly admit: (ticket: Ticket) => void;
@@ -314,6 +318,8 @@ export class HostUpstreamCallGate implements UpstreamCallGate {
         tenantId,
         messageKey: this.messageKey(tenantId, message),
         message,
+        background: context?.background === true,
+        enqueuedAt: this.now(),
         sequence: this.sequence,
         signal: context?.signal,
         admit,
@@ -418,10 +424,12 @@ export class HostUpstreamCallGate implements UpstreamCallGate {
     waiter.admit(this.take(waiter.lane, waiter.tenantId, waiter.message, true));
   }
 
-  // Least recently admitted tenant first, then that tenant's least recently admitted message, then FIFO.
+  // Tenant, then synthesis before queue jobs until a job has waited BACKGROUND_PRIORITY_AGE_MS, then least recently admitted message, then FIFO.
   private nextWaiter(lane: Lane): Waiter | undefined {
     const eligible = new Map<string, boolean>();
+    const at = this.now();
     let next: Waiter | undefined;
+    let nextDeferred = false;
     let tenantAt = Number.POSITIVE_INFINITY;
     let messageAt = Number.POSITIVE_INFINITY;
     for (const waiter of lane.waiters) {
@@ -430,13 +438,14 @@ export class HostUpstreamCallGate implements UpstreamCallGate {
       if (!allowed) continue;
       const waiterTenantAt = lane.lastTenantAdmission.get(waiter.tenantId) ?? NEVER_ADMITTED;
       const waiterMessageAt = lane.lastMessageAdmission.get(waiter.messageKey) ?? NEVER_ADMITTED;
+      const deferred = waiter.background && at - waiter.enqueuedAt < BACKGROUND_PRIORITY_AGE_MS;
       const tenantIsNext = waiterTenantAt < tenantAt;
-      const sameTenantEarlierMessage =
-        waiterTenantAt === tenantAt &&
-        waiter.tenantId === next?.tenantId &&
-        waiterMessageAt < messageAt;
-      if (!tenantIsNext && !sameTenantEarlierMessage) continue;
+      const sameTenant = waiterTenantAt === tenantAt && waiter.tenantId === next?.tenantId;
+      const sameTenantBetter =
+        sameTenant && (nextDeferred === deferred ? waiterMessageAt < messageAt : nextDeferred);
+      if (!tenantIsNext && !sameTenantBetter) continue;
       next = waiter;
+      nextDeferred = deferred;
       tenantAt = waiterTenantAt;
       messageAt = waiterMessageAt;
     }

@@ -1,6 +1,7 @@
 import { HIGH_WATER_FAILURE_CODES } from '@folklore/inference';
 import type { EvidenceKeySessionErrorCode } from '../../inference/EvidenceKeySession.js';
 import type { PullNotProcessedReason } from '../../pull/pull-runner.js';
+import { THEME_SYNTHESIS_PHASES, themeDeadlineCode } from './theme-synthesis-phase.js';
 import { OUTPUT_FAILURE_REASONS } from '../output/output-failure-reasons.js';
 
 const ACTIVE_POLICY_REASONS = [
@@ -262,6 +263,7 @@ const SYNTHESIS_REASONS = [
   'page_outline_invalid',
   'page_section_type_unknown',
   'synthesis_message_deadline_exceeded',
+  ...THEME_SYNTHESIS_PHASES.map(themeDeadlineCode),
   'synthesis_output_too_large',
   'tenant_cache_salt_zeroized',
   'theme_grouping_embedding_unavailable',
