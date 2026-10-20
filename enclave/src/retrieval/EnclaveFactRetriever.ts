@@ -16,6 +16,7 @@ import {
   SNIPPET_MAX_CHARS,
 } from '@folklore/contracts';
 import { isSensitivityWithin } from '@folklore/wiki';
+import { feedLineOf } from './feed-line.js';
 import type { EnclaveCrypto } from '../crypto/esdk.js';
 import { embedText } from '../inference/phala.js';
 import type { ResolveTenant } from '../tenant/tenant-resolver.js';
@@ -87,6 +88,29 @@ export class EnclaveFactRetriever implements FactRetriever, FactExcerptReader {
       resolveFreshAccess(orgId, userId),
     ]);
     return this.decryptVisible(tenant.crypto, orgId, metaRows, access, limit);
+  }
+
+  // The page feed: the same fresh access gate and batch bound as the excerpts, then one extractive line per visible fact.
+  async feedLinesForFactIds(params: FactSnippetParams): Promise<Map<string, string>> {
+    const { orgId, userId, factIds } = params;
+    if (factIds.length === 0) return new Map();
+    if (factIds.length > FACT_EXCERPT_BATCH_MAX) throw new Error(FACT_EXCERPT_BATCH_TOO_LARGE);
+    const resolveFreshAccess = this.deps.resolveFreshAudienceAccess;
+    if (!resolveFreshAccess) return new Map();
+
+    const tenant = this.deps.resolveTenant(orgId);
+    const [metaRows, access] = await Promise.all([
+      this.deps.loadFactMetadata(orgId, factIds),
+      resolveFreshAccess(orgId, userId),
+    ]);
+    const visible = metaRows.filter((meta) => this.isVisible(meta, access));
+    const lines = await Promise.all(
+      visible.map(async (meta) => ({
+        id: meta.id,
+        line: feedLineOf(await this.decryptRecord(tenant.crypto, orgId, meta)),
+      })),
+    );
+    return new Map(lines.flatMap(({ id, line }) => (line === null ? [] : [[id, line] as const])));
   }
 
   // Embed → ANN → audience-gate → decrypt, shared by snippet search and answer grounding.
@@ -172,6 +196,20 @@ export class EnclaveFactRetriever implements FactRetriever, FactExcerptReader {
     bodyLimit: number,
   ): Promise<string | null> {
     if (!meta.bodyS3Key) return '';
+    const fact = await this.decryptRecord(crypto, orgId, meta);
+    if (fact === null) return null;
+    const content = fact['content'] as Record<string, unknown> | undefined;
+    const body = (content?.['body'] as string | undefined) ?? '';
+    return body.slice(0, bodyLimit);
+  }
+
+  // The sealed record, opened under the fact's own context; any failure (or an owner-bound envelope) yields null.
+  private async decryptRecord(
+    crypto: EnclaveCrypto,
+    orgId: string,
+    meta: FactMetadata,
+  ): Promise<Record<string, unknown> | null> {
+    if (!meta.bodyS3Key) return null;
     try {
       const obj = await this.deps.s3.send(
         new GetObjectCommand({
@@ -182,10 +220,7 @@ export class EnclaveFactRetriever implements FactRetriever, FactExcerptReader {
       const raw = await obj.Body!.transformToByteArray();
       const enc = Buffer.from(Buffer.from(raw).toString('utf8'), 'base64');
       const plaintext = await crypto.decryptFactBody(enc, { factId: meta.id, orgId });
-      const fact = JSON.parse(plaintext.toString('utf8')) as Record<string, unknown>;
-      const content = fact['content'] as Record<string, unknown> | undefined;
-      const body = (content?.['body'] as string | undefined) ?? '';
-      return body.slice(0, bodyLimit);
+      return JSON.parse(plaintext.toString('utf8')) as Record<string, unknown>;
     } catch {
       return null;
     }
