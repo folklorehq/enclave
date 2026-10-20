@@ -1,3 +1,4 @@
+import { ROUTING_TABLE_REFUSALS } from '@folklore/contracts';
 import { HIGH_WATER_FAILURE_CODES } from '@folklore/inference';
 import type { EvidenceKeySessionErrorCode } from '../../inference/EvidenceKeySession.js';
 import type { PullNotProcessedReason } from '../../pull/pull-runner.js';
@@ -170,6 +171,7 @@ export const INFERENCE_PATH_REASONS = [
   'admission_required',
   'capacity_invalid',
   'checkpoint_not_pinned',
+  'claude_route_provider_mismatch',
   'commitment_key_required',
   'commitment_mismatch',
   'commitment_replay',
@@ -185,6 +187,13 @@ export const INFERENCE_PATH_REASONS = [
   'forward_runtime_unavailable',
   'generation_context_mismatch',
   'generation_not_pinned',
+  'inference_provider_duplicate',
+  'inference_provider_unregistered',
+  'inference_route_fallback',
+  'inference_routing_table_absent',
+  'inference_routing_table_expired_in_use',
+  'inference_routing_table_expiring',
+  'inference_routing_table_read_failed',
   'invalid_active_policy_role_binding',
   'invalid_active_policy_snapshot',
   'invalid_verified_active_policy_carrier',
@@ -205,6 +214,8 @@ export const INFERENCE_PATH_REASONS = [
   'public_inference_requires_policy_assignment_v4',
   'request_wire_mismatch',
   'restart_recovery_required',
+  'routing_table_refresher_installed',
+  ...ROUTING_TABLE_REFUSALS,
   'synthesis_output_identity_changed',
   'tenant_mismatch',
   'tenant_teardown_in_progress',

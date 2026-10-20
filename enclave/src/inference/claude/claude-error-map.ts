@@ -11,13 +11,12 @@ import {
   UPSTREAM_TIMEOUT_CAUSE,
   transportFailureOf,
 } from '../../egress/anthropic-transport-failure.js';
-import { ClaudeRouteError } from './claude-route-errors.js';
+import { inferenceOutageScope } from '../routing/inference-outage-scope.js';
 import {
-  CLAUDE_DEFERRABLE_CODES,
   CLAUDE_OPERATION_DEADLINE,
   CLAUDE_UPSTREAM_TIMEOUT,
-  claudeOutageScope,
-} from './claude-outage-scope.js';
+  ClaudeRouteError,
+} from './claude-route-errors.js';
 
 const HTTP_BAD_REQUEST = 400;
 const HTTP_UNAUTHORIZED = 401;
@@ -90,8 +89,10 @@ function fromStatus(error: APIError, context: ClaudeErrorContext): ClaudeRouteEr
     return new ClaudeRouteError('claude_credential_rejected');
   }
   if (HTTP_OVERLOADED_STATUSES.has(status))
-    return new ClaudeRouteError('claude_overloaded', status);
-  if (status >= SERVER_ERROR_FLOOR) return new ClaudeRouteError('claude_upstream_error');
+    return new ClaudeRouteError('claude_overloaded', status, undefined, true);
+  if (status >= SERVER_ERROR_FLOOR) {
+    return new ClaudeRouteError('claude_upstream_error', undefined, undefined, true);
+  }
   return status >= CLIENT_ERROR_FLOOR
     ? new ClaudeRouteError('claude_request_invalid')
     : new ClaudeRouteError('claude_upstream_error');
@@ -105,7 +106,7 @@ function rateLimited(error: APIError): ClaudeRouteError {
     Date.now(),
     MAX_RETRY_AFTER_MS,
   );
-  return new ClaudeRouteError('claude_rate_limited', HTTP_TOO_MANY_REQUESTS, retryAfterMs);
+  return new ClaudeRouteError('claude_rate_limited', HTTP_TOO_MANY_REQUESTS, retryAfterMs, true);
 }
 
 function limitReached(code: string): ClaudeRouteError {
@@ -142,7 +143,13 @@ function raiseAlarm(error: ClaudeRouteError, context: ClaudeErrorContext): void 
 
 function recordOutage(error: ClaudeRouteError, context: ClaudeErrorContext): void {
   if (RECORDED.has(error)) return;
-  if (!CLAUDE_DEFERRABLE_CODES.has(error.code) && error.code !== CLAUDE_OPERATION_DEADLINE) return;
+  const deferrable = error.deferral !== undefined;
+  if (!deferrable && !error.marksSlow) return;
   RECORDED.add(error);
-  claudeOutageScope.record({ code: error.code, upstream: context.upstream });
+  inferenceOutageScope.record({
+    code: error.code,
+    upstream: context.upstream,
+    deferrable,
+    marksSlow: error.marksSlow,
+  });
 }

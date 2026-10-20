@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import type { ClaudeArmId, ClaudeInferencePurpose } from '@folklore/contracts';
+import type { InferenceArmId, InferencePurpose } from '@folklore/contracts';
 
-export const DEFAULT_ARM = 'D' satisfies ClaudeArmId;
+export const DEFAULT_ARM = 'D' satisfies InferenceArmId;
 
 export interface CachedSystemPrefix {
   readonly salt: string;
@@ -11,8 +11,8 @@ export interface CachedSystemPrefix {
 }
 
 export interface InferencePurposeContext {
-  readonly purpose: ClaudeInferencePurpose;
-  readonly arm: ClaudeArmId;
+  readonly purpose: InferencePurpose;
+  readonly arm: InferenceArmId;
   readonly cachedSystemPrefix?: CachedSystemPrefix;
 }
 
@@ -31,7 +31,7 @@ class InferencePurposeStore {
 export const inferencePurposeScope = new InferencePurposeStore();
 
 export function withPurpose<T>(
-  purpose: ClaudeInferencePurpose,
+  purpose: InferencePurpose,
   fn: () => Promise<T>,
   prefix?: CachedSystemPrefix,
 ): Promise<T> {

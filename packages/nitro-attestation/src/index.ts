@@ -209,6 +209,11 @@ export {
   encodeSignedActivePolicyCarrierV1,
   signedActivePolicyCarrierArrayV1,
 } from './active-policy-carrier-canonical.js';
+export {
+  INFERENCE_ROUTING_TABLE_V1_DOMAIN,
+  digestInferenceRoutingTableV1,
+  inferenceRoutingTableSignatureInputV1,
+} from './inference-routing-table-canonical.js';
 export * from './tenant-policy-admission.js';
 export {
   attestationManifestSchema,

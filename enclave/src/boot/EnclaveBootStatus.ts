@@ -5,6 +5,7 @@ import { ENCLAVE_BOOT_STATUS_PATH } from './boot-status-path.js';
 import type { EnclaveBootStep } from './boot-steps.js';
 import { isRuntimeDatabaseActivationFailureCode } from '../runtime-database/runtime-database-failure-codes.js';
 import { errorClassCode, guardFailureCode } from './guard-failure-code.js';
+import { ROUTING_VERSION_IN_STATUS } from './routing-version-reporting.js';
 import { MESSAGE_FAILURE_REASONS } from '../tenant/message-failure/message-failure-reasons.js';
 
 const BOOT_FAILED = 'boot_failed';
@@ -52,10 +53,12 @@ export class EnclaveBootStatus {
   private messageFailures = 0;
   private causeRecordedAt = Number.NEGATIVE_INFINITY;
   private alarmRaisedAt = Number.NEGATIVE_INFINITY;
+  private routingVersion = 0;
 
   constructor(
     private readonly path: string = ENCLAVE_BOOT_STATUS_PATH,
     private readonly now: () => number = () => performance.now(),
+    private readonly reportRoutingVersion: boolean = ROUTING_VERSION_IN_STATUS,
   ) {}
 
   reach(phase: EnclaveBootPhase): void {
@@ -104,6 +107,12 @@ export class EnclaveBootStatus {
       this.lastMessageFailure = isFailureCodeSlug(named) ? named : POLICY_REFUSAL_PREFIX;
       this.causeRecordedAt = this.now();
     }
+    this.writeStatus();
+  }
+
+  recordRoutingVersion(version: number): void {
+    if (!Number.isSafeInteger(version) || version < 0) return;
+    this.routingVersion = version;
     this.writeStatus();
   }
 
@@ -186,6 +195,10 @@ export class EnclaveBootStatus {
     return ` last=${this.lastMessageFailure} n=${this.messageFailures}`;
   }
 
+  private routingVersionSuffix(): string {
+    return this.reportRoutingVersion ? ` rt=${this.routingVersion}` : '';
+  }
+
   private recordPhase(): void {
     const degraded = this.degradation === undefined ? '' : ` fatal=${this.degradation}`;
     this.record(`phase=${this.phase}${degraded}`);
@@ -193,7 +206,10 @@ export class EnclaveBootStatus {
 
   private record(line: string): void {
     try {
-      writeFileSync(this.path, `${line}${this.messageFailureSuffix()}\n`);
+      writeFileSync(
+        this.path,
+        `${line}${this.messageFailureSuffix()}${this.routingVersionSuffix()}\n`,
+      );
     } catch {
       // Visibility only: a status write must never be the thing that stops a boot.
     }

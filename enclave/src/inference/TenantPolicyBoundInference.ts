@@ -5,8 +5,13 @@ import type {
   TrustedTimeReadContext,
   TrustedTimeSample,
 } from '@folklore/inference';
-import type { Cache } from '@folklore/core';
+import type { Cache, Logger } from '@folklore/core';
 import { ServiceUnavailableError } from '@folklore/errors';
+import { ProviderRouteError } from '@folklore/inference';
+import {
+  inferenceOutageScope,
+  type InferenceOutageRecord,
+} from './routing/inference-outage-scope.js';
 import type {
   InferenceCallLabel,
   InferenceCallPhase,
@@ -24,12 +29,12 @@ import {
 } from '@folklore/inference';
 import { inferenceModel, inferenceModelRevision } from './phala.js';
 import { inferencePurposeScope } from './InferencePurposeScope.js';
-import { CLAUDE_TRANSIENT_STATUSES } from './claude/claude-route-errors.js';
 import {
   ACI_ROUTE,
   type InferenceRoute,
   type InferenceRouteResolver,
-} from './claude/InferenceRouteResolver.js';
+} from './routing/InferenceRouteResolver.js';
+import { PROVIDER_ROUTE_POLICY } from './routing/provider-route-policy.js';
 import type { SynthesisInference } from './CachedInference.js';
 import { llmCacheKey } from './llm-cache.js';
 import { TrustedTimeAuthorityError } from './TrustedTimeAuthority.js';
@@ -131,6 +136,8 @@ export interface TenantPolicyBoundInferenceOptions {
   readonly latencyProfile?: InferenceLatencyProfile;
   readonly upstreamGate?: UpstreamCallGate;
   readonly upstreamKeyFor?: (role: InferenceModelRole) => string | undefined;
+  readonly upstreamKeyForRoute?: (route: InferenceRoute) => string | undefined;
+  readonly logger?: Logger;
   readonly routeResolver?: InferenceRouteResolver;
   readonly structured?: (prompt: string, tool: ToolSpec, systemPrompt?: string) => Promise<unknown>;
   readonly onVerifiedBinding?: (
@@ -187,8 +194,10 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     temperature?: number,
     shouldCache?: (output: string) => boolean,
   ): Promise<string> {
-    return this.underRole('generate', () =>
-      this.generateUnderPolicy(prompt, systemPrompt, temperature, shouldCache),
+    return this.underRole(
+      'generate',
+      () => this.generateUnderPolicy(prompt, systemPrompt, temperature, shouldCache),
+      false,
     );
   }
 
@@ -197,8 +206,10 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     systemPrompt?: string,
     shouldCache?: (output: string) => boolean,
   ): Promise<string> {
-    return this.underRole('critique', () =>
-      this.critiqueUnderPolicy(prompt, systemPrompt, shouldCache),
+    return this.underRole(
+      'critique',
+      () => this.critiqueUnderPolicy(prompt, systemPrompt, shouldCache),
+      false,
     );
   }
 
@@ -207,29 +218,44 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     tool: ToolSpec,
     systemPrompt?: string,
   ): Promise<unknown> {
-    return this.underRole('judge', () => this.judgeUnderPolicy(prompt, tool, systemPrompt));
+    return this.underRole('judge', () => this.judgeUnderPolicy(prompt, tool, systemPrompt), false);
   }
 
   // The role is a closed policy name, so a failure code can say which provider call failed.
   // The gate wraps binding and the trusted-time read too, so a queued call never ages a checkpoint.
-  private async underRole<T>(role: InferenceModelRole, operation: () => Promise<T>): Promise<T> {
-    const gate = this.options.upstreamGate;
+  private async underRole<T>(
+    role: InferenceModelRole,
+    operation: () => Promise<T>,
+    gated = true,
+  ): Promise<T> {
     try {
-      return await (gate
-        ? gate.run(this.tenantId, operation, {
-            upstream: this.upstreamOf(role),
-            onWait: (wait) => this.timed('gate_wait', role, wait),
-          })
-        : operation());
+      return await (gated ? this.admitted(role, undefined, operation) : operation());
     } catch (error: unknown) {
       tagInferenceRole(error, role);
       throw error;
     }
   }
 
+  // A fallback-capable role admits each attempt under its own route's window, never the primary's.
+  private admitted<T>(
+    role: InferenceModelRole,
+    route: InferenceRoute | undefined,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const gate = this.options.upstreamGate;
+    if (!gate) return operation();
+    return gate.run(this.tenantId, operation, {
+      upstream: this.upstreamOf(role, route),
+      onWait: (wait) => this.timed('gate_wait', role, wait, route),
+    });
+  }
+
   // An unconfigured role has no model to key a window by; its refusal is the binding's to raise.
-  private upstreamOf(role: InferenceModelRole): string {
-    const keyed = this.options.upstreamKeyFor?.(role);
+  private upstreamOf(role: InferenceModelRole, route?: InferenceRoute): string {
+    const keyed =
+      route?.kind === 'provider' && this.options.upstreamKeyForRoute
+        ? this.options.upstreamKeyForRoute(route)
+        : this.options.upstreamKeyFor?.(role);
     if (keyed !== undefined) return keyed;
     try {
       return inferenceModel(role);
@@ -260,8 +286,31 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     temperature?: number,
     shouldCache?: (output: string) => boolean,
   ): Promise<string> {
-    const { binding, snapshot } = await this.bindingFor('generate');
-    const route = this.routeFor('generate');
+    return this.withFallback(this.routeChainFor('generate'), (route) =>
+      this.admitted('generate', route, async () => {
+        const { binding, snapshot } = await this.bindingFor('generate');
+        return this.generateOnRoute(
+          binding,
+          snapshot,
+          route,
+          prompt,
+          systemPrompt,
+          temperature,
+          shouldCache,
+        );
+      }),
+    );
+  }
+
+  private async generateOnRoute(
+    binding: VerifiedActivePolicyRoleBindingV1,
+    snapshot: VerifiedActivePolicySnapshotV1,
+    route: InferenceRoute,
+    prompt: string,
+    systemPrompt?: string,
+    temperature?: number,
+    shouldCache?: (output: string) => boolean,
+  ): Promise<string> {
     const cache = this.operationCache;
     const generateOnce = (resolvedTemperature: number | undefined) =>
       this.runTransient('generate', route, async () =>
@@ -274,7 +323,7 @@ export class TenantPolicyBoundInference implements SynthesisInference {
       );
     if (!cache) return generateOnce(temperature);
     const resolvedTemperature =
-      route.kind === 'claude'
+      route.kind === 'provider'
         ? undefined
         : this.validateTemperature(snapshot, binding, temperature);
     const key = this.cacheKey(
@@ -300,8 +349,22 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     systemPrompt?: string,
     shouldCache?: (output: string) => boolean,
   ): Promise<string> {
-    const { binding, snapshot } = await this.bindingFor('critique');
-    const route = this.routeFor('critique');
+    return this.withFallback(this.routeChainFor('critique'), (route) =>
+      this.admitted('critique', route, async () => {
+        const { binding, snapshot } = await this.bindingFor('critique');
+        return this.critiqueOnRoute(binding, snapshot, route, prompt, systemPrompt, shouldCache);
+      }),
+    );
+  }
+
+  private async critiqueOnRoute(
+    binding: VerifiedActivePolicyRoleBindingV1,
+    snapshot: VerifiedActivePolicySnapshotV1,
+    route: InferenceRoute,
+    prompt: string,
+    systemPrompt?: string,
+    shouldCache?: (output: string) => boolean,
+  ): Promise<string> {
     const cache = this.operationCache;
     const critiqueOnce = () =>
       this.runTransient('critique', route, async () =>
@@ -336,20 +399,67 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     tool: ToolSpec,
     systemPrompt?: string,
   ): Promise<unknown> {
-    const { binding, snapshot } = await this.bindingFor('judge');
-    const route = this.routeFor('judge');
-    return this.runTransient('judge', route, async () => {
-      const structured = this.options.backendForVerifiedBinding
-        ? (await this.backendFor(binding, snapshot, route)).generateStructured
-        : this.options.structured;
-      if (!structured) {
-        throw this.refuse(
-          snapshot,
-          new TenantPolicyBoundInferenceError('active_policy_snapshot_refresh_failed'),
-        );
+    return this.withFallback(this.routeChainFor('judge'), (route) =>
+      this.admitted('judge', route, async () => {
+        const { binding, snapshot } = await this.bindingFor('judge');
+        return this.runTransient('judge', route, async () => {
+          const structured = this.options.backendForVerifiedBinding
+            ? (await this.backendFor(binding, snapshot, route)).generateStructured
+            : this.options.structured;
+          if (!structured) {
+            throw this.refuse(
+              snapshot,
+              new TenantPolicyBoundInferenceError('active_policy_snapshot_refresh_failed'),
+            );
+          }
+          return structured(prompt, tool, systemPrompt);
+        });
+      }),
+    );
+  }
+
+  private async withFallback<T>(
+    chain: readonly InferenceRoute[],
+    attempt: (route: InferenceRoute) => Promise<T>,
+  ): Promise<T> {
+    const unanswered: InferenceOutageRecord[] = [];
+    let index = 0;
+    for (;;) {
+      const route = chain[index] ?? ACI_ROUTE;
+      const next = chain[index + 1];
+      const tracked = inferenceOutageScope.attempt(() => attempt(route));
+      try {
+        const result = await tracked.result;
+        inferenceOutageScope.discard(unanswered);
+        return result;
+      } catch (error) {
+        if (
+          next === undefined ||
+          !(error instanceof ProviderRouteError && error.fallbackEligible)
+        ) {
+          throw error;
+        }
+        unanswered.push(...tracked.made());
+        this.noteFallback(route, next);
+        index += 1;
       }
-      return structured(prompt, tool, systemPrompt);
+    }
+  }
+
+  private noteFallback(from: InferenceRoute, to: InferenceRoute): void {
+    this.logFallback(from, to);
+    if (inferenceOutageScope.firstFallbackInMessage()) this.options.routeResolver?.noteFallback();
+  }
+
+  private logFallback(from: InferenceRoute, to: InferenceRoute): void {
+    this.options.logger?.warn('inference_route_fallback', {
+      ...(from.kind === 'provider' ? { purpose: from.purpose } : {}),
+      model: this.catalogLabel(to),
     });
+  }
+
+  private catalogLabel(route: InferenceRoute): string {
+    return route.kind === 'provider' ? route.model : 'aci';
   }
 
   private runTransient<T>(
@@ -360,41 +470,53 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     return this.transientRetry.run(
       operation,
       this.retryWindows(role),
-      this.backoffTimer(role),
-      route.kind === 'claude' ? CLAUDE_TRANSIENT_STATUSES : undefined,
+      this.backoffTimer(role, route),
+      route.kind === 'provider'
+        ? PROVIDER_ROUTE_POLICY[route.provider].transientStatuses
+        : undefined,
     );
   }
 
   private routeFor(role: InferenceModelRole): InferenceRoute {
-    return this.options.routeResolver?.resolve(role, inferencePurposeScope.current()) ?? ACI_ROUTE;
+    return this.routeChainFor(role)[0] ?? ACI_ROUTE;
+  }
+
+  private routeChainFor(role: InferenceModelRole): readonly InferenceRoute[] {
+    return (
+      this.options.routeResolver?.routeChain(
+        role,
+        inferencePurposeScope.current(),
+        this.tenantId,
+      ) ?? [ACI_ROUTE]
+    );
   }
 
   private modelOf(binding: VerifiedActivePolicyRoleBindingV1, route: InferenceRoute): string {
-    return route.kind === 'claude' ? route.model : binding.modelId;
+    return route.kind === 'provider' ? route.model : binding.modelId;
   }
 
   private retryWindows(role: InferenceModelRole): TransientRetryWindows {
     return transientRetryWindows(role, this.options.latencyProfile ?? 'batch');
   }
 
-  private backoffTimer(role: InferenceModelRole): BackoffObserver {
-    return (backoff) => this.timed('retry_backoff', role, backoff);
+  private backoffTimer(role: InferenceModelRole, route: InferenceRoute): BackoffObserver {
+    return (backoff) => this.timed('retry_backoff', role, backoff, route);
   }
 
   private timed<T>(
     phase: InferenceCallPhase,
     role: InferenceModelRole,
     step: () => Promise<T>,
+    route: InferenceRoute = this.routeFor(role),
   ): Promise<T> {
     const timer = this.options.timer;
-    return timer ? timer(phase, this.callLabel(role), step) : step();
+    return timer ? timer(phase, this.callLabel(role, route), step) : step();
   }
 
   // An unconfigured role has no model id to report; its refusal is the binding's to raise, not the label's.
-  private callLabel(role: InferenceModelRole): InferenceCallLabel {
+  private callLabel(role: InferenceModelRole, route: InferenceRoute): InferenceCallLabel {
     const label = { role, operation: INFERENCE_OPERATION_BY_ROLE[role] };
-    const route = this.routeFor(role);
-    if (route.kind === 'claude') return { model: route.model, ...label };
+    if (route.kind === 'provider') return { model: route.model, ...label };
     try {
       return { model: inferenceModel(role), ...label };
     } catch {
@@ -442,10 +564,10 @@ export class TenantPolicyBoundInference implements SynthesisInference {
 
   // A route that is not the policy's own adds its identity, so an entry never crosses routes.
   private routeNamespace(route: InferenceRoute): Record<string, unknown> {
-    if (route.kind !== 'claude') return {};
+    if (route.kind !== 'provider') return {};
     const prefix = inferencePurposeScope.current()?.cachedSystemPrefix;
     return {
-      route: route.kind,
+      route: PROVIDER_ROUTE_POLICY[route.provider].cacheRouteLabel,
       routeModel: route.model,
       purpose: route.purpose,
       effort: route.effort,

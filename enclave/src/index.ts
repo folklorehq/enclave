@@ -93,7 +93,12 @@ import { OperationAuthority } from './inference/OperationAuthority.js';
 import { AttestedSsmParameterReader } from './attestation/AttestedSsmParameterReader.js';
 import { ClaudeRouteComposition } from './inference/claude/ClaudeRouteComposition.js';
 import { CLAUDE_ROUTE_CONFIG_INVALID } from './inference/claude/claude-route-errors.js';
-import { InferenceRouteResolver } from './inference/claude/InferenceRouteResolver.js';
+import { InferenceRouteResolver } from './inference/routing/InferenceRouteResolver.js';
+import { AwsRoutingParameterReader } from './inference/routing/AwsRoutingParameterReader.js';
+import { RoutingTableRefresher } from './inference/routing/RoutingTableRefresher.js';
+import { RoutingTableVerifier } from './inference/routing/RoutingTableVerifier.js';
+import { routingParameterArn } from './inference/routing/routing-parameter-arn.js';
+import { ProviderRouteRegistry } from './inference/routing/ProviderRouteRegistry.js';
 import { claudeCredentialLoadErrors } from './inference/claude/ClaudeCredentialSource.js';
 import { poolPolicyPortsFrom } from './inference/tenant-inference-builders.js';
 import { TenantPolicyWiring } from './tenant/TenantPolicyWiring.js';
@@ -144,6 +149,7 @@ import {
   poolAssignmentGenerationFloorKey,
   poolAssignmentsKey,
   type CanaryAuthorizationOutcomeProof,
+  type InferenceProviderId,
   type NormalizedAssignmentManifestV1,
 } from '@folklore/contracts';
 import type { RuntimeDatabaseConfig } from '@folklore/contracts/enclave-attestation';
@@ -345,7 +351,14 @@ function activePolicyRuntimeEvidenceFor(tenantId: string): TenantPolicyRuntimeEv
   return policyWiring.runtimeEvidenceFor(tenantId);
 }
 
-const claudeRoutes = new InferenceRouteResolver();
+const routingTables = new RoutingTableRefresher({
+  onAlarm: (alarm) => bootStatus.recordAlarm(alarm),
+  onApplied: (version) => {
+    logger.info('inference_routing_table_applied', { revision: version });
+    bootStatus.recordRoutingVersion(version);
+  },
+});
+const claudeRoutes = new InferenceRouteResolver(routingTables);
 if (claudeRoutes.invalidReason !== undefined) bootStatus.recordAlarm(CLAUDE_ROUTE_CONFIG_INVALID);
 const claudeComposition = new ClaudeRouteComposition({
   resolver: claudeRoutes,
@@ -358,6 +371,8 @@ const claudeComposition = new ClaudeRouteComposition({
   manifest: () => verifiedBootManifest,
   onAlarm: (code: string) => bootStatus.recordAlarm(code),
 });
+
+const providerRoutes = new ProviderRouteRegistry([claudeComposition]);
 
 function activePolicyBackendFor(
   tenantId: string,
@@ -372,7 +387,7 @@ function activePolicyBackendFor(
       throw new Error('public_aci_runtime_authority_unavailable');
     }
     const bootEpoch = String(runtimeAttestation.bootSessionState().bootEpoch);
-    if (route?.kind === 'claude') {
+    if (route?.kind === 'provider') {
       const authority = new OperationAuthority({
         tenantId,
         freshness,
@@ -380,7 +395,11 @@ function activePolicyBackendFor(
         latencyProfile,
         providerPolicyGeneration: inferenceTrustPolicyV2Schema.parse(providerPolicy).generation,
       });
-      return claudeComposition.backendFactory(authority)(binding, snapshot, route);
+      return providerRoutes.adapterFor(route.provider).backendFactory(authority)(
+        binding,
+        snapshot,
+        route,
+      );
     }
     const factory = createPublicAciRuntimeBackendFactory({
       providerPolicy,
@@ -686,6 +705,27 @@ runtimeAttestation = await initializeRuntimeAttestationForBoot(
         bootTrust: activePolicyBootTrust,
         kms,
       });
+      routingTables.install(
+        new RoutingTableVerifier(
+          {
+            keyVerifier: activePolicyTrust.keyVerifier,
+            authorityKeyId: activePolicyTrust.authority.keyId,
+            awsAccountId: bootManifest.awsAccountId,
+            awsRegion: bootManifest.awsRegion,
+            expectedParameterArn: routingParameterArn(bootManifest),
+          },
+          new Set<InferenceProviderId>([
+            'phala',
+            ...providerRoutes
+              .providers()
+              .filter((provider) => providerRoutes.adapterFor(provider).enabled),
+          ]),
+          new Set<string>(claudeRoutes.allowedModels()),
+        ),
+        new AwsRoutingParameterReader(ssm, routingParameterArn(bootManifest)),
+      );
+      routingTables.start();
+      void routingTables.refreshOnce();
       const sharedCarrierVerifier = new ActivePolicyCarrierVerifier(activePolicyTrust.keyVerifier, {
         authority: activePolicyTrust.authority,
         carrierSigner: activePolicyTrust.carrierSigner,
@@ -1540,6 +1580,7 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
     activePolicyBindingForwarderFor,
     activePolicyBackendFor,
     claudeRoutes,
+    providerRoutes,
     upstreamPaused: (upstream) => (upstreamGate?.pauseRemainingMs(upstream) ?? 0) > 0,
     enforceTenantPolicy: isSharedPool,
     upstreamGate,

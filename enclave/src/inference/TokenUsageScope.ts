@@ -13,7 +13,7 @@ import {
   type InferenceTiming,
   type TokenUsage,
 } from '@folklore/contracts/enclave';
-import type { ClaudeInferencePurpose, InferenceUsageOutcome } from '@folklore/contracts';
+import type { InferencePurpose, InferenceUsageOutcome } from '@folklore/contracts';
 import { inferencePurposeScope } from './InferencePurposeScope.js';
 import { InferenceTimeline, type SpanFailure } from './timing/InferenceTimeline.js';
 import { reportUpstreamUsage } from './upstream-observation.js';
@@ -47,7 +47,7 @@ const AGGREGATED_PHASES: ReadonlyMap<InferenceSpanPhase, readonly [TimedSum, Tim
 export type SpanFailureClassifier = (error: unknown) => SpanFailure;
 
 interface UsageLabel {
-  readonly purpose: ClaudeInferencePurpose | typeof UNTAGGED;
+  readonly purpose: InferencePurpose | typeof UNTAGGED;
   readonly outcome: InferenceUsageOutcome;
 }
 

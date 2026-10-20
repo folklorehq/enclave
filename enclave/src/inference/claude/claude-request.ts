@@ -1,4 +1,4 @@
-import type { ClaudeEffort } from '@folklore/contracts';
+import type { InferenceEffort } from '@folklore/contracts';
 import type { ToolSpec } from '@folklore/inference';
 import type { CachedSystemPrefix } from '../InferencePurposeScope.js';
 import { CLAUDE_CHECK_PURPOSES } from './claude-checker-rules.js';
@@ -10,7 +10,7 @@ import {
   claudeMaxTokens,
 } from './claude-purpose-limits.js';
 import { assertRegisteredSchema, closedOutputSchema } from './claude-structured-schemas.js';
-import type { ClaudeRoute } from './InferenceRouteResolver.js';
+import type { AnthropicRoute } from './anthropic-route.js';
 
 const CLAUDE_INFERENCE_GEO = 'us';
 const HAIKU_MODEL = 'claude-haiku-5-5';
@@ -31,7 +31,7 @@ export interface ClaudeRequestBody {
   readonly system?: string | TextBlock[];
   readonly messages: { role: 'user'; content: string }[];
   readonly output_config: {
-    readonly effort: ClaudeEffort;
+    readonly effort: InferenceEffort;
     readonly format?: { readonly type: 'json_schema'; readonly schema: Record<string, unknown> };
   };
   readonly inference_geo: typeof CLAUDE_INFERENCE_GEO;
@@ -39,7 +39,7 @@ export interface ClaudeRequestBody {
 }
 
 export interface ClaudeRequestInput {
-  readonly route: ClaudeRoute;
+  readonly route: AnthropicRoute;
   readonly prompt: string;
   readonly systemPrompt?: string;
   readonly structured?: ToolSpec;
@@ -72,7 +72,7 @@ function formatFor(tool: ToolSpec): NonNullable<ClaudeRequestBody['output_config
   };
 }
 
-function offThinking(route: ClaudeRoute): boolean {
+function offThinking(route: AnthropicRoute): boolean {
   return (
     route.model === SONNET_MODEL &&
     !CLAUDE_WRITING_PURPOSES.has(route.purpose) &&

@@ -3,7 +3,6 @@ import {
   type InferenceModelRole,
   type InferenceUsageSink,
   type VerifiedActivePolicyRoleBindingV1,
-  type VerifiedActivePolicySnapshotV1,
 } from '@folklore/inference';
 import type { AnthropicTransport } from '../../egress/anthropic-transport.js';
 import { inferencePurposeScope } from '../InferencePurposeScope.js';
@@ -13,27 +12,23 @@ import { recordTokenUsage } from '../TokenUsageScope.js';
 import { observeUpstreamFetch } from '../upstream-observation.js';
 import type { ClaudeCredentialSource } from './ClaudeCredentialSource.js';
 import { ClaudeMessagesBackend } from './ClaudeMessagesBackend.js';
-import { ClaudeRouteError } from './claude-route-errors.js';
-import { mapClaudeError, type ClaudeErrorContext } from './claude-error-map.js';
-import { CLAUDE_OPERATION_DEADLINE } from './claude-outage-scope.js';
-import { claudeTimeoutMs } from './claude-purpose-limits.js';
 import {
-  UPSTREAM_KEY_PREFIX,
-  type ClaudeRoute,
-  type InferenceRouteResolver,
-} from './InferenceRouteResolver.js';
+  CLAUDE_OPERATION_DEADLINE,
+  CLAUDE_ROUTE_PROVIDER_MISMATCH,
+  ClaudeRouteError,
+} from './claude-route-errors.js';
+import { mapClaudeError, type ClaudeErrorContext } from './claude-error-map.js';
+import { claudeTimeoutMs } from './claude-purpose-limits.js';
+import type { InferenceRouteResolver } from '../routing/InferenceRouteResolver.js';
+import { PROVIDER_ROUTE_POLICY } from '../routing/provider-route-policy.js';
+import type { ProviderRouteBackendFactory } from '../routing/ProviderRouteRegistry.js';
+import { isAnthropicRoute, type AnthropicRoute } from './anthropic-route.js';
 
 const MESSAGES_PATH = '/v1/messages';
 const HIGH_WATER_STALE = 'claude_high_water_stale';
 const HIGH_WATER_UNAVAILABLE = 'claude_high_water_unavailable';
 const MOVED_HEAD_PREFIX = 'active_policy_';
 const MOVED_HEAD_MESSAGES: ReadonlySet<string> = new Set(['checkpoint_not_pinned']);
-
-export type ClaudeRouteBackendFactory = (
-  binding: VerifiedActivePolicyRoleBindingV1,
-  snapshot: VerifiedActivePolicySnapshotV1,
-  route: ClaudeRoute,
-) => Promise<TenantPolicyOperationBackend>;
 
 export interface ClaudeOperationBackendFactoryDeps {
   readonly resolver: InferenceRouteResolver;
@@ -54,8 +49,9 @@ const isMessagesPost = (url: URL, init?: RequestInit): boolean =>
 
 export function createClaudeOperationBackendFactory(
   deps: ClaudeOperationBackendFactoryDeps,
-): ClaudeRouteBackendFactory {
+): ProviderRouteBackendFactory {
   return async (binding, snapshot, route) => {
+    if (!isAnthropicRoute(route)) throw new ClaudeRouteError(CLAUDE_ROUTE_PROVIDER_MISMATCH);
     if (!deps.resolver.enabled) throw new ClaudeRouteError('claude_route_disabled');
     if (!deps.resolver.allowedModels().includes(route.model)) {
       throw new ClaudeRouteError('claude_model_not_allowed');
@@ -73,11 +69,11 @@ class ClaudeOperation {
   constructor(
     private readonly deps: ClaudeOperationBackendFactoryDeps,
     private readonly binding: VerifiedActivePolicyRoleBindingV1,
-    private readonly route: ClaudeRoute,
+    private readonly route: AnthropicRoute,
     private readonly admission: OperationAdmission,
   ) {
     this.errorContext = {
-      upstream: `${UPSTREAM_KEY_PREFIX}${route.model}`,
+      upstream: `${PROVIDER_ROUTE_POLICY.anthropic.upstreamKeyPrefix}${route.model}`,
       budgetExpired: () => this.budgetExpired(),
       onCredentialRejected: () => this.credentialSource().invalidate('rejected'),
       ...(deps.onAlarm === undefined ? {} : { onAlarm: deps.onAlarm }),

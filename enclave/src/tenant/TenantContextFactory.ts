@@ -36,7 +36,7 @@ import {
   poolPolicyBoundInference,
   poolPolicyPortsFrom,
 } from '../inference/tenant-inference-builders.js';
-import type { InferenceRouteResolver } from '../inference/claude/InferenceRouteResolver.js';
+import type { InferenceRouteResolver } from '../inference/routing/InferenceRouteResolver.js';
 import { TenantContext } from './tenant-context.js';
 
 export interface TenantIdentity {

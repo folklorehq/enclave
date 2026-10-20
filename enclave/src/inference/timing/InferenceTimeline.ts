@@ -7,10 +7,11 @@ import {
   type InferenceSpanPhase,
   type InferenceTimeline as InferenceTimelineWire,
 } from '@folklore/contracts/enclave';
-import { DEFAULT_VERIFIED_MODELS, type InferenceModelRole } from '@folklore/inference';
+import { INFERENCE_MODEL_IDS } from '@folklore/contracts';
+import type { InferenceModelRole } from '@folklore/inference';
 
 // The id pattern admits any identifier-shaped string, so a span names only a reviewed model.
-const NAMEABLE_MODELS: ReadonlySet<string> = new Set(DEFAULT_VERIFIED_MODELS);
+const NAMEABLE_MODELS: ReadonlySet<string> = new Set<string>(INFERENCE_MODEL_IDS);
 const UNLISTED_MODEL = 'unknown';
 
 export interface SpanFailure {

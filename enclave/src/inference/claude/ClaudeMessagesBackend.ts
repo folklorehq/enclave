@@ -6,7 +6,7 @@ import { ClaudeRouteError } from './claude-route-errors.js';
 import { claudeIdentityMismatch } from './ClaudeCredentialSource.js';
 import { mapClaudeError, type ClaudeErrorContext } from './claude-error-map.js';
 import { buildClaudeRequest, type ClaudeRequestInput } from './claude-request.js';
-import type { ClaudeRoute } from './InferenceRouteResolver.js';
+import type { AnthropicRoute } from './anthropic-route.js';
 
 type CreatedMessage = Anthropic.Message;
 
@@ -15,7 +15,7 @@ const NO_RETRIES = 0;
 const END_TURNS: ReadonlySet<string> = new Set(['end_turn', 'stop_sequence']);
 
 export interface ClaudeMessagesBackendDeps {
-  readonly route: ClaudeRoute;
+  readonly route: AnthropicRoute;
   readonly apiKey: string;
   readonly fetch: typeof globalThis.fetch;
   readonly timeoutMs: number;

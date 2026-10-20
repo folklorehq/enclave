@@ -5,11 +5,16 @@ import {
 } from '../../egress/anthropic-transport.js';
 import type { OperationAuthority } from '../OperationAuthority.js';
 import { ClaudeCredentialSource, type ClaudeCredentialManifest } from './ClaudeCredentialSource.js';
-import {
-  createClaudeOperationBackendFactory,
-  type ClaudeRouteBackendFactory,
-} from './ClaudeOperationBackendFactory.js';
-import type { InferenceRouteResolver } from './InferenceRouteResolver.js';
+import type { InferenceRouteResolver } from '../routing/InferenceRouteResolver.js';
+import type {
+  ProviderRouteAdapter,
+  ProviderRouteBackendFactory,
+  ProviderSizeInput,
+} from '../routing/ProviderRouteRegistry.js';
+import { createClaudeOperationBackendFactory } from './ClaudeOperationBackendFactory.js';
+import { isAnthropicRoute } from './anthropic-route.js';
+import { fitsModel } from './claude-request.js';
+import { CLAUDE_ROUTE_PROVIDER_MISMATCH, ClaudeRouteError } from './claude-route-errors.js';
 
 export interface ClaudeRouteCompositionDeps {
   readonly resolver: InferenceRouteResolver;
@@ -23,13 +28,24 @@ const defaultTransport = (allowedModels: readonly string[]): AnthropicTransport 
   createAnthropicTransport({ allowedModels });
 
 /** Builds the transport and key source only when a call first takes the Claude route, so a disabled route never reads the key. */
-export class ClaudeRouteComposition {
+export class ClaudeRouteComposition implements ProviderRouteAdapter {
+  readonly provider = 'anthropic' as const;
   private transport: AnthropicTransport | undefined;
   private credentials: ClaudeCredentialSource | undefined;
 
   constructor(private readonly deps: ClaudeRouteCompositionDeps) {}
 
-  backendFactory(authority: OperationAuthority): ClaudeRouteBackendFactory {
+  get enabled(): boolean {
+    return this.deps.resolver.enabled;
+  }
+
+  fitsModel(input: ProviderSizeInput): boolean {
+    const { route } = input;
+    if (!isAnthropicRoute(route)) throw new ClaudeRouteError(CLAUDE_ROUTE_PROVIDER_MISMATCH);
+    return fitsModel({ ...input, route });
+  }
+
+  backendFactory(authority: OperationAuthority): ProviderRouteBackendFactory {
     return createClaudeOperationBackendFactory({
       resolver: this.deps.resolver,
       authority,
