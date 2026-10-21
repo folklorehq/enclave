@@ -55,13 +55,16 @@ export function parseTenantAssignments(env: NodeJS.ProcessEnv): TenantAssignment
   return assignments;
 }
 
-/** Boot-time assigned set: a shared pool (POOL_ID set) learns its tenants from the runtime manifest on the check-in channel (§4.3), so an empty env is valid — it boots with zero tenants and the applier fills it. A dedicated box stays env-configured and must not boot empty. */
+export const SHARED_POOL_ENV_ASSIGNMENTS_REFUSED = 'shared_pool_env_assignments_refused';
+
+/** A pool boots with zero tenants and refuses env assignments; only a dedicated box reads them. */
 export function resolveBootAssignments(env: NodeJS.ProcessEnv): TenantAssignment[] {
   const isPool = (env['POOL_ID']?.trim() ?? '') !== '';
+  if (!isPool) return parseTenantAssignments(env);
   const hasEnvSet =
     (env['TENANT_ASSIGNMENTS']?.trim() ?? '') !== '' || (env['TENANT_ID']?.trim() ?? '') !== '';
-  if (isPool && !hasEnvSet) return [];
-  return parseTenantAssignments(env);
+  if (hasEnvSet) throw new Error(SHARED_POOL_ENV_ASSIGNMENTS_REFUSED);
+  return [];
 }
 
 /** Validates a check-in-delivered assignment manifest (design §4.3) via the shared routing guard, then enforces the registry's no-duplicate-tenant invariant. */

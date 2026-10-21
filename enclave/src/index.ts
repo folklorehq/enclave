@@ -246,6 +246,7 @@ import {
 import { EnclaveBootStatus } from './boot/EnclaveBootStatus.js';
 import { enclaveOutputSignerFailureCode } from './boot/enclave-output-signer-failure-code.js';
 import { bootModuleLoadGuard } from './boot/boot-module-load-guard.js';
+import { assertDedicatedModeRetired, assertSharedPoolIdentity } from './boot/boot-mode.js';
 import { InferenceApiKeyLoader } from './boot/InferenceApiKeyLoader.js';
 
 const bootStatus = new EnclaveBootStatus();
@@ -320,10 +321,11 @@ async function loadAgentToken(): Promise<void> {
 }
 
 // A shared pool (POOL_ID set) learns its assigned tenants from the content-free manifest on the
-// check-in channel (§4.3); a dedicated box (default tier §6.1) is env-configured. So POOL_ID + empty
-// env is valid — it boots with zero tenants and the applier fills the registry from the manifest.
+// check-in channel (§4.3) and boots with zero tenants; production refuses a boot without POOL_ID,
+// so the env-configured dedicated box only exists in development and test.
 const POOL_ID = process.env['POOL_ID']?.trim() ?? '';
 const isSharedPool = POOL_ID.length > 0;
+assertDedicatedModeRetired({ nodeEnv: process.env['NODE_ENV'], poolId: POOL_ID });
 
 const ASSIGNMENT_MANIFEST_PUBLIC_KEY = process.env['ASSIGNMENT_MANIFEST_PUBLIC_KEY'] ?? '';
 
@@ -712,6 +714,12 @@ runtimeAttestation = await initializeRuntimeAttestationForBoot(
   async (prepared) => {
     bootStatus.begin('boot_policy_load');
     verifiedBootManifest = prepared?.verifiedManifest();
+    assertSharedPoolIdentity({
+      nodeEnv: process.env['NODE_ENV'],
+      poolId: POOL_ID,
+      verifiedOrgId: verifiedBootManifest?.orgId,
+      verifiedDeploymentId: verifiedBootManifest?.deploymentId,
+    });
     const bootManifest = verifiedBootManifest;
     if (isSharedPool && process.env['NODE_ENV'] === 'production') {
       if (!bootManifest?.generationHighWaterRuntimeConfig) {
