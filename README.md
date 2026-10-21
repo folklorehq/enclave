@@ -4,7 +4,7 @@ This repository contains the source code that runs inside the Folklore **Nitro E
 
 ## What this is
 
-Folklore ingests activity from your connected tools (Slack, GitHub, Linear, etc.) and synthesizes it into audience-tiered wikis. Payload content is encrypted before it reaches Folklore-operated storage. This enclave is the primary Folklore-managed plaintext-processing boundary; configured confidential inference is a separate, content-bearing processing path. Generation can run on an inference provider under its commercial API terms when the compiled route enables it, which is a contractual protection and not a hardware-attested one.
+Folklore ingests activity from your connected tools (Slack, GitHub, Linear, etc.) and synthesizes it into audience-tiered wikis. Payload content is encrypted before it reaches Folklore-operated storage. This enclave is the primary Folklore-managed plaintext-processing boundary; configured confidential inference is a separate, content-bearing processing path. Generation can run on an inference provider under its commercial API terms when the compiled route enables it, which is a contractual protection and not a hardware-attested one. Embeddings are computed the same way: the text to embed goes to a third-party embeddings API over a TLS session that ends inside the enclave, under that provider's standard API terms.
 
 This repository covers the **trust-verification boundary**: the code that seals and unseals keys, decrypts ingest payloads, and verifies the enclave's own identity to AWS KMS.
 
