@@ -11,6 +11,7 @@ import {
   type DocumentBodyMode,
   type PullConnectorDeps,
   type PullOptions,
+  type PullResult,
   type SyncCursor,
 } from '@folklore/connectors';
 import { NOTION_KIND, supportsPerPersonMode } from '@folklore/contracts';
@@ -45,6 +46,7 @@ import {
 import type { ExportedPageRefReaderPort } from './ExportedPageRefReader.js';
 import { S3PullCursorStore } from './S3PullCursorStore.js';
 import { boundGitHubInstallationId } from './github-installation-binding.js';
+import { buildPullRunStats, type PullRunStats } from './pull-run-stats.js';
 
 export type { PullDueMessage };
 
@@ -135,7 +137,7 @@ export function resolvePullWindow(
 ): PullWindow {
   const since = new Date(now);
   since.setUTCMonth(since.getUTCMonth() - BACKFILL_WINDOW_MONTHS);
-  return { cursor: { value: backfill ? null : storedCursor }, options: { since } };
+  return { cursor: { value: backfill ? null : storedCursor }, options: { since, backfill } };
 }
 
 export interface PullRunnerDeps {
@@ -166,6 +168,7 @@ export type PullRunResult =
       facts: ProcessedFact[];
       cursor: string | null;
       hasMore: boolean;
+      stats: PullRunStats;
       sourceId: string;
       sourceKind: string;
       persistCursor(): Promise<void>;
@@ -503,10 +506,12 @@ export async function runPull(
     return superseded(message);
   }
 
+  const startedAt = Date.now();
   const isCode = message.kind === 'code';
-  const usesSealedCursor = isCode || memberScope !== undefined;
+  const usesSealedCursor = isCode || memberScope !== undefined || message.kind === NOTION_KIND;
   // The code cursor loads BEFORE the mint so a mint-403 early return can bump its tick.
-  const storedCursor = usesSealedCursor ? await loadSealedCursor(deps, message) : null;
+  const sealedCursor =
+    usesSealedCursor && message.kind !== NOTION_KIND ? await loadSealedCursor(deps, message) : null;
 
   const token = await resolveSourceToken(
     message.kind,
@@ -537,9 +542,7 @@ export async function runPull(
   const window = budgetedWindow(
     resolvePullWindow(
       message.backfill,
-      usesSealedCursor
-        ? storedCursor
-        : await loadCursor(deps.ssm, message.tenant_id, message.sourceId),
+      message.backfill ? null : await resumeCursor(deps, message, usesSealedCursor, sealedCursor),
     ),
   );
   const result = await pullWithRefresh(
@@ -554,9 +557,8 @@ export async function runPull(
     bodyPolicy,
   );
 
-  const cursor = result.earlyReturn
-    ? advanceCodeCursorTick(result.cursor.value)
-    : result.cursor.value;
+  const cursor =
+    result.earlyReturn && isCode ? advanceCodeCursorTick(result.cursor.value) : result.cursor.value;
   await reconcileJiraWebhook(message, deps, result.connection);
   const facts = memberScope
     ? await deps.pipeline.handlePulled(
@@ -567,22 +569,61 @@ export async function runPull(
         memberScope,
       )
     : await deps.pipeline.handlePulled(result.facts, result.containers, message.kind, deps.signal);
+  // A connector that claims more without moving its cursor would loop, so only progress counts.
+  const hasMore =
+    result.hasMore && !result.earlyReturn && cursorProgressed(isCode, window.cursor.value, cursor);
   return {
     outcome: 'processed',
     facts,
     cursor,
-    // A connector that claims more without moving its cursor would loop, so only progress counts.
-    hasMore: result.hasMore && !result.earlyReturn && cursor !== window.cursor.value,
+    hasMore,
+    stats: buildPullRunStats({
+      pulled: result.facts,
+      processed: facts,
+      connectorStats: result.stats,
+      durationMs: Date.now() - startedAt,
+      hasMore,
+      backfill: message.backfill,
+    }),
     sourceId: message.sourceId,
     sourceKind: message.kind,
     persistCursor: async () => {
       if (usesSealedCursor) {
-        await saveSealedCursor(deps, message, cursor);
+        await saveSealedCursor(
+          deps,
+          message,
+          message.kind === NOTION_KIND ? (cursor ?? '') : cursor,
+        );
         return;
       }
       await saveCursor(deps.ssm, message.tenant_id, message.sourceId, cursor);
     },
   };
+}
+
+function cursorProgressed(isCode: boolean, previous: string | null, next: string | null): boolean {
+  return isCode ? code.codeCursorProgressed(previous, next) : next !== previous;
+}
+
+async function resumeCursor(
+  deps: PullRunnerDeps,
+  message: PullDueMessage,
+  usesSealedCursor: boolean,
+  sealedCursor: string | null,
+): Promise<string | null> {
+  if (message.kind === NOTION_KIND) return loadNotionCursor(deps, message);
+  if (!usesSealedCursor) return loadCursor(deps.ssm, message.tenant_id, message.sourceId);
+  return sealedCursor;
+}
+
+// Notion moved from SSM to the sealed store: SSM is read only while no sealed object exists, and an unreadable one fails the pull rather than re-pulling from the legacy value.
+async function loadNotionCursor(
+  deps: PullRunnerDeps,
+  message: PullDueMessage,
+): Promise<string | null> {
+  const sealed = await sealedCursorStore(deps, message).loadStrict(message.sourceId);
+  if (sealed.found) return sealed.value === '' ? null : sealed.value;
+  return loadCursor(deps.ssm, message.tenant_id, message.sourceId);
 }
 
 interface PullRouting {
@@ -821,7 +862,7 @@ async function retryPullWithFreshGitHubToken(
   originalError: unknown,
   codebaseSelection?: CodebaseRepositorySelection,
   bodyPolicy?: PullBodyPolicy,
-) {
+): Promise<PullResult & { connection: DecryptedSourceConnection }> {
   if (!deps.mintGitHubInstallationToken || !connection.installationId) throw originalError;
   const minted = await mintGitHubInstallationTokenForPull(
     sealedInstallationId(connection),

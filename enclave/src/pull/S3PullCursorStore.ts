@@ -10,31 +10,43 @@ export interface S3PullCursorStoreDeps {
   deploymentId: string;
 }
 
+export type SealedCursorRead = { found: false } | { found: true; value: string };
+
 // Sealed `code` and member pull cursors; the worker role can read this bucket but not the plaintext.
 export class S3PullCursorStore {
   constructor(private readonly deps: S3PullCursorStoreDeps) {}
 
   async load(sourceId: string): Promise<string | null> {
     try {
-      const object = await this.deps.s3.send(
-        new GetObjectCommand({ Bucket: this.deps.bucket, Key: this.objectKey(sourceId) }),
-      );
-      if (!object.Body) return null;
-      const raw = await object.Body.transformToByteArray();
-      const ciphertext = Buffer.from(Buffer.from(raw).toString('utf8'), 'base64');
-      const plaintext = await this.deps.crypto.decryptPullCursor(ciphertext, {
-        orgId: this.deps.orgId,
-        sourceId,
-      });
-      return plaintext.toString('utf8');
+      const found = await this.loadStrict(sourceId);
+      return found.found ? found.value : null;
     } catch (err) {
-      if (err instanceof NoSuchKey) return null;
       // Any other read failure (decrypt mismatch, corrupt blob) re-snapshots budget-capped
       // instead of wedging the pull; the log is count-only, never cursor content.
       logger.warn('sealed pull-cursor: load failed, treating as fresh', {
         error: err instanceof Error ? err.name : 'unknown',
       });
       return null;
+    }
+  }
+
+  /** Distinguishes an absent object from an unreadable one, which throws. */
+  async loadStrict(sourceId: string): Promise<SealedCursorRead> {
+    try {
+      const object = await this.deps.s3.send(
+        new GetObjectCommand({ Bucket: this.deps.bucket, Key: this.objectKey(sourceId) }),
+      );
+      if (!object.Body) return { found: false };
+      const raw = await object.Body.transformToByteArray();
+      const ciphertext = Buffer.from(Buffer.from(raw).toString('utf8'), 'base64');
+      const plaintext = await this.deps.crypto.decryptPullCursor(ciphertext, {
+        orgId: this.deps.orgId,
+        sourceId,
+      });
+      return { found: true, value: plaintext.toString('utf8') };
+    } catch (err) {
+      if (err instanceof NoSuchKey) return { found: false };
+      throw err;
     }
   }
 
