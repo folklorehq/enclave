@@ -143,6 +143,7 @@ export const NOT_PROCESSED_REASONS = [
   'connector_missing',
   'routing_invalid',
   'connection_fetch_failed',
+  'control_plane_spki_pin_mismatch',
   'connection_response_invalid',
   'connection_integrity_failed',
   'connection_decrypt_failed',

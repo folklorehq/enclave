@@ -9,6 +9,10 @@ import {
   type EncryptedSourceConnection,
   type GitHubCodebaseCapabilityProjection,
 } from '@folklore/contracts/enclave';
+import {
+  CONTROL_PLANE_SPKI_PIN_MISMATCH,
+  isControlPlanePinMismatch,
+} from './control-plane-pin-failure.js';
 import { assertControlPlaneOrigin } from './control-plane-url.js';
 
 const emptyWebhookMetadata = {
@@ -92,6 +96,7 @@ export type SourceConnectionResolution =
       outcome: 'not_processed';
       reason:
         | 'connection_fetch_failed'
+        | typeof CONTROL_PLANE_SPKI_PIN_MISMATCH
         | 'connection_response_invalid'
         | 'connection_integrity_failed'
         | 'connection_decrypt_failed';
@@ -178,8 +183,13 @@ async function requestSourceConnections(
         signal: AbortSignal.timeout(SOURCE_CONNECTIONS_TIMEOUT_MS),
       },
     );
-  } catch {
-    return { outcome: 'not_processed', reason: 'connection_fetch_failed' };
+  } catch (error) {
+    return {
+      outcome: 'not_processed',
+      reason: isControlPlanePinMismatch(error)
+        ? CONTROL_PLANE_SPKI_PIN_MISMATCH
+        : 'connection_fetch_failed',
+    };
   }
   if (!response.ok) return { outcome: 'not_processed', reason: 'connection_fetch_failed' };
   try {

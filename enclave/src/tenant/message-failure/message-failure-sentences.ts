@@ -27,7 +27,6 @@ export const MESSAGE_SENTENCE_REASONS: ReadonlyMap<string, string> = new Map([
   ['ad209edf1976932b', 'codebase_selection_missing'],
   ['40e07d98f5d10a58', 'codebase_selection_unavailable'],
   ['b09336e74d25114d', 'control_plane_origin_invalid'],
-  ['6fe415c04ebf852e', 'control_plane_spki_pin_mismatch'],
   ['051542b89967d593', 'control_plane_spki_unavailable'],
   ['f89ab71a13a2c5d1', 'current_authority_pointer_invalid'],
   ['dd19d19fc9162c09', 'current_authority_pointer_version_unsupported'],
