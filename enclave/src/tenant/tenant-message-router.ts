@@ -42,6 +42,8 @@ import { withInferenceReceiptContext } from '../inference/inference-receipt-cont
 import { boundGitHubInstallationId } from '../pull/github-installation-binding.js';
 import { CodebaseSelectionStore } from '../codebase/CodebaseSelectionStore.js';
 import { errorType } from '../logging/error-fields.js';
+import { logger } from '../logger.js';
+import type { ExportedPageRefReaderPort } from '../pull/ExportedPageRefReader.js';
 
 export interface IngestMessage {
   encryption_version: 2;
@@ -124,6 +126,7 @@ export interface TenantMessageRouterDeps {
   canaryProofSigner?: CanaryProofSigner;
   canaryProofSink?: (proof: CanaryAuthorizationOutcomeProof) => Promise<void>;
   canaryAuthorizationConsumer?: CanaryAuthorizationConsumer;
+  exportedPageRefs?: ExportedPageRefReaderPort;
 }
 
 export interface CanaryProofSigner {
@@ -216,19 +219,17 @@ export class TenantMessageRouter {
         jiraWebhookLifecycle: this.deps.jiraWebhookLifecycle,
         mintGitHubInstallationToken: this.deps.mintGitHubInstallationToken,
         ...(codebaseSelectionStore ? { codebaseSelectionStore } : {}),
+        ...(this.deps.exportedPageRefs ? { exportedPageRefs: this.deps.exportedPageRefs } : {}),
         ...(options.signal ? { signal: options.signal } : {}),
       });
       if (result.outcome === 'not_processed') {
         return { context, facts: [], shouldAcknowledge: false, failureCode: result.reason };
       }
-      if (result.outcome === 'superseded') {
-        return {
-          context,
-          facts: [],
-          requiresDurablePersistence: false,
-          shouldAcknowledge: true,
-        };
+      if (result.outcome === 'declined') {
+        logger.info('pull_declined', { source_kind: result.sourceKind, reason: result.reason });
+        return this.acknowledgedWithoutFacts(context);
       }
+      if (result.outcome === 'superseded') return this.acknowledgedWithoutFacts(context);
       return {
         context,
         facts: result.facts,
@@ -328,6 +329,10 @@ export class TenantMessageRouter {
   }
 
   // A backfill flag would restart from the window start; a member pull keeps its owner or routing refuses the chunk.
+  private acknowledgedWithoutFacts(context: TenantContext): RoutedResult {
+    return { context, facts: [], requiresDurablePersistence: false, shouldAcknowledge: true };
+  }
+
   private continuationOf(raw: PullDueMessage): PullDueMessage {
     return {
       type: 'pull-due',

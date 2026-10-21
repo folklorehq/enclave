@@ -1,6 +1,7 @@
 import { ROUTING_TABLE_REFUSALS } from '@folklore/contracts';
 import { HIGH_WATER_FAILURE_CODES } from '@folklore/inference';
 import type { EvidenceKeySessionErrorCode } from '../../inference/EvidenceKeySession.js';
+import { OPENAI_EMBED_CODES } from '../../inference/openai/openai-embed-errors.js';
 import type { PullNotProcessedReason } from '../../pull/pull-runner.js';
 import { THEME_SYNTHESIS_PHASES, themeDeadlineCode } from './theme-synthesis-phase.js';
 import { OUTPUT_FAILURE_REASONS } from '../output/output-failure-reasons.js';
@@ -144,6 +145,7 @@ export const NOT_PROCESSED_REASONS = [
   'connection_response_invalid',
   'connection_integrity_failed',
   'connection_decrypt_failed',
+  'export_refs_unavailable',
 ] as const satisfies readonly PullNotProcessedReason[];
 
 const EVIDENCE_SESSION_REASONS = [
@@ -226,6 +228,8 @@ export const INFERENCE_PATH_REASONS = [
   'write_replay',
 ] as const;
 
+const OPENAI_REASONS: readonly string[] = OPENAI_EMBED_CODES;
+
 const CLAUDE_REASONS = [
   'anthropic_request_refused',
   'anthropic_tls_root_set_mismatch',
@@ -280,7 +284,7 @@ const SYNTHESIS_REASONS = [
   'theme_grouping_embedding_unavailable',
 ] as const;
 
-const PIPELINE_REASONS = ['org_key_unavailable'] as const;
+const PIPELINE_REASONS = ['org_key_unavailable', 'revision_tag_malformed'] as const;
 
 const ROUTE_REASONS = [
   'canary_authorization_invalid',
@@ -331,6 +335,7 @@ export const MESSAGE_FAILURE_REASONS: ReadonlySet<string> = new Set<string>([
   ...INFERENCE_TRANSPORT_REASONS,
   ...INFERENCE_PATH_REASONS,
   ...CLAUDE_REASONS,
+  ...OPENAI_REASONS,
   ...SYNTHESIS_REASONS,
   ...PIPELINE_REASONS,
   ...ROUTE_REASONS,

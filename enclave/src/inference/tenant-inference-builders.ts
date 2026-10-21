@@ -12,6 +12,7 @@ import {
   type UpstreamCallGate,
 } from './TenantPolicyBoundInference.js';
 import { UnboundPoolInference } from './UnboundPoolInference.js';
+import type { EmbeddingProvider } from './openai/OpenAIEmbedRouteComposition.js';
 import type { InferenceRoute, InferenceRouteResolver } from './routing/InferenceRouteResolver.js';
 import { logger } from '../logger.js';
 import type { InferenceLatencyProfile } from './public-aci-operation-limits.js';
@@ -22,6 +23,7 @@ export interface PoolPolicyPorts {
   bindingForwarderFor(orgId: string): TenantPolicyVerifiedBindingForwarder | undefined;
   backendFor(orgId: string): TenantPolicyVerifiedBindingBackendFactory | undefined;
   readonly routeResolver?: InferenceRouteResolver;
+  readonly embeddingProvider?: EmbeddingProvider;
 }
 
 export interface ActivePolicyPortDeps {
@@ -36,6 +38,7 @@ export interface ActivePolicyPortDeps {
     orgId: string,
   ) => TenantPolicyVerifiedBindingBackendFactory | undefined;
   readonly claudeRoutes?: InferenceRouteResolver;
+  readonly embeddingProvider?: EmbeddingProvider;
 }
 
 /** Each port reads its dependency when asked; poolPolicyBoundInference asks once, at construction. */
@@ -46,6 +49,7 @@ export function poolPolicyPortsFrom(deps: ActivePolicyPortDeps): PoolPolicyPorts
     bindingForwarderFor: (orgId) => deps.activePolicyBindingForwarderFor?.(orgId),
     backendFor: (orgId) => deps.activePolicyBackendFor?.(orgId),
     ...(deps.claudeRoutes === undefined ? {} : { routeResolver: deps.claudeRoutes }),
+    ...(deps.embeddingProvider === undefined ? {} : { embeddingProvider: deps.embeddingProvider }),
   };
 }
 
@@ -71,6 +75,9 @@ export function poolPolicyBoundInference(input: {
     requireBindingForwarding: true,
     backendForVerifiedBinding: policy.backendFor(orgId),
     operationCache: input.operationCache,
+    ...(policy.embeddingProvider === undefined
+      ? {}
+      : { embeddingProvider: policy.embeddingProvider }),
     ...(input.usageSink ? { usageSink: input.usageSink } : {}),
     ...(input.timer ? { timer: input.timer } : {}),
     ...(input.latencyProfile ? { latencyProfile: input.latencyProfile } : {}),

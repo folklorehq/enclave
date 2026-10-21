@@ -59,6 +59,8 @@ export const ACI_ROUTE: InferenceRoute = Object.freeze({ kind: 'aci' });
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const ARM_IDS: readonly string[] = ['B', 'R'];
 const PHALA_PROVIDER = 'phala';
+const OPENAI_PROVIDER = 'openai';
+const OPENAI_NOT_ROUTABLE_RULE = 'openai_not_routable';
 const ROUTE_FALLBACK_ALARM = 'inference_route_fallback';
 const VALIDATION_ISSUED_AT_MS = 1_000_000;
 const MS_PER_SECOND = 1000;
@@ -293,6 +295,8 @@ export class InferenceRouteResolver {
     untagged: boolean,
   ): InferenceRoute {
     if (target.provider === PHALA_PROVIDER) return ACI_ROUTE;
+    if (target.provider === OPENAI_PROVIDER)
+      throw new ClaudeRouteConfigError(OPENAI_NOT_ROUTABLE_RULE);
     return {
       kind: 'provider',
       provider: target.provider,

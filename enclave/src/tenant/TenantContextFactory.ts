@@ -37,6 +37,7 @@ import {
   poolPolicyPortsFrom,
 } from '../inference/tenant-inference-builders.js';
 import type { InferenceRouteResolver } from '../inference/routing/InferenceRouteResolver.js';
+import type { EmbeddingProvider } from '../inference/openai/OpenAIEmbedRouteComposition.js';
 import { TenantContext } from './tenant-context.js';
 
 export interface TenantIdentity {
@@ -93,6 +94,7 @@ export interface TenantContextFactoryDeps {
     tenantId: string,
   ) => TenantPolicyVerifiedBindingBackendFactory | undefined;
   claudeRoutes?: InferenceRouteResolver;
+  embeddingProvider?: EmbeddingProvider;
   onIndexUnreadable?: () => void;
 }
 

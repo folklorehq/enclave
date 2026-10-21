@@ -35,6 +35,16 @@ import {
   type InferenceRouteResolver,
 } from './routing/InferenceRouteResolver.js';
 import { PROVIDER_ROUTE_POLICY } from './routing/provider-route-policy.js';
+import {
+  OPENAI_EMBED_CACHE_LABEL,
+  type EmbeddingProvider,
+} from './openai/OpenAIEmbedRouteComposition.js';
+import { OPENAI_TRANSIENT_STATUSES, OpenAIEmbedRouteError } from './openai/openai-embed-errors.js';
+import {
+  OPENAI_EMBED_DIMENSIONS,
+  OPENAI_EMBED_MODEL,
+  OPENAI_EMBED_ROUTE_STATE,
+} from './openai/openai-embed-route-state.js';
 import type { SynthesisInference } from './CachedInference.js';
 import { llmCacheKey } from './llm-cache.js';
 import { TrustedTimeAuthorityError } from './TrustedTimeAuthority.js';
@@ -139,6 +149,7 @@ export interface TenantPolicyBoundInferenceOptions {
   readonly upstreamKeyForRoute?: (route: InferenceRoute) => string | undefined;
   readonly logger?: Logger;
   readonly routeResolver?: InferenceRouteResolver;
+  readonly embeddingProvider?: EmbeddingProvider;
   readonly structured?: (prompt: string, tool: ToolSpec, systemPrompt?: string) => Promise<unknown>;
   readonly onVerifiedBinding?: (
     binding: VerifiedActivePolicyRoleBindingV1,
@@ -252,6 +263,7 @@ export class TenantPolicyBoundInference implements SynthesisInference {
 
   // An unconfigured role has no model to key a window by; its refusal is the binding's to raise.
   private upstreamOf(role: InferenceModelRole, route?: InferenceRoute): string {
+    if (role === 'embed' && !this.isLegacyEmbeddingSpace()) return OPENAI_EMBED_CACHE_LABEL;
     const keyed =
       route?.kind === 'provider' && this.options.upstreamKeyForRoute
         ? this.options.upstreamKeyForRoute(route)
@@ -265,6 +277,7 @@ export class TenantPolicyBoundInference implements SynthesisInference {
   }
 
   private async embedUnderPolicy(text: string): Promise<number[]> {
+    if (!this.isLegacyEmbeddingSpace()) return this.embedOnProvider(text);
     const { binding, snapshot } = await this.bindingFor('embed');
     const cache = this.operationCache;
     const embedOnce = () =>
@@ -278,6 +291,50 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     const output = await embedOnce();
     await cache.set(key, JSON.stringify(output));
     return output;
+  }
+
+  // Once the OpenAI route is compiled in, embedding never reads the Phala policy snapshot or falls back to it.
+  private isLegacyEmbeddingSpace(): boolean {
+    return OPENAI_EMBED_ROUTE_STATE.kind === 'disabled';
+  }
+
+  private async embedOnProvider(text: string): Promise<number[]> {
+    const provider = this.options.embeddingProvider;
+    if (provider === undefined) throw new OpenAIEmbedRouteError('embedding_provider_absent');
+    const embedOnce = () =>
+      this.runTransient('embed', ACI_ROUTE, () => provider.embed(text), OPENAI_TRANSIENT_STATUSES);
+    const cache = this.options.operationCache;
+    if (!cache) return embedOnce();
+    const key = this.providerEmbedCacheKey(provider, text);
+    const hit = await this.replayFrom(
+      cache,
+      key,
+      OPENAI_EMBED_MODEL,
+      'embed',
+      TenantPolicyBoundInference.isCachedVector,
+    );
+    if (hit !== null) return JSON.parse(hit) as number[];
+    const output = await embedOnce();
+    await cache.set(key, JSON.stringify(output));
+    return output;
+  }
+
+  private static isCachedVector(hit: string): boolean {
+    try {
+      const parsed: unknown = JSON.parse(hit);
+      return Array.isArray(parsed) && parsed.length === OPENAI_EMBED_DIMENSIONS;
+    } catch {
+      return false;
+    }
+  }
+
+  private providerEmbedCacheKey(provider: EmbeddingProvider, text: string): string {
+    const namespace = JSON.stringify({
+      tenantId: this.tenantId,
+      op: 'embed',
+      route: provider.cacheLabel,
+    });
+    return llmCacheKey(provider.cacheLabel, namespace, text);
   }
 
   private async generateUnderPolicy(
@@ -466,14 +523,16 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     role: InferenceModelRole,
     route: InferenceRoute,
     operation: () => Promise<T>,
+    statusesOverride?: ReadonlySet<number>,
   ): Promise<T> {
     return this.transientRetry.run(
       operation,
       this.retryWindows(role),
       this.backoffTimer(role, route),
-      route.kind === 'provider'
-        ? PROVIDER_ROUTE_POLICY[route.provider].transientStatuses
-        : undefined,
+      statusesOverride ??
+        (route.kind === 'provider'
+          ? PROVIDER_ROUTE_POLICY[route.provider].transientStatuses
+          : undefined),
     );
   }
 
@@ -517,6 +576,9 @@ export class TenantPolicyBoundInference implements SynthesisInference {
   private callLabel(role: InferenceModelRole, route: InferenceRoute): InferenceCallLabel {
     const label = { role, operation: INFERENCE_OPERATION_BY_ROLE[role] };
     if (route.kind === 'provider') return { model: route.model, ...label };
+    if (role === 'embed' && !this.isLegacyEmbeddingSpace()) {
+      return { model: OPENAI_EMBED_MODEL, ...label };
+    }
     try {
       return { model: inferenceModel(role), ...label };
     } catch {
@@ -576,13 +638,23 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     };
   }
 
-  private async operationCacheGet(
+  private operationCacheGet(
     key: string,
     model: string,
     operation: InferenceOperation,
   ): Promise<string | null> {
-    const hit = await this.operationCache?.get<string>(key);
-    if (hit !== null && hit !== undefined) {
+    return this.replayFrom(this.operationCache, key, model, operation);
+  }
+
+  private async replayFrom(
+    cache: Cache | undefined,
+    key: string,
+    model: string,
+    operation: InferenceOperation,
+    accept: (hit: string) => boolean = () => true,
+  ): Promise<string | null> {
+    const hit = await cache?.get<string>(key);
+    if (hit !== null && hit !== undefined && accept(hit)) {
       try {
         this.options.usageSink?.({
           model,

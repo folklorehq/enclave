@@ -1,5 +1,5 @@
-import { X509Certificate, createHash } from 'node:crypto';
 import { rootCertificates } from 'node:tls';
+import { selectPinnedRootPems, spkiSha256Of } from './pinned-roots.js';
 
 export const ANTHROPIC_ROOT_SET_MISMATCH = 'anthropic_tls_root_set_mismatch';
 
@@ -30,27 +30,11 @@ export const ANTHROPIC_ROOT_SPKI_SHA256: readonly string[] = Object.freeze([
   'f1c6ba670cfc88e4df52973cae420f0a089dd474144fe5806c420064e1591229',
 ]);
 
-export function spkiSha256Of(pem: string): string {
-  const certificate = new X509Certificate(pem);
-  return createHash('sha256')
-    .update(certificate.publicKey.export({ type: 'spki', format: 'der' }))
-    .digest('hex');
-}
+export { spkiSha256Of };
 
 export function selectAnthropicRootPems(
   pems: readonly string[] = rootCertificates,
   spkis: readonly string[] = ANTHROPIC_ROOT_SPKI_SHA256,
 ): string[] {
-  const wanted = new Set(spkis);
-  const selected = new Map<string, string>();
-  for (const pem of pems) {
-    const spki = spkiSha256Of(pem);
-    if (!wanted.has(spki)) continue;
-    if (selected.has(spki)) throw new Error(ANTHROPIC_ROOT_SET_MISMATCH);
-    selected.set(spki, pem);
-  }
-  if (spkis.length === 0 || selected.size !== wanted.size || wanted.size !== spkis.length) {
-    throw new Error(ANTHROPIC_ROOT_SET_MISMATCH);
-  }
-  return [...selected.values()];
+  return selectPinnedRootPems(spkis, ANTHROPIC_ROOT_SET_MISMATCH, pems);
 }

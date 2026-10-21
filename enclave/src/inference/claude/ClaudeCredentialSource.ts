@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { sha256Hex } from '@folklore/utils';
 import type { ClaudeModelId } from '@folklore/contracts';
 import type {
   AttestedParameterRead,
@@ -15,6 +15,11 @@ import {
   UPSTREAM_TIMEOUT_CAUSE,
   transportFailureOf,
 } from '../../egress/anthropic-transport-failure.js';
+import {
+  AttestedProviderKeyReader,
+  type ProviderKeyManifest,
+} from '../credentials/AttestedProviderKeyReader.js';
+import { ProviderKeyHolder, type KeyInvalidation } from '../credentials/ProviderKeyHolder.js';
 import { ClaudeRouteError } from './claude-route-errors.js';
 
 const ANTHROPIC_API_VERSION = '2023-06-01';
@@ -34,8 +39,6 @@ export const claudeCredentialLoadErrors: AttestedParameterReadErrors = {
   decrypt: 'claude_credential_decrypt_failed',
 };
 
-const REFRESH_INTERVAL_MS = 60 * 60_000;
-const REJECTED_REFRESH_MIN_MS = 60_000;
 const PREFLIGHT_TIMEOUT_MS = 10_000;
 const MAX_KEY_BYTES = 256;
 const KEY_SHAPE = /^sk-ant-[A-Za-z0-9_-]{20,200}$/;
@@ -44,10 +47,7 @@ const HTTP_UNAUTHORIZED = 401;
 const HTTP_FORBIDDEN = 403;
 export const CLAUDE_WORKSPACE_HEADER_UNEXPECTED = 'claude_workspace_header_unexpected';
 
-export type ClaudeCredentialManifest = Pick<
-  VerifiedBootManifest,
-  'awsAccountId' | 'awsRegion' | 'storageKeyArn' | 'enclaveOutputKeyKmsKeyArn'
->;
+export type ClaudeCredentialManifest = ProviderKeyManifest;
 
 export interface ClaudeCredentialDeps {
   readonly reader: Pick<AttestedSsmParameterReader, 'read'>;
@@ -62,97 +62,49 @@ export interface ClaudeCredentialDeps {
   readonly now?: () => number;
 }
 
-interface LoadedKey {
-  readonly bytes: Buffer;
-  readonly loadedAt: number;
-}
-
-interface Hold {
-  readonly code: string;
-  readonly at: number;
-}
-
-function sha256Of(value: string): string {
-  return createHash('sha256').update(value).digest('hex');
-}
-
 /** The Anthropic key, read only through the attested reader and bound to the compiled org hash before use. */
 export class ClaudeCredentialSource {
-  private loaded: LoadedKey | undefined;
-  private inflight: Promise<LoadedKey> | undefined;
-  private hold: Hold | undefined;
-  private readonly now: () => number;
+  private readonly holder: ProviderKeyHolder;
+  private readonly keyReader: AttestedProviderKeyReader;
 
   constructor(private readonly deps: ClaudeCredentialDeps) {
-    this.now = deps.now ?? (() => Date.now());
+    this.keyReader = new AttestedProviderKeyReader(
+      {
+        parameterPath: `${CLAUDE_CREDENTIAL_PARAMETER_ROOT}${CLAUDE_CREDENTIAL_PARAMETER_SUFFIX}`,
+        keyAlias: CLAUDE_CREDENTIAL_KEY_ALIAS,
+        keyShape: KEY_SHAPE,
+        maxKeyBytes: MAX_KEY_BYTES,
+        unavailable: () => new ClaudeRouteError('claude_credential_unavailable'),
+      },
+      deps,
+    );
+    this.holder = new ProviderKeyHolder({
+      load: () => this.load(),
+      heldError: (reason) =>
+        new ClaudeRouteError(
+          reason === 'rejected' ? 'claude_credential_rejected' : 'claude_credential_unavailable',
+        ),
+      ...(deps.now === undefined ? {} : { now: deps.now }),
+    });
   }
 
-  async key(): Promise<string> {
-    this.assertNotHeld();
-    const current = this.loaded;
-    if (current !== undefined && this.now() - current.loadedAt < REFRESH_INTERVAL_MS) {
-      return current.bytes.toString('utf8');
-    }
-    const loaded = await (this.inflight ??= this.load().finally(() => {
-      this.inflight = undefined;
-    }));
-    return loaded.bytes.toString('utf8');
+  key(): Promise<string> {
+    return this.holder.key();
   }
 
-  invalidate(reason: 'rejected' | 'mismatch'): void {
-    this.loaded?.bytes.fill(0);
-    this.loaded = undefined;
-    this.hold ??= {
-      code: reason === 'rejected' ? 'claude_credential_rejected' : 'claude_credential_unavailable',
-      at: this.now(),
-    };
+  invalidate(reason: KeyInvalidation): void {
+    this.holder.invalidate(reason);
   }
 
-  private assertNotHeld(): void {
-    if (this.hold === undefined) return;
-    if (this.now() - this.hold.at < REJECTED_REFRESH_MIN_MS)
-      throw new ClaudeRouteError(this.hold.code);
-    this.hold = undefined;
-  }
-
-  private async load(): Promise<LoadedKey> {
-    const bytes = await this.readKey();
+  private async load(): Promise<Buffer> {
+    const bytes = await this.keyReader.read();
     try {
       await this.preflight(bytes.toString('utf8'));
     } catch (error) {
       bytes.fill(0);
       throw error;
     }
-    this.loaded?.bytes.fill(0);
-    this.loaded = { bytes, loadedAt: this.now() };
-    return this.loaded;
-  }
-
-  private async readKey(): Promise<Buffer> {
-    const plaintext = await this.deps.reader.read(this.signedRead()).catch(() => {
-      throw new ClaudeRouteError('claude_credential_unavailable');
-    });
-    const key = Buffer.from(plaintext).toString('utf8');
-    plaintext.fill(0);
-    if (plaintext.length === 0 || plaintext.length > MAX_KEY_BYTES || !KEY_SHAPE.test(key)) {
-      throw new ClaudeRouteError('claude_credential_unavailable');
-    }
-    return Buffer.from(key, 'utf8');
-  }
-
-  private signedRead(): AttestedParameterRead {
-    const manifest = this.deps.manifest();
-    const outputKey = manifest?.enclaveOutputKeyKmsKeyArn;
-    if (!manifest || !outputKey || !manifest.awsAccountId || !manifest.awsRegion) {
-      throw new ClaudeRouteError('claude_credential_unavailable');
-    }
-    return {
-      path: `${CLAUDE_CREDENTIAL_PARAMETER_ROOT}${CLAUDE_CREDENTIAL_PARAMETER_SUFFIX}`,
-      awsAccountId: manifest.awsAccountId,
-      awsRegion: manifest.awsRegion,
-      keyId: `arn:aws:kms:${manifest.awsRegion}:${manifest.awsAccountId}:${CLAUDE_CREDENTIAL_KEY_ALIAS}`,
-      refusedKeyIds: [manifest.storageKeyArn, outputKey],
-    };
+    return bytes;
   }
 
   private async preflight(key: string): Promise<void> {
@@ -207,12 +159,12 @@ export function claudeIdentityMismatch(
   expected: { readonly organizationIdSha256: string; readonly workspaceIdSha256: string },
 ): 'claude_organization_mismatch' | 'claude_workspace_mismatch' | undefined {
   const organization = headers.get(ANTHROPIC_ORGANIZATION_HEADER);
-  if (organization === null || sha256Of(organization) !== expected.organizationIdSha256) {
+  if (organization === null || sha256Hex(organization) !== expected.organizationIdSha256) {
     return 'claude_organization_mismatch';
   }
   if (expected.workspaceIdSha256 === '') return undefined;
   const workspace = headers.get(ANTHROPIC_WORKSPACE_HEADER);
-  return workspace !== null && sha256Of(workspace) === expected.workspaceIdSha256
+  return workspace !== null && sha256Hex(workspace) === expected.workspaceIdSha256
     ? undefined
     : 'claude_workspace_mismatch';
 }

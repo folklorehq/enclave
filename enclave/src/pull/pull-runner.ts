@@ -8,11 +8,12 @@ import {
   type CodebaseRepositorySelection,
   type Connector,
   createPullConnector,
+  type DocumentBodyMode,
   type PullConnectorDeps,
   type PullOptions,
   type SyncCursor,
 } from '@folklore/connectors';
-import { supportsPerPersonMode } from '@folklore/contracts';
+import { NOTION_KIND, supportsPerPersonMode } from '@folklore/contracts';
 import {
   oauthRefreshCommandSchema,
   type OAuthRefreshCommand,
@@ -36,6 +37,12 @@ import {
   type SourceConnectionResolution,
 } from './source-connections-client.js';
 import type { JiraWebhookLifecycleService } from './JiraWebhookLifecycleService.js';
+import {
+  BODY_GATED_KINDS,
+  DOCUMENT_BODY_RELEASE,
+  documentBodyModeFor,
+} from './document-body-release.js';
+import type { ExportedPageRefReaderPort } from './ExportedPageRefReader.js';
 import { S3PullCursorStore } from './S3PullCursorStore.js';
 import { boundGitHubInstallationId } from './github-installation-binding.js';
 
@@ -149,6 +156,7 @@ export interface PullRunnerDeps {
     installationId: string;
   }) => Promise<{ accessToken: string; expiresAt: string }>;
   codebaseSelectionStore?: Pick<CodebaseSelectionStore, 'read'>;
+  exportedPageRefs?: ExportedPageRefReaderPort;
   signal?: AbortSignal;
 }
 
@@ -172,12 +180,19 @@ export type PullRunResult =
         | 'connection_fetch_failed'
         | 'connection_response_invalid'
         | 'connection_integrity_failed'
-        | 'connection_decrypt_failed';
+        | 'connection_decrypt_failed'
+        | 'export_refs_unavailable';
       sourceId: string;
       sourceKind: string;
     }
   | {
       outcome: 'superseded';
+      sourceId: string;
+      sourceKind: string;
+    }
+  | {
+      outcome: 'declined';
+      reason: 'body_release_off';
       sourceId: string;
       sourceKind: string;
     };
@@ -413,6 +428,19 @@ export async function resolveSourceToken(
   return minted.accessToken;
 }
 
+export interface PullBodyPolicy {
+  documentBodies: DocumentBodyMode;
+  exportedPageIds?: ReadonlySet<string>;
+}
+
+export type PullConnectorBuilder = (
+  kind: string,
+  token: string,
+  connectionMetadata: PullConnectionMetadata,
+  codebaseSelection?: CodebaseRepositorySelection,
+  bodyPolicy?: PullBodyPolicy,
+) => Connector | null;
+
 // Every client here MUST egress via the proxy — either the global undici dispatcher
 // (fetch-based SDKs) or an explicit agent (axios/node:http SDKs like Slack), else its
 // pull dials the internet directly and fails closed on real hardware.
@@ -421,6 +449,7 @@ export function buildConnector(
   token: string,
   connectionMetadata?: PullConnectionMetadata,
   codebaseSelection?: CodebaseRepositorySelection,
+  bodyPolicy?: PullBodyPolicy,
 ): Connector | null {
   const deps: PullConnectorDeps = {
     logger: consoleLogger,
@@ -432,6 +461,8 @@ export function buildConnector(
     gmailLabelAllowlist: parseAllowlist(process.env['EMAIL_GMAIL_LABEL_ALLOWLIST']),
     m365FolderAllowlist: parseAllowlist(process.env['EMAIL_M365_FOLDER_ALLOWLIST']),
     ...(codebaseSelection ? { codebaseSelection } : {}),
+    ...(bodyPolicy ? { documentBodies: bodyPolicy.documentBodies } : {}),
+    ...(bodyPolicy?.exportedPageIds ? { exportedPageIds: bodyPolicy.exportedPageIds } : {}),
   };
   return createPullConnector(kind, deps);
 }
@@ -440,16 +471,16 @@ export function buildConnector(
 export async function runPull(
   message: PullDueMessage,
   deps: PullRunnerDeps,
-  connectorBuilder: (
-    kind: string,
-    token: string,
-    connectionMetadata: PullConnectionMetadata,
-    codebaseSelection?: CodebaseRepositorySelection,
-  ) => Connector | null = buildConnector,
+  connectorBuilder: PullConnectorBuilder = buildConnector,
+  release: ReadonlyMap<string, DocumentBodyMode> = DOCUMENT_BODY_RELEASE,
 ): Promise<PullRunResult> {
   const routing = resolvePullRouting(message, deps.orgId);
   if (routing === null) return notProcessed(message, 'routing_invalid');
+  const mode = documentBodyModeFor(message.kind, release);
   const memberScope = routing.memberScope;
+  if (mode === 'off' && !memberScope && BODY_GATED_KINDS.has(message.kind)) {
+    return declined(message);
+  }
   const resolved =
     message.kind === 'code'
       ? await resolveCodebaseConnection(deps)
@@ -485,12 +516,18 @@ export async function runPull(
   if (!token) {
     return notProcessed(message, 'token_missing');
   }
+  const exportedPageIds = await loadExportedPageIds(message.kind, mode, deps);
+  if (exportedPageIds === EXPORT_REFS_UNAVAILABLE) {
+    return notProcessed(message, 'export_refs_unavailable');
+  }
+  const bodyPolicy = pullBodyPolicy(mode, exportedPageIds);
   const connector = buildPullConnector(
     connectorBuilder,
     message.kind,
     token,
     connectionMetadata(connection),
     codebaseSelection,
+    bodyPolicy,
   );
   if (!connector) {
     return notProcessed(message, 'connector_missing');
@@ -513,6 +550,7 @@ export async function runPull(
     connectorBuilder,
     codebaseSelection,
     memberScope,
+    bodyPolicy,
   );
 
   const cursor = result.earlyReturn
@@ -631,18 +669,49 @@ function selectionForCodeConnector(
   };
 }
 
+const EXPORT_REFS_UNAVAILABLE = 'unavailable';
+
+// Only a mode that reads bodies must fail closed: off keeps today's title-only pull, which the database never blocked.
+async function loadExportedPageIds(
+  kind: string,
+  mode: DocumentBodyMode,
+  deps: PullRunnerDeps,
+): Promise<ReadonlySet<string> | undefined | typeof EXPORT_REFS_UNAVAILABLE> {
+  if (kind !== NOTION_KIND) return undefined;
+  const ids = await readExportedPageIds(deps);
+  if (ids !== undefined) return ids;
+  return mode === 'off' ? undefined : EXPORT_REFS_UNAVAILABLE;
+}
+
+async function readExportedPageIds(deps: PullRunnerDeps): Promise<ReadonlySet<string> | undefined> {
+  if (!deps.exportedPageRefs) return undefined;
+  try {
+    const ids = await deps.exportedPageRefs.notionPageIds(deps.orgId);
+    return ids === 'database_unavailable' ? undefined : ids;
+  } catch {
+    return undefined;
+  }
+}
+
+function pullBodyPolicy(
+  mode: DocumentBodyMode,
+  exportedPageIds: ReadonlySet<string> | undefined,
+): PullBodyPolicy | undefined {
+  if (mode === 'off' && exportedPageIds === undefined) return undefined;
+  return { documentBodies: mode, ...(exportedPageIds ? { exportedPageIds } : {}) };
+}
+
 function buildPullConnector(
-  connectorBuilder: (
-    kind: string,
-    token: string,
-    connectionMetadata: PullConnectionMetadata,
-    codebaseSelection?: CodebaseRepositorySelection,
-  ) => Connector | null,
+  connectorBuilder: PullConnectorBuilder,
   kind: string,
   token: string,
   connectionMetadata: PullConnectionMetadata,
   codebaseSelection?: CodebaseRepositorySelection,
+  bodyPolicy?: PullBodyPolicy,
 ): Connector | null {
+  if (bodyPolicy) {
+    return connectorBuilder(kind, token, connectionMetadata, codebaseSelection, bodyPolicy);
+  }
   if (codebaseSelection) {
     return connectorBuilder(kind, token, connectionMetadata, codebaseSelection);
   }
@@ -651,6 +720,15 @@ function buildPullConnector(
 
 function superseded(message: PullDueMessage): PullRunResult {
   return { outcome: 'superseded', sourceId: message.sourceId, sourceKind: message.kind };
+}
+
+function declined(message: PullDueMessage): PullRunResult {
+  return {
+    outcome: 'declined',
+    reason: 'body_release_off',
+    sourceId: message.sourceId,
+    sourceKind: message.kind,
+  };
 }
 
 function notProcessed(message: PullDueMessage, reason: PullNotProcessedReason): PullRunResult {
@@ -663,14 +741,10 @@ export async function pullWithRefresh(
   connection: DecryptedSourceConnection,
   connector: Connector,
   window: PullWindow,
-  connectorBuilder: (
-    kind: string,
-    token: string,
-    connectionMetadata: PullConnectionMetadata,
-    codebaseSelection?: CodebaseRepositorySelection,
-  ) => Connector | null = buildConnector,
+  connectorBuilder: PullConnectorBuilder = buildConnector,
   codebaseSelection?: CodebaseRepositorySelection,
   memberScope?: MemberPullScope,
+  bodyPolicy?: PullBodyPolicy,
 ) {
   try {
     return {
@@ -688,6 +762,7 @@ export async function pullWithRefresh(
         connectorBuilder,
         error,
         codebaseSelection,
+        bodyPolicy,
       );
     }
     if (!deps.refreshOAuthCredential) throw error;
@@ -724,6 +799,7 @@ export async function pullWithRefresh(
       refreshedToken,
       connectionMetadata(refreshed),
       codebaseSelection,
+      bodyPolicy,
     );
     if (!refreshedConnector) throw error;
     return {
@@ -740,14 +816,10 @@ async function retryPullWithFreshGitHubToken(
   sourceKind: string,
   connection: DecryptedSourceConnection,
   window: PullWindow,
-  connectorBuilder: (
-    kind: string,
-    token: string,
-    connectionMetadata: PullConnectionMetadata,
-    codebaseSelection?: CodebaseRepositorySelection,
-  ) => Connector | null,
+  connectorBuilder: PullConnectorBuilder,
   originalError: unknown,
   codebaseSelection?: CodebaseRepositorySelection,
+  bodyPolicy?: PullBodyPolicy,
 ) {
   if (!deps.mintGitHubInstallationToken || !connection.installationId) throw originalError;
   const minted = await mintGitHubInstallationTokenForPull(
@@ -779,6 +851,7 @@ async function retryPullWithFreshGitHubToken(
     minted.accessToken,
     connectionMetadata(connection),
     codebaseSelection,
+    bodyPolicy,
   );
   if (!connector) throw originalError;
   return {

@@ -40,6 +40,7 @@ import {
 } from './directory/TenantEntitlementProjectionRunner.js';
 import { ControlPlaneTenantMemberIdentityLinkSource } from './identity/ControlPlaneTenantMemberIdentityLinkSource.js';
 import { MemberIdentityLinkAppliedReader } from './identity/MemberIdentityLinkAppliedReader.js';
+import { ExportedPageRefReader } from './pull/ExportedPageRefReader.js';
 import { MemberIdentityLinkEmitter } from './identity/MemberIdentityLinkEmitter.js';
 import {
   MEMBER_LINK_MAX_BACKOFF_MS,
@@ -93,6 +94,12 @@ import { OperationAuthority } from './inference/OperationAuthority.js';
 import { AttestedSsmParameterReader } from './attestation/AttestedSsmParameterReader.js';
 import { ClaudeRouteComposition } from './inference/claude/ClaudeRouteComposition.js';
 import { CLAUDE_ROUTE_CONFIG_INVALID } from './inference/claude/claude-route-errors.js';
+import { OpenAIEmbedRouteComposition } from './inference/openai/OpenAIEmbedRouteComposition.js';
+import {
+  OPENAI_EMBED_ROUTE_INVALID_ALARM,
+  OPENAI_EMBED_ROUTE_STATE,
+} from './inference/openai/openai-embed-route-state.js';
+import { openaiCredentialLoadErrors } from './inference/openai/OpenAICredentialSource.js';
 import { InferenceRouteResolver } from './inference/routing/InferenceRouteResolver.js';
 import { AwsRoutingParameterReader } from './inference/routing/AwsRoutingParameterReader.js';
 import { RoutingTableRefresher } from './inference/routing/RoutingTableRefresher.js';
@@ -374,6 +381,23 @@ const claudeComposition = new ClaudeRouteComposition({
 
 const providerRoutes = new ProviderRouteRegistry([claudeComposition]);
 
+const openaiEmbedComposition = new OpenAIEmbedRouteComposition({
+  state: OPENAI_EMBED_ROUTE_STATE,
+  reader: () =>
+    new AttestedSsmParameterReader(
+      new AwsBootManifestSsmParameters(ssm),
+      attestedRecipientDecryptor,
+      openaiCredentialLoadErrors,
+    ),
+  manifest: () => verifiedBootManifest,
+  onAlarm: (code: string) => bootStatus.recordAlarm(code),
+  usageSink: recordTokenUsage,
+});
+if (OPENAI_EMBED_ROUTE_STATE.kind === 'invalid') {
+  bootStatus.recordAlarm(`${OPENAI_EMBED_ROUTE_INVALID_ALARM}_${OPENAI_EMBED_ROUTE_STATE.reason}`);
+}
+const embeddingProvider = openaiEmbedComposition.provider();
+
 function activePolicyBackendFor(
   tenantId: string,
   latencyProfile: InferenceLatencyProfile = 'batch',
@@ -450,6 +474,7 @@ const tenantFactory = new TenantContextFactory({
   activePolicyBindingForwarderFor: (tenantId) => activePolicyBindingForwarderFor(tenantId),
   activePolicyBackendFor,
   claudeRoutes,
+  ...(embeddingProvider === undefined ? {} : { embeddingProvider }),
   onIndexUnreadable: () => bootStatus.recordAlarm(HNSW_INDEX_UNREADABLE_CODE),
   ...(devKmsStub
     ? devMasterKeySealers(process.env['NODE_ENV'] ?? '', process.env['DATA_KEK'])
@@ -1327,6 +1352,7 @@ try {
         // A user is waiting on the answer, so it keeps the short bound batch synthesis outgrew.
         activePolicyBackendFor: (id) => activePolicyBackendFor(id, 'interactive'),
         claudeRoutes,
+        ...(embeddingProvider === undefined ? {} : { embeddingProvider }),
       }),
       recordTokenUsage,
       upstreamGate?.passThrough(),
@@ -1521,6 +1547,7 @@ const entitlementProjectionRunner =
       })
     : undefined;
 entitlementProjectionRunner?.start();
+const exportedPageRefReader = new ExportedPageRefReader(() => runtimeDatabaseLease.database());
 const memberIdentityLinkEmitter = new MemberIdentityLinkEmitter({
   sqs,
   processedQueueUrl: PROCESSED_QUEUE_URL,
@@ -1580,6 +1607,7 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
     activePolicyBindingForwarderFor,
     activePolicyBackendFor,
     claudeRoutes,
+    ...(embeddingProvider === undefined ? {} : { embeddingProvider }),
     providerRoutes,
     upstreamPaused: (upstream) => (upstreamGate?.pauseRemainingMs(upstream) ?? 0) > 0,
     enforceTenantPolicy: isSharedPool,
@@ -1653,6 +1681,7 @@ const router = new TenantMessageRouter({
   jiraWebhookAuthenticator,
   recordJiraWebhookDelivery,
   mintGitHubInstallationToken,
+  exportedPageRefs: exportedPageRefReader,
   canaryProofSigner: poolRuntimeAttestation
     ? {
         sign: (payload) => poolRuntimeAttestation.signCurrent(payload),
