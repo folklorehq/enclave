@@ -13,6 +13,8 @@ import {
 import { readSealedBlob, writeSealedBlob } from '../sealing/sealed-blob-store.js';
 import { canonicalKmsKeyArn, type KmsKeyScope } from '../sealing/kms-key-arn.js';
 import { assertRecoveryConfigured, sealRecoveryMnemonic } from '../sealing/recovery.js';
+import { ACTIVE_EMBEDDING_SPACE } from '../inference/embedding-space.js';
+import { hnswNamespaceFor } from '../hnsw/embedding-namespace.js';
 import { HnswStore } from '../hnsw/index.js';
 import { Pipeline } from '../pipeline/index.js';
 import {
@@ -128,7 +130,7 @@ export class TenantContextFactory {
         keyring,
         processedBucket,
         identity.tenantId,
-        undefined,
+        hnswNamespaceFor(ACTIVE_EMBEDDING_SPACE),
         this.deps.onIndexUnreadable,
       );
       const context: { current?: TenantContext } = {};

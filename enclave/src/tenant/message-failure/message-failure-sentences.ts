@@ -56,6 +56,7 @@ export const MESSAGE_SENTENCE_REASONS: ReadonlyMap<string, string> = new Map([
   ['a229c72fcc41be89', 'global_inference_backend_unavailable_under_public'],
   ['3a9a8cdff2ef417a', 'gmail_label_allowlist_accepts_at_most_one_label'],
   ['aa9ac49371a3804b', 'google_drive_missing_start_page_token'],
+  ['da24afb79b138676', 'hnsw_namespace_generation_invalid'],
   ['1c223a79412ecc30', 'index_residency_load_evicted'],
   ['99afd9382019d3be', 'inference_backend_not_support_tool_calling'],
   ['88ff37a9deeaa4cb', 'inference_commissioning_marker_conflicts_public'],

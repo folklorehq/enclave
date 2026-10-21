@@ -1,6 +1,7 @@
 import { ROUTING_TABLE_REFUSALS } from '@folklore/contracts';
 import { HIGH_WATER_FAILURE_CODES } from '@folklore/inference';
 import type { EvidenceKeySessionErrorCode } from '../../inference/EvidenceKeySession.js';
+import { EMBEDDING_SPACE_REQUIRES_SHARED_POOL } from '../../inference/embedding-space.js';
 import { OPENAI_EMBED_CODES } from '../../inference/openai/openai-embed-errors.js';
 import type { PullNotProcessedReason } from '../../pull/pull-runner.js';
 import { THEME_SYNTHESIS_PHASES, themeDeadlineCode } from './theme-synthesis-phase.js';
@@ -228,7 +229,10 @@ export const INFERENCE_PATH_REASONS = [
   'write_replay',
 ] as const;
 
-const OPENAI_REASONS: readonly string[] = OPENAI_EMBED_CODES;
+const OPENAI_REASONS: readonly string[] = [
+  ...OPENAI_EMBED_CODES,
+  EMBEDDING_SPACE_REQUIRES_SHARED_POOL,
+];
 
 const CLAUDE_REASONS = [
   'anthropic_request_refused',

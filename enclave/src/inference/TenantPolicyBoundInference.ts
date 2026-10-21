@@ -40,11 +40,8 @@ import {
   type EmbeddingProvider,
 } from './openai/OpenAIEmbedRouteComposition.js';
 import { OPENAI_TRANSIENT_STATUSES, OpenAIEmbedRouteError } from './openai/openai-embed-errors.js';
-import {
-  OPENAI_EMBED_DIMENSIONS,
-  OPENAI_EMBED_MODEL,
-  OPENAI_EMBED_ROUTE_STATE,
-} from './openai/openai-embed-route-state.js';
+import { OPENAI_EMBED_DIMENSIONS, OPENAI_EMBED_MODEL } from './openai/openai-embed-route-state.js';
+import { ACTIVE_EMBEDDING_SPACE_IS_LEGACY } from './embedding-space.js';
 import type { SynthesisInference } from './CachedInference.js';
 import { llmCacheKey } from './llm-cache.js';
 import { TrustedTimeAuthorityError } from './TrustedTimeAuthority.js';
@@ -295,7 +292,7 @@ export class TenantPolicyBoundInference implements SynthesisInference {
 
   // Once the OpenAI route is compiled in, embedding never reads the Phala policy snapshot or falls back to it.
   private isLegacyEmbeddingSpace(): boolean {
-    return OPENAI_EMBED_ROUTE_STATE.kind === 'disabled';
+    return ACTIVE_EMBEDDING_SPACE_IS_LEGACY;
   }
 
   private async embedOnProvider(text: string): Promise<number[]> {

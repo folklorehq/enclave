@@ -23,9 +23,15 @@ import {
 import { CRITIQUE_TEMPERATURE, type SynthesisInference } from './CachedInference.js';
 import { recordTokenUsage } from './TokenUsageScope.js';
 import { createPinnedInferenceFetch } from '../egress/inference.js';
+import {
+  ACTIVE_EMBEDDING_SPACE,
+  ACTIVE_EMBEDDING_SPACE_IS_LEGACY,
+  LEGACY_EMBEDDING_SPACE,
+} from './embedding-space.js';
 
 const PROXY_PORT = process.env['VSOCK_INFERENCE_PROXY_PORT'] ?? '';
-const DEFAULT_EMBED_DIM = 4096;
+const DEFAULT_EMBED_DIM = LEGACY_EMBEDDING_SPACE.dimensions;
+const EMBEDDING_SPACE_NOT_PHALA = 'embedding_space_not_phala';
 const DEFAULT_GENERATE_MAX_TOKENS = 8192;
 export let EMBED_MODEL = '';
 export let GENERATE_MODEL = '';
@@ -95,14 +101,20 @@ function assertPolicyRoleModels(policy: InferenceTrustPolicyV1): void {
 }
 
 let GENERATE_MAX_TOKENS = DEFAULT_GENERATE_MAX_TOKENS;
-export let EMBED_DIM = DEFAULT_EMBED_DIM;
+export let EMBED_DIM = ACTIVE_EMBEDDING_SPACE.dimensions;
+
+function expectedPolicyEmbedDimension(): number {
+  return ACTIVE_EMBEDDING_SPACE_IS_LEGACY ? EMBED_DIM : DEFAULT_EMBED_DIM;
+}
 
 // A shared process cannot change an existing tenant's index dimension for another policy.
 export function assertPublicInferenceEmbeddingDimension(
   snapshot: VerifiedActivePolicySnapshotV1,
 ): void {
   assertVerifiedActivePolicySnapshotV1(snapshot);
-  if (snapshot.policy.roles.embed.capabilities.embeddingDimension !== EMBED_DIM) {
+  if (
+    snapshot.policy.roles.embed.capabilities.embeddingDimension !== expectedPolicyEmbedDimension()
+  ) {
     throw new Error('public_aci_embedding_index_dimension_mismatch');
   }
 }
@@ -268,7 +280,9 @@ export function configureLocalInferencePolicy(env: NodeJS.ProcessEnv = process.e
       generateModel,
       critiqueModel,
       judgeModel,
-      embedDim: localPositiveInteger(env['EMBED_DIM'], DEFAULT_EMBED_DIM, 'embed dimension'),
+      embedDim: ACTIVE_EMBEDDING_SPACE_IS_LEGACY
+        ? localPositiveInteger(env['EMBED_DIM'], DEFAULT_EMBED_DIM, 'embed dimension')
+        : ACTIVE_EMBEDDING_SPACE.dimensions,
       generateMaxTokens: localPositiveInteger(
         env['GENERATE_MAX_TOKENS'],
         DEFAULT_GENERATE_MAX_TOKENS,
@@ -364,7 +378,7 @@ function installInferencePolicy(input: InferenceAttestationInput, isLocal: boole
   GENERATE_MODEL = policy.generateModel;
   CRITIQUE_MODEL = policy.critiqueModel;
   JUDGE_MODEL = policy.judgeModel;
-  EMBED_DIM = policy.embedDim;
+  if (ACTIVE_EMBEDDING_SPACE_IS_LEGACY) EMBED_DIM = policy.embedDim;
   GENERATE_MAX_TOKENS = policy.generateMaxTokens;
   MODEL_ALLOWLIST = policy.modelAllowlist;
 }
@@ -625,6 +639,7 @@ function testOnlyTrustPolicy(): InferenceTrustPolicyV1 {
 }
 
 export async function embedText(text: string): Promise<number[]> {
+  if (!ACTIVE_EMBEDDING_SPACE_IS_LEGACY) throw new Error(EMBEDDING_SPACE_NOT_PHALA);
   assertInferenceConfigured();
   const vector = await getBackend().embed(text);
   if (vector.length !== EMBED_DIM) {

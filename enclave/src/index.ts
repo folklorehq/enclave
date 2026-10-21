@@ -94,6 +94,10 @@ import { OperationAuthority } from './inference/OperationAuthority.js';
 import { AttestedSsmParameterReader } from './attestation/AttestedSsmParameterReader.js';
 import { ClaudeRouteComposition } from './inference/claude/ClaudeRouteComposition.js';
 import { CLAUDE_ROUTE_CONFIG_INVALID } from './inference/claude/claude-route-errors.js';
+import {
+  ACTIVE_EMBEDDING_SPACE,
+  assertEmbeddingSpaceDeployable,
+} from './inference/embedding-space.js';
 import { OpenAIEmbedRouteComposition } from './inference/openai/OpenAIEmbedRouteComposition.js';
 import {
   OPENAI_EMBED_ROUTE_INVALID_ALARM,
@@ -396,6 +400,7 @@ const openaiEmbedComposition = new OpenAIEmbedRouteComposition({
 if (OPENAI_EMBED_ROUTE_STATE.kind === 'invalid') {
   bootStatus.recordAlarm(`${OPENAI_EMBED_ROUTE_INVALID_ALARM}_${OPENAI_EMBED_ROUTE_STATE.reason}`);
 }
+assertEmbeddingSpaceDeployable({ sharedPool: isSharedPool, space: ACTIVE_EMBEDDING_SPACE });
 const embeddingProvider = openaiEmbedComposition.provider();
 
 function activePolicyBackendFor(
