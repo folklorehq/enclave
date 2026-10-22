@@ -47,7 +47,8 @@ export const CLAUDE_PURPOSE_LIMITS: Readonly<Record<InferencePurpose, ClaudePurp
   theme_tagging: limit(1_024),
   theme_topic_naming: limit(512),
   theme_aggregate_naming: limit(512),
-  theme_doctype: limit(256),
+  // The reply is one small JSON object; the rest is headroom for Haiku's thinking share at low effort.
+  theme_doctype: limit(512),
   association_judge: limit(1_024),
   answer: limit(2_048),
   wiki_delta: limit(4_096, true),
