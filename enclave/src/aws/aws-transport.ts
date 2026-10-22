@@ -15,10 +15,6 @@ export interface AwsClientTransport {
   };
 }
 
-export interface AwsV2ClientTransport {
-  httpOptions: { agent: HttpsProxyAgent<string>; connectTimeout: number; timeout: number };
-}
-
 export interface DevEndpointTransport {
   endpoint: string;
 }
@@ -41,20 +37,6 @@ export function awsClientTransport(): AwsClientTransport | DevEndpointTransport 
         httpsAgent: awsHttpsProxyAgent(),
         connectionTimeout: AWS_CONNECTION_TIMEOUT_MS,
         socketTimeout: AWS_SOCKET_IDLE_TIMEOUT_MS,
-      },
-    }
-  );
-}
-
-// aws-sdk v2's only proxy seam is httpOptions.agent; keeping the real hostname is what makes SNI
-// match the AWS cert, so the parent EC2 terminating the CONNECT tunnel cannot MITM the session.
-export function awsV2ClientTransport(): AwsV2ClientTransport | DevEndpointTransport {
-  return (
-    devEndpoint() ?? {
-      httpOptions: {
-        agent: awsHttpsProxyAgent(),
-        connectTimeout: AWS_CONNECTION_TIMEOUT_MS,
-        timeout: AWS_SOCKET_IDLE_TIMEOUT_MS,
       },
     }
   );

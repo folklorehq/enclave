@@ -1,8 +1,8 @@
 import { timingSafeEqual, type KeyObject } from 'node:crypto';
 import { PutObjectCommand, type S3Client } from '@aws-sdk/client-s3';
-import AWS from 'aws-sdk';
+import { KMS } from '@aws-sdk/client-kms';
 import { KmsKeyringNode } from '@aws-crypto/client-node';
-import { awsV2ClientTransport } from '../aws/aws-transport.js';
+import { awsClientTransport } from '../aws/aws-transport.js';
 import { createRecipientKmsClient } from '../aws/RecipientKmsClient.js';
 import {
   decryptRecipientCiphertextWithKeyId,
@@ -78,8 +78,8 @@ export interface TenantContextFactoryDeps {
   signedStorageKeyArn?: () => string | undefined;
   /** The account and region of the verified boot manifest; a bare tenant key id resolves only there. */
   signedKmsScope?: () => KmsKeyScope | undefined;
-  /** Test seam: replaces the AWS SDK v2 KMS client constructor the ESDK keyring uses. */
-  kmsClientProvider?: (region?: string) => AWS.KMS;
+  /** Test seam: replaces the KMS client constructor the ESDK keyring uses. */
+  kmsClientProvider?: (region?: string) => KMS;
   sealedBlobBucket: string;
   processedOutputsBucket: string;
   mintMasterKey?: MintMasterKeyFn;
@@ -290,9 +290,9 @@ export class TenantContextFactory {
     const provider =
       this.deps.kmsClientProvider ??
       ((r?: string) =>
-        new AWS.KMS({
+        new KMS({
           region: r || this.deps.region,
-          ...awsV2ClientTransport(),
+          ...awsClientTransport(),
         }));
     return new KmsKeyringNode({
       generatorKeyId: kmsKeyId,
