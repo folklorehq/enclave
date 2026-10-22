@@ -1,4 +1,3 @@
-import type { Cache } from '@folklore/core';
 import type { GenerationContextV1 } from '@folklore/contracts';
 import type { InferenceUsageSink, VerifiedActivePolicySnapshotV1 } from '@folklore/inference';
 import type { VerifiedBootManifest } from '../attestation/BootManifestVerifier.js';
@@ -8,6 +7,7 @@ import { ANSWER_CACHE_VERSION, type InferenceModel } from '../inference/CachedIn
 import { expectedTenantGenerationContext } from '../inference/expected-tenant-generation-context.js';
 import { SharedPoolRuntimeEvidence } from '../inference/SharedPoolRuntimeEvidence.js';
 import type { UpstreamCallGate } from '../inference/TenantPolicyBoundInference.js';
+import type { LlmOperationCache } from '../inference/vector-cache.js';
 import {
   dedicatedCachedInference,
   poolPolicyBoundInference,
@@ -32,7 +32,7 @@ export interface TenantPolicyWiringDeps<S extends VerifiedActivePolicySnapshotV1
 export type AnswerInferenceBuild = (
   orgId: string,
   tenant: Pick<TenantContext, 'activePolicySnapshot'>,
-  cache: Cache,
+  cache: LlmOperationCache,
 ) => InferenceModel;
 
 /** Binds each tenant's installed policy snapshot to the enclave's boot state and its inference paths. */

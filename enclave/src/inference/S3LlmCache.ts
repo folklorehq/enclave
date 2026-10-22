@@ -1,8 +1,8 @@
 import { GetObjectCommand, NoSuchKey, PutObjectCommand, type S3Client } from '@aws-sdk/client-s3';
-import type { Cache } from '@folklore/core';
-import { InProcessCache } from '@folklore/cache';
 import type { EnclaveCrypto } from '../crypto/esdk.js';
 import type { LlmCacheNamer } from './llm-cache.js';
+import { LlmRamFront, type LlmRamFrontOptions } from './LlmRamFront.js';
+import { float32Vector, parseVector, type LlmOperationCache } from './vector-cache.js';
 
 export interface S3LlmCacheDeps {
   s3: S3Client;
@@ -13,18 +13,17 @@ export interface S3LlmCacheDeps {
   // Bound on close() waiting out in-flight old-key ops; on expiry close still shreds the RAM front
   // and rejects so teardown propagates fail-closed (replacement assignment refused).
   closeQuiesceTimeoutMs?: number;
+  ramFront?: LlmRamFrontOptions;
 }
 
 const LLM_CACHE_PREFIX = 'llm-cache/';
 // Keyed names live under v2/; purging the unread legacy objects is not yet wired.
 const KEYED_NAME_SEGMENT = 'v2/';
-// ~4096-dim embedding JSON (~40KB) × this bound caps the run-local RAM front near 40MB per org.
-const RAM_MAX_ENTRIES = 1000;
 const CLOSE_QUIESCE_TIMEOUT_MS = 30_000;
 
 // Objects are named by the tenant's keyed HMAC, so a host that lists the bucket sees no input digest.
-export class S3LlmCache implements Cache {
-  private readonly ram = new InProcessCache(RAM_MAX_ENTRIES);
+export class S3LlmCache implements LlmOperationCache {
+  private readonly ram: LlmRamFront;
   private isClosed = false;
   // Operation lease: close() waits this out so an old-key read/write never completes after
   // retirement. Incremented synchronously at op entry, released in finally.
@@ -34,6 +33,7 @@ export class S3LlmCache implements Cache {
 
   constructor(private readonly deps: S3LlmCacheDeps) {
     this.closeQuiesceTimeoutMs = deps.closeQuiesceTimeoutMs ?? CLOSE_QUIESCE_TIMEOUT_MS;
+    this.ram = new LlmRamFront(deps.ramFront);
   }
 
   async get<T>(key: string): Promise<T | null> {
@@ -41,23 +41,48 @@ export class S3LlmCache implements Cache {
       this.assertOpen();
       const name = this.deps.namer.llmCacheName(key);
       const objectKey = this.objectKey(name);
-      const cached = await this.ram.get<string>(objectKey);
-      this.assertOpen();
-      if (cached !== null) return cached as T;
+      const cached = this.ram.get(objectKey);
+      if (cached !== undefined) return S3LlmCache.asText(cached) as T;
       const blob = await this.fetch(name);
       this.assertOpen();
       if (blob === null) return null;
-      await this.ram.set(objectKey, blob);
+      this.ram.set(objectKey, blob);
       return blob as T;
     });
   }
 
+  async getVector(key: string): Promise<number[] | null> {
+    return this.withLease(async () => {
+      this.assertOpen();
+      const name = this.deps.namer.llmCacheName(key);
+      const objectKey = this.objectKey(name);
+      const cached = this.ram.get(objectKey);
+      if (cached instanceof Float32Array) return Array.from(cached);
+      const blob = typeof cached === 'string' ? cached : await this.fetch(name);
+      this.assertOpen();
+      if (blob === null) return null;
+      const vector = parseVector(blob);
+      if (vector === null) return null;
+      this.ram.set(objectKey, Float32Array.from(vector));
+      return vector;
+    });
+  }
+
   async set(key: string, value: unknown): Promise<void> {
+    const text = value as string;
+    await this.persist(key, text, text);
+  }
+
+  async setVector(key: string, vector: readonly number[]): Promise<void> {
+    const rounded = float32Vector(vector);
+    await this.persist(key, JSON.stringify(rounded), Float32Array.from(rounded));
+  }
+
+  private async persist(key: string, text: string, ramEntry: string | Float32Array): Promise<void> {
     await this.withLease(async () => {
       this.assertOpen();
-      const text = value as string;
       const name = this.deps.namer.llmCacheName(key);
-      await this.ram.set(this.objectKey(name), text);
+      this.ram.set(this.objectKey(name), ramEntry);
       this.assertOpen();
       const ciphertext = await this.deps.crypto.encryptLlmCache(Buffer.from(text, 'utf8'), {
         orgId: this.deps.orgId,
@@ -83,7 +108,11 @@ export class S3LlmCache implements Cache {
   async del(...keys: string[]): Promise<number> {
     return this.withLease(async () => {
       this.assertOpen();
-      return this.ram.del(...keys.map((key) => this.objectKey(this.deps.namer.llmCacheName(key))));
+      let deleted = 0;
+      for (const key of keys) {
+        if (this.ram.delete(this.objectKey(this.deps.namer.llmCacheName(key)))) deleted += 1;
+      }
+      return deleted;
     });
   }
 
@@ -91,13 +120,13 @@ export class S3LlmCache implements Cache {
     if (this.isClosed) return;
     this.isClosed = true;
     // Quiesce: no old-key read/write or RAM mutation may complete after close returns. On timeout
-    // we STILL shred the RAM front (values are plain strings — no native use-after-free) and reject
+    // we STILL shred the RAM front (values are strings or typed arrays — no native use-after-free) and reject
     // so the caller treats the teardown as failed and refuses the replacement assignment.
     if (!(await this.quiesce(this.closeQuiesceTimeoutMs))) {
-      await this.ram.close();
+      this.ram.clear();
       throw new Error('llm_cache_close_timeout');
     }
-    await this.ram.close();
+    this.ram.clear();
   }
 
   private async fetch(name: string): Promise<string | null> {
@@ -119,6 +148,10 @@ export class S3LlmCache implements Cache {
       if (err instanceof NoSuchKey) return null;
       throw err;
     }
+  }
+
+  private static asText(entry: string | Float32Array): string {
+    return typeof entry === 'string' ? entry : JSON.stringify(Array.from(entry));
   }
 
   private objectKey(name: string): string {

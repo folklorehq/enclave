@@ -1,6 +1,6 @@
-import type { Cache } from '@folklore/core';
 import type { InferenceOperation, InferenceUsageSink } from '@folklore/inference';
 import { llmCacheKey } from './llm-cache.js';
+import { float32Vector, type LlmOperationCache } from './vector-cache.js';
 
 // The embed/generate surface the enclave pipeline + synthesis workers depend on — the port the
 // cache layers over, kept separate from the raw phala module so it can be injected and stubbed.
@@ -59,20 +59,20 @@ export const CRITIQUE_TEMPERATURE = 0;
 export class CachedInference implements SynthesisInference {
   constructor(
     private readonly backend: SynthesisInference,
-    private readonly cache: Cache,
+    private readonly cache: LlmOperationCache,
     private readonly models: CachedInferenceModels,
     private readonly usageSink?: InferenceUsageSink,
   ) {}
 
   async embed(text: string): Promise<number[]> {
     const key = llmCacheKey(this.models.embedModel, EMBED_CACHE_VERSION, text);
-    const hit = await this.cache.get<string>(key);
+    const hit = await this.cache.getVector(key);
     if (hit !== null) {
       this.recordCacheHit(this.models.embedModel, 'embed');
-      return JSON.parse(hit) as number[];
+      return hit;
     }
-    const vector = await this.backend.embed(text);
-    await this.cache.set(key, JSON.stringify(vector));
+    const vector = float32Vector(await this.backend.embed(text));
+    await this.cache.setVector(key, vector);
     return vector;
   }
 

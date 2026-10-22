@@ -1,4 +1,3 @@
-import type { Cache } from '@folklore/core';
 import type { InferenceModelRole, InferenceTimer, InferenceUsageSink } from '@folklore/inference';
 import { CachedInference } from './CachedInference.js';
 import { inferenceModel, phalaInference } from './phala.js';
@@ -15,6 +14,7 @@ import { UnboundPoolInference } from './UnboundPoolInference.js';
 import type { EmbeddingProvider } from './openai/OpenAIEmbedRouteComposition.js';
 import type { InferenceRoute, InferenceRouteResolver } from './routing/InferenceRouteResolver.js';
 import { logger } from '../logger.js';
+import type { LlmOperationCache } from './vector-cache.js';
 import type { InferenceLatencyProfile } from './public-aci-operation-limits.js';
 
 export interface PoolPolicyPorts {
@@ -58,7 +58,7 @@ export function poolPolicyBoundInference(input: {
   readonly orgId: string;
   readonly snapshot: TenantPolicySnapshotProvider;
   readonly policy: PoolPolicyPorts;
-  readonly operationCache: Cache;
+  readonly operationCache: LlmOperationCache;
   readonly usageSink?: InferenceUsageSink;
   readonly timer?: InferenceTimer;
   readonly latencyProfile?: InferenceLatencyProfile;
@@ -96,7 +96,7 @@ export function poolPolicyBoundInference(input: {
 
 /** A dedicated tenant's inference: the configured global backend behind its sealed cache. */
 export function dedicatedCachedInference(
-  cache: Cache,
+  cache: LlmOperationCache,
   promptVersion: string,
   usageSink?: InferenceUsageSink,
 ): CachedInference {

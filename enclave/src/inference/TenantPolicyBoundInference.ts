@@ -5,7 +5,7 @@ import type {
   TrustedTimeReadContext,
   TrustedTimeSample,
 } from '@folklore/inference';
-import type { Cache, Logger } from '@folklore/core';
+import type { Logger } from '@folklore/core';
 import { ServiceUnavailableError } from '@folklore/errors';
 import { ProviderRouteError } from '@folklore/inference';
 import {
@@ -29,6 +29,7 @@ import {
 } from '@folklore/inference';
 import { inferenceModel, inferenceModelRevision } from './phala.js';
 import { inferencePurposeScope } from './InferencePurposeScope.js';
+import { float32Vector, type LlmOperationCache } from './vector-cache.js';
 import {
   ACI_ROUTE,
   type InferenceRoute,
@@ -128,7 +129,7 @@ export interface UpstreamCallGate {
 }
 
 export interface TenantPolicyBoundInferenceOptions {
-  readonly operationCache?: Cache;
+  readonly operationCache?: LlmOperationCache;
   readonly usageSink?: InferenceUsageSink;
   readonly timer?: InferenceTimer;
   readonly freshness?: TenantPolicyFreshnessPort;
@@ -283,10 +284,10 @@ export class TenantPolicyBoundInference implements SynthesisInference {
       );
     if (!cache) return embedOnce();
     const key = this.cacheKey(binding, snapshot, 'embed', text, ACI_ROUTE);
-    const hit = await this.operationCacheGet(key, binding.modelId, 'embed');
-    if (hit !== null) return JSON.parse(hit) as number[];
-    const output = await embedOnce();
-    await cache.set(key, JSON.stringify(output));
+    const hit = await this.replayVectorFrom(cache, key, binding.modelId);
+    if (hit !== null) return hit;
+    const output = float32Vector(await embedOnce());
+    await cache.setVector(key, output);
     return output;
   }
 
@@ -303,26 +304,20 @@ export class TenantPolicyBoundInference implements SynthesisInference {
     const cache = this.options.operationCache;
     if (!cache) return embedOnce();
     const key = this.providerEmbedCacheKey(provider, text);
-    const hit = await this.replayFrom(
+    const hit = await this.replayVectorFrom(
       cache,
       key,
       OPENAI_EMBED_MODEL,
-      'embed',
       TenantPolicyBoundInference.isCachedVector,
     );
-    if (hit !== null) return JSON.parse(hit) as number[];
-    const output = await embedOnce();
-    await cache.set(key, JSON.stringify(output));
+    if (hit !== null) return hit;
+    const output = float32Vector(await embedOnce());
+    await cache.setVector(key, output);
     return output;
   }
 
-  private static isCachedVector(hit: string): boolean {
-    try {
-      const parsed: unknown = JSON.parse(hit);
-      return Array.isArray(parsed) && parsed.length === OPENAI_EMBED_DIMENSIONS;
-    } catch {
-      return false;
-    }
+  private static isCachedVector(hit: readonly number[]): boolean {
+    return hit.length === OPENAI_EMBED_DIMENSIONS;
   }
 
   private providerEmbedCacheKey(provider: EmbeddingProvider, text: string): string {
@@ -644,31 +639,44 @@ export class TenantPolicyBoundInference implements SynthesisInference {
   }
 
   private async replayFrom(
-    cache: Cache | undefined,
+    cache: LlmOperationCache | undefined,
     key: string,
     model: string,
     operation: InferenceOperation,
-    accept: (hit: string) => boolean = () => true,
   ): Promise<string | null> {
     const hit = await cache?.get<string>(key);
-    if (hit !== null && hit !== undefined && accept(hit)) {
-      try {
-        this.options.usageSink?.({
-          model,
-          operation,
-          promptTokens: 0,
-          completionTokens: 0,
-          cached: true,
-        });
-      } catch {
-        /* usage reporting must not break replay */
-      }
-      return hit;
-    }
-    return null;
+    if (hit === null || hit === undefined) return null;
+    this.recordReplay(model, operation);
+    return hit;
   }
 
-  private get operationCache(): Cache | undefined {
+  private async replayVectorFrom(
+    cache: LlmOperationCache | undefined,
+    key: string,
+    model: string,
+    accept: (hit: readonly number[]) => boolean = () => true,
+  ): Promise<number[] | null> {
+    const hit = await cache?.getVector(key);
+    if (hit === null || hit === undefined || !accept(hit)) return null;
+    this.recordReplay(model, 'embed');
+    return hit;
+  }
+
+  private recordReplay(model: string, operation: InferenceOperation): void {
+    try {
+      this.options.usageSink?.({
+        model,
+        operation,
+        promptTokens: 0,
+        completionTokens: 0,
+        cached: true,
+      });
+    } catch {
+      /* usage reporting must not break replay */
+    }
+  }
+
+  private get operationCache(): LlmOperationCache | undefined {
     return this.options.backendForVerifiedBinding ? this.options.operationCache : undefined;
   }
 
