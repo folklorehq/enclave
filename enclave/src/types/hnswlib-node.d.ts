@@ -5,7 +5,12 @@ declare module 'hnswlib-node' {
     readIndex(path: string, allowReplaceDeleted?: boolean): void;
     writeIndex(path: string): void;
     addPoint(vector: number[], label: number): void;
-    searchKnn(vector: number[], k: number): { neighbors: number[]; distances: number[] };
+    searchKnn(
+      vector: number[],
+      k: number,
+      filter?: (label: number) => boolean,
+    ): { neighbors: number[]; distances: number[] };
+    getPoint(label: number): number[];
     setEf(ef: number): void;
     getEf(): number;
     getMaxElements(): number;

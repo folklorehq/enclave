@@ -41,6 +41,7 @@ export const MESSAGE_SENTENCE_REASONS: ReadonlyMap<string, string> = new Map([
   ['60c48fadcb1a6192', 'entity_key_zeroized'],
   ['ec21b3b973a3a0e7', 'error_capacity'],
   ['f1234d75178d892a', 'error_invalid'],
+  ['5417c3d836fccca8', 'exact_search_dimension_mismatch'],
   ['eacaad0349faed12', 'fact_body_is_not_text'],
   ['efeab7f11c9613de', 'failed_ensure_all_members_audience'],
   ['19310fceb1d380d5', 'general_admission_basis_invalid'],

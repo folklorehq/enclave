@@ -71,6 +71,10 @@ export class TenantRequestQuiescer {
     return holders?.size === 1 && holders.has(holder);
   }
 
+  isFenced(tenantId: string): boolean {
+    return this.states.get(tenantId)?.fenced === true;
+  }
+
   private stateFor(tenantId: string): TenantRequestState {
     let state = this.states.get(tenantId);
     if (!state) {

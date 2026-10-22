@@ -1,25 +1,33 @@
 import { GetObjectCommand, type S3Client } from '@aws-sdk/client-s3';
-import type {
-  AudienceAccess,
-  FactExcerptParams,
-  FactExcerptReader,
-  FactMetadata,
-  FactRetriever,
-  FactSearchParams,
-  FactSnippetParams,
-  RetrievedFact,
-  RetrieverDeps,
+import {
+  assertResolvedLensFor,
+  type AudienceAccess,
+  type FactExcerptParams,
+  type FactExcerptReader,
+  type FactMetadata,
+  type FactRetriever,
+  type FactSearchParams,
+  type FactSnippetParams,
+  type LensSearchParams,
+  type RetrievedFact,
+  type RetrieverDeps,
 } from '@folklore/api';
 import {
   FACT_EXCERPT_BATCH_MAX,
   FACT_EXCERPT_MAX_CHARS,
   SNIPPET_MAX_CHARS,
 } from '@folklore/contracts';
+import { InternalError, isAppError } from '@folklore/errors';
 import { isSensitivityWithin } from '@folklore/wiki';
 import { feedLineOf } from './feed-line.js';
 import type { EnclaveCrypto } from '../crypto/esdk.js';
 import { embedText } from '../inference/phala.js';
+import type { TenantContext } from '../tenant/tenant-context.js';
 import type { ResolveTenant } from '../tenant/tenant-resolver.js';
+import { KeyedSemaphore } from './KeyedSemaphore.js';
+
+const LENS_SEARCH_MAX_CONCURRENCY = 4;
+const LENS_FAILURE_MESSAGE = 'lens retrieval failed';
 
 const FACT_EXCERPT_BATCH_TOO_LARGE = 'fact_excerpt_batch_too_large';
 
@@ -38,11 +46,18 @@ export interface GatedFact {
   body: string;
 }
 
+export interface LensRetrieval {
+  facts: GatedFact[];
+  matchedOutsideLens: boolean;
+}
+
 // semantic retrieval that never leaves the enclave. The query is
 // embedded and matched against the in-enclave index; matches are audience-gated
 // on content-free metadata before any body is decrypted, and a body is decrypted
 // (AAD-bound to its row) only to preview a fact the caller is allowed to see.
 export class EnclaveFactRetriever implements FactRetriever, FactExcerptReader {
+  private readonly lensSlots = new KeyedSemaphore(LENS_SEARCH_MAX_CONCURRENCY);
+
   constructor(private readonly deps: FactRetrieverDeps) {}
 
   async search(params: FactSearchParams): Promise<RetrievedFact[]> {
@@ -116,26 +131,97 @@ export class EnclaveFactRetriever implements FactRetriever, FactExcerptReader {
   // Embed → ANN → audience-gate → decrypt, shared by snippet search and answer grounding.
   // bodyLimit caps decrypted body length; nothing above the caller's audience is ever decrypted.
   async retrieveGated(params: FactSearchParams, bodyLimit: number): Promise<GatedFact[]> {
-    const { orgId, userId, query, limit } = params;
+    return this.retrieveGatedWith(params, bodyLimit, () =>
+      this.deps.resolveAudienceAccess(params.orgId, params.userId),
+    );
+  }
+
+  async retrieveGatedForAccess(
+    params: FactSearchParams,
+    access: AudienceAccess,
+    bodyLimit: number,
+  ): Promise<GatedFact[]> {
+    return this.retrieveGatedWith(params, bodyLimit, async () => access);
+  }
+
+  private async retrieveGatedWith(
+    params: FactSearchParams,
+    bodyLimit: number,
+    accessFor: () => Promise<AudienceAccess>,
+  ): Promise<GatedFact[]> {
+    const { orgId, query, limit } = params;
     if (!query.trim() || limit <= 0) return [];
 
     // Fail closed BEFORE any index/keyring is touched: an orgId not in the assigned set throws here
     // (§4.2). The tenant's own HNSW self-guards on orgId too, so retrieval only ever answers for it.
     const tenant = this.deps.resolveTenant(orgId);
 
-    const queryVec = this.deps.embedQuery
-      ? await this.deps.embedQuery(orgId, query)
-      : await embedText(query);
+    const queryVec = await this.embed(orgId, query);
     await tenant.hnsw.whenReady();
     const hits = tenant.hnsw.query(orgId, queryVec, limit);
+    return this.gateAndDecrypt(tenant, params, hits, bodyLimit, accessFor);
+  }
+
+  // Ranks only the facts the caller's lens allows; the per-fact audience gate still runs on every hit.
+  async retrieveInLens(params: LensSearchParams, bodyLimit: number): Promise<LensRetrieval> {
+    const { orgId, userId, query, limit } = params;
+    if (!query.trim() || limit <= 0) return { facts: [], matchedOutsideLens: false };
+
+    const tenant = this.deps.resolveTenant(orgId);
+    assertResolvedLensFor(params.lens, { orgId, userId }, params.lens.audienceId);
+    try {
+      return await this.searchLens(tenant, params, bodyLimit);
+    } catch (err) {
+      // The lens holds up to ~200k fact ids; a raw error from a callee must not carry them into a log.
+      if (isAppError(err)) throw err;
+      throw new InternalError(LENS_FAILURE_MESSAGE);
+    }
+  }
+
+  private async searchLens(
+    tenant: TenantContext,
+    params: LensSearchParams,
+    bodyLimit: number,
+  ): Promise<LensRetrieval> {
+    const { orgId, query, limit, lens } = params;
+    if (lens.factIds.size === 0) {
+      return { facts: [], matchedOutsideLens: await lens.hasVisibleFactOutside() };
+    }
+
+    const queryVec = await this.embed(orgId, query);
+    await tenant.hnsw.whenReady();
+    const facts = await this.lensSlots.run(orgId, async () => {
+      const hits = tenant.hnsw
+        .query(orgId, queryVec, limit, lens.factIds)
+        .filter((hit) => lens.factIds.has(hit.factId));
+      return this.gateAndDecrypt(tenant, params, hits, bodyLimit, () =>
+        this.deps.resolveAudienceAccess(orgId, params.userId),
+      );
+    });
+    if (facts.length > 0) return { facts, matchedOutsideLens: false };
+    return { facts: [], matchedOutsideLens: await lens.hasVisibleFactOutside() };
+  }
+
+  private embed(orgId: string, query: string): Promise<number[]> {
+    return this.deps.embedQuery ? this.deps.embedQuery(orgId, query) : embedText(query);
+  }
+
+  private async gateAndDecrypt(
+    tenant: TenantContext,
+    params: FactSearchParams,
+    hits: { factId: string; distance: number }[],
+    bodyLimit: number,
+    accessFor: () => Promise<AudienceAccess>,
+  ): Promise<GatedFact[]> {
     if (hits.length === 0) return [];
+    const { orgId } = params;
 
     const [metaRows, access] = await Promise.all([
       this.deps.loadFactMetadata(
         orgId,
         hits.map((h) => h.factId),
       ),
-      this.deps.resolveAudienceAccess(orgId, userId),
+      accessFor(),
     ]);
     const metaById = new Map(metaRows.map((m) => [m.id, m]));
 

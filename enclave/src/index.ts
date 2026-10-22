@@ -61,6 +61,8 @@ import { HaltGate, poolHaltKey, tenantHaltKey } from './control/HaltGate.js';
 import { ActivityMonitor } from './control/ActivityMonitor.js';
 import { EnclaveFactRetriever } from './retrieval/EnclaveFactRetriever.js';
 import { EnclaveFactAnswerer } from './workers/EnclaveFactAnswerer.js';
+import { EnclaveAgentLoop } from './workers/agent/EnclaveAgentLoop.js';
+import { agentRetrieverDeps } from './workers/agent/agent-retriever-deps.js';
 import { EnclaveWikiContentDecryptor } from './wiki/EnclaveWikiContentDecryptor.js';
 import { EnclaveWikiEditSealer } from './wiki/EnclaveWikiEditSealer.js';
 import { EnclaveWikiPublicationSealer } from './wiki/EnclaveWikiPublicationSealer.js';
@@ -113,6 +115,7 @@ import { ProviderRouteRegistry } from './inference/routing/ProviderRouteRegistry
 import { claudeCredentialLoadErrors } from './inference/claude/ClaudeCredentialSource.js';
 import { poolPolicyPortsFrom } from './inference/tenant-inference-builders.js';
 import { TenantPolicyWiring } from './tenant/TenantPolicyWiring.js';
+import { createTenantAdmission } from './tenant/admission/tenant-admission.js';
 import { createOperationTrustedTime } from './inference/OperationTrustedTime.js';
 import {
   NSM_TURN_REFRESH_TIMEOUT_CODE,
@@ -1022,12 +1025,13 @@ const tenantRequestQuiescence = new TenantRequestQuiescenceMonitor({
     synthesisConsumer?.finishTenantEviction(tenantId);
   },
 });
-const beginTenantRequest = async (tenantId: string) => {
-  const halted = await new HaltGate(haltCache, DEPLOYMENT_ID, logger, [
+const isTenantHaltedNow = (tenantId: string) =>
+  new HaltGate(haltCache, DEPLOYMENT_ID, logger, [
     tenantHaltKey(tenantId),
     ...(isSharedPool ? [poolHaltKey(POOL_ID)] : []),
   ]).isHalted();
-  if (halted) return undefined;
+const beginTenantRequest = async (tenantId: string) => {
+  if (await isTenantHaltedNow(tenantId)) return undefined;
   return tenantRequests.begin(tenantId);
 };
 
@@ -1389,6 +1393,18 @@ try {
     // traffic from anywhere, and a scanner hitting it must not be able to hold this host awake.
     onAuthenticatedRequest: () => activityMonitor.touch(),
     beginTenantRequest,
+    isTenantAdmitted: createTenantAdmission({
+      isHaltedNow: isTenantHaltedNow,
+      isFenced: (tenantId) => tenantRequests.isFenced(tenantId),
+    }),
+    agentLoopFactory: (deps) =>
+      new EnclaveAgentLoop({
+        retriever: buildRetriever(agentRetrieverDeps(deps.loadFactMetadata)),
+        listThemes: deps.listThemes,
+        readPage: deps.readPage,
+        generate: (orgId, prompt, systemPrompt) =>
+          answerInference.get(orgId).generate(prompt, systemPrompt, undefined, () => false),
+      }),
     ...(codebaseSettingsPort ? { codebaseSettings: codebaseSettingsPort } : {}),
     retrieverFactory: buildRetriever,
     factExcerptReaderFactory: buildRetriever,
