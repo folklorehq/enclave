@@ -83,6 +83,10 @@ export class TenantContext implements LlmCacheNamer {
     return this.hnswOrNull;
   }
 
+  residentFactsIndex(): HnswStore | null {
+    return this.hnswOrNull;
+  }
+
   get pipeline(): Pipeline {
     if (!this.pipelineOrNull) throw new TenantContextZeroizedError(this.tenantId);
     return this.pipelineOrNull;
@@ -135,6 +139,6 @@ export class TenantContext implements LlmCacheNamer {
     this.keyringOrNull = null;
     this.hnswOrNull = null;
     this.pipelineOrNull = null;
-    hnsw?.free();
+    hnsw?.release();
   }
 }

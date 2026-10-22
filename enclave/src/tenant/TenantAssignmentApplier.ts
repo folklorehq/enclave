@@ -8,13 +8,15 @@ import type {
   VersionedTenantAssignment,
 } from '@folklore/contracts';
 import type { TenantContext } from './tenant-context.js';
-import type { TenantIdentity } from './TenantContextFactory.js';
+import { HnswStore } from '../hnsw/index.js';
+import type { ResidentIndexOffer, TenantIdentity } from './TenantContextFactory.js';
 import { TenantRegistry } from './tenant-registry.js';
 import type { QueueAssignment } from './QueueSetDrainer.js';
 import { toInitialStorageKeyVersion } from './tenant-assignments.js';
 import {
   TenantGenerationRegistry,
   type TenantGenerationEntry,
+  type TenantGenerationPointer,
 } from './TenantGenerationRegistry.js';
 import {
   TenantPolicySnapshotRegistry,
@@ -27,15 +29,20 @@ import {
 import { PolicyGenerationQuiescence } from './quiescence/PolicyGenerationQuiescence.js';
 import type { TenantEviction } from './quiescence/tenant-generation-quiescence.js';
 
-export type BuildTenantContext = (identity: TenantIdentity) => Promise<TenantContext>;
+export type BuildTenantContext = (
+  identity: TenantIdentity,
+  resident?: ResidentIndexOffer,
+) => Promise<TenantContext>;
 export type TenantPolicyAssignment = VersionedTenantAssignment & {
   readonly activePolicyCarrier?: SignedActivePolicyCarrierV1;
   readonly recoveryKeyBinding?: RecoveryKeyBindingV1;
 };
 export type SignedRecoveryKeyFor = (assignment: TenantPolicyAssignment) => string | undefined;
-const TENANT_TEARDOWN_TIMEOUT_MS = 10_000;
+export const TENANT_TEARDOWN_TIMEOUT_MS = 10_000;
+// Mirrors the control plane's tenant grant ceiling, which the enclave cannot import; the HNSW predecessor wait must outlast this many teardowns.
+export const MAX_REPLACED_CONTEXTS_PER_GENERATION = 12;
 // Covers a full queue sweep and a synthesis job's visibility window; requests stay admitted meanwhile.
-const GENERATION_WORK_TIMEOUT_MS = 120_000;
+export const GENERATION_WORK_TIMEOUT_MS = 120_000;
 const ACTIVATION_SUPERSEDED = 'assignment_generation_activation_superseded';
 
 // Called for every replaced or dropped context before it is zeroized so co-resident subsystems can
@@ -47,6 +54,13 @@ export type OnTenantQuiescenceFailure = (
   tenantId: string,
   phase: 'generation' | 'teardown',
 ) => void;
+
+export class TenantTeardownHookError extends Error {
+  constructor() {
+    super('tenant_teardown_hook_failed');
+    this.name = 'TenantTeardownHookError';
+  }
+}
 
 export interface TenantPolicyAssignmentApplierOptions<TSnapshot extends TenantPolicySnapshotLike> {
   readonly registry: TenantRegistry;
@@ -60,11 +74,26 @@ export interface TenantPolicyAssignmentApplierOptions<TSnapshot extends TenantPo
   readonly onActivated?: OnTenantActivated;
   readonly onGenerationChanged?: TenantEviction;
   readonly onGenerationWorkQuiescing?: TenantEviction;
+  readonly onQuiescenceFailure?: OnTenantQuiescenceFailure;
 }
 
 type StagedEntry = TenantGenerationEntry<TenantContext, TenantPolicySnapshotLike>;
 
+interface PublishProgress {
+  published: boolean;
+  teardownReported: boolean;
+}
+
+interface PublishedGeneration {
+  readonly registry: TenantGenerationRegistry<TenantContext, TenantPolicySnapshotLike>;
+  readonly previous: TenantGenerationPointer<TenantContext, TenantPolicySnapshotLike>;
+  readonly nextState: ReadonlyMap<string, StagedEntry>;
+  readonly assignments: readonly TenantPolicyAssignment[];
+  readonly generation: number;
+}
+
 interface StageInputs {
+  readonly previous: ReadonlyMap<string, StagedEntry>;
   readonly staged: Map<string, StagedEntry>;
   readonly built: Set<TenantContext>;
   readonly signedRecoveryKeys: ReadonlyMap<string, string>;
@@ -141,7 +170,7 @@ export class TenantAssignmentApplier {
     this.onActivated = registryOrOptions.onActivated;
     this.onGenerationChanged = registryOrOptions.onGenerationChanged;
     this.onGenerationCommitted = undefined;
-    this.onQuiescenceFailure = undefined;
+    this.onQuiescenceFailure = registryOrOptions.onQuiescenceFailure;
     this.policyMode = registryOrOptions;
     this.policyQuiescence = new PolicyGenerationQuiescence({
       quiesceWork: registryOrOptions.onGenerationWorkQuiescing,
@@ -222,7 +251,7 @@ export class TenantAssignmentApplier {
     const staged = new Map<string, StagedEntry>();
     const built = new Set<TenantContext>();
     const quiesced = new Set<string>();
-    let published = false;
+    const progress: PublishProgress = { published: false, teardownReported: false };
     try {
       const signedRecoveryKeys = this.signedRecoveryKeysFor(
         assignments,
@@ -236,7 +265,13 @@ export class TenantAssignmentApplier {
       const previousTenantIds = [...previous.entries.keys()];
       const onLateQuiesced = (tenantId: string, attempt: number) =>
         this.queueLateReactivation(tenantId, previous.generation, attempt);
-      const stage: StageInputs = { staged, built, signedRecoveryKeys, snapshots: stagedSnapshots };
+      const stage: StageInputs = {
+        previous: previous.entries,
+        staged,
+        built,
+        signedRecoveryKeys,
+        snapshots: stagedSnapshots,
+      };
       await this.stageBatch(
         assignments.filter(({ tenantId }) => !previous.entries.has(tenantId)),
         stage,
@@ -254,51 +289,119 @@ export class TenantAssignmentApplier {
         generation,
         digest,
       );
-      published = true;
+      progress.published = true;
+      HnswStore.markPublished(assignments.map(({ tenantId }) => tenantId));
       this.activePolicyGeneration = undefined;
       this.assigned.clear();
       for (const assignment of assignments) this.assigned.set(assignment.tenantId, assignment);
       this.lastAcceptedGeneration = generation;
       this.lastAcceptedDigest = digest;
-      const reread = this.policyMode.generationRegistry.read();
-      if (reread.generation !== generation || reread.entries.size !== assignments.length) {
-        throw new Error('tenant_generation_post_read_mismatch');
-      }
-      for (const assignment of assignments) {
-        const entry = reread.entries.get(assignment.tenantId);
-        if (
-          !entry ||
-          entry.context !== nextState.get(assignment.tenantId)?.context ||
-          entry.snapshot !== nextState.get(assignment.tenantId)?.snapshot
-        ) {
-          throw new Error('tenant_generation_post_read_mismatch');
-        }
-      }
-      for (const [tenantId, oldEntry] of previous.entries) {
-        if (
-          !reread.entries.has(tenantId) ||
-          reread.entries.get(tenantId)?.context !== oldEntry.context
-        ) {
-          try {
-            await this.onTornDown?.(tenantId);
-          } finally {
-            oldEntry.context.zeroize();
-          }
-        }
-      }
-      return { applied: true, generation, state: reread };
+      const state = await this.settlePublished(
+        {
+          registry: this.policyMode.generationRegistry,
+          previous,
+          nextState,
+          assignments,
+          generation,
+        },
+        progress,
+      );
+      return { applied: true, generation, state };
     } catch (error) {
-      if (!published) {
+      if (!progress.published) {
         for (const context of built) context.zeroize();
         if (!this.keepsClosed(previous.generation)) {
           for (const tenantId of quiesced) this.onActivated?.(tenantId);
         }
-      } else {
+      } else if (!progress.teardownReported) {
         for (const tenantId of this.policyMode.generationRegistry.read().entries.keys()) {
           this.onQuiescenceFailure?.(tenantId, 'teardown');
         }
       }
       throw error;
+    }
+  }
+
+  // The post-read mismatch keeps precedence over a teardown failure, but neither stops the replaced contexts from being zeroized.
+  private async settlePublished(published: PublishedGeneration, progress: PublishProgress) {
+    const reread = published.registry.read();
+    let mismatch: unknown;
+    try {
+      this.assertPublishedState(reread, published);
+    } catch (error) {
+      mismatch = error;
+    }
+    const teardownErrors = await this.tearDownReplaced(published, progress);
+    if (mismatch !== undefined) throw mismatch;
+    if (teardownErrors.length > 0) throw teardownErrors[0];
+    return reread;
+  }
+
+  private assertPublishedState(
+    reread: TenantGenerationPointer<TenantContext, TenantPolicySnapshotLike>,
+    { nextState, assignments, generation }: PublishedGeneration,
+  ): void {
+    if (reread.generation !== generation || reread.entries.size !== assignments.length) {
+      throw new Error('tenant_generation_post_read_mismatch');
+    }
+    for (const assignment of assignments) {
+      const entry = reread.entries.get(assignment.tenantId);
+      if (
+        !entry ||
+        entry.context !== nextState.get(assignment.tenantId)?.context ||
+        entry.snapshot !== nextState.get(assignment.tenantId)?.snapshot
+      ) {
+        throw new Error('tenant_generation_post_read_mismatch');
+      }
+    }
+  }
+
+  // Reports per failed tenant, never by walking the published registry: a tenant dropped to an empty manifest is not in it.
+  private async tearDownReplaced(
+    published: PublishedGeneration,
+    progress: PublishProgress,
+  ): Promise<unknown[]> {
+    const errors: unknown[] = [];
+    const failedTenantIds: string[] = [];
+    for (const { tenantId, context } of this.replacedContexts(published)) {
+      await this.tearDownReplacedContext(tenantId, context, errors, failedTenantIds);
+    }
+    progress.teardownReported = failedTenantIds.length > 0;
+    for (const tenantId of failedTenantIds) this.onQuiescenceFailure?.(tenantId, 'teardown');
+    return errors;
+  }
+
+  private replacedContexts({
+    registry,
+    previous,
+    nextState,
+  }: PublishedGeneration): Array<{ tenantId: string; context: TenantContext }> {
+    const live = new Set<TenantContext>();
+    for (const { context } of nextState.values()) live.add(context);
+    for (const { context } of registry.read().entries.values()) live.add(context);
+    return [...previous.entries]
+      .filter(([, entry]) => !live.has(entry.context))
+      .map(([tenantId, entry]) => ({ tenantId, context: entry.context }));
+  }
+
+  // The policy path zeroizes at once rather than quarantining, because a replaced index must be freed for its successor's wait to end.
+  private async tearDownReplacedContext(
+    tenantId: string,
+    context: TenantContext,
+    errors: unknown[],
+    failedTenantIds: string[],
+  ): Promise<void> {
+    const { completed } = await this.runTornDown(tenantId);
+    if (!completed) {
+      this.logger.error('tenant teardown hook failed', { tenant_id: tenantId });
+      failedTenantIds.push(tenantId);
+      errors.push(new TenantTeardownHookError());
+    }
+    try {
+      context.zeroize();
+    } catch (error) {
+      errors.push(error);
+      if (!failedTenantIds.includes(tenantId)) failedTenantIds.push(tenantId);
     }
   }
 
@@ -313,10 +416,11 @@ export class TenantAssignmentApplier {
 
   private async buildStaged(
     assignment: TenantPolicyAssignment,
-    { built, signedRecoveryKeys, snapshots }: StageInputs,
+    { previous, built, signedRecoveryKeys, snapshots }: StageInputs,
   ): Promise<StagedEntry> {
     const signedRecoveryPubkey = signedRecoveryKeys.get(assignment.tenantId);
-    const context = await this.build({
+    const resident = previous.get(assignment.tenantId)?.context.residentFactsIndex();
+    const identity: TenantIdentity = {
       tenantId: assignment.tenantId,
       deploymentId: assignment.deploymentId,
       ...(assignment.tenantDeploymentId
@@ -330,7 +434,10 @@ export class TenantAssignmentApplier {
       sealedBlobBucket: assignment.sealedBlobBucket,
       rawPayloadsBucket: assignment.rawPayloadsBucket,
       processedBucket: assignment.processedBucket,
-    });
+    };
+    const context = await (resident === undefined
+      ? this.build(identity)
+      : this.build(identity, { factsIndex: resident }));
     built.add(context);
     const snapshot = snapshots.get(assignment.tenantId);
     if (!snapshot) throw new Error('tenant_policy_snapshot_missing');
@@ -419,7 +526,9 @@ export class TenantAssignmentApplier {
     }
   }
 
+  // A stalled refresh would otherwise read an apply still in flight as already applied and ack it.
   matchesCurrentManifest(manifest: NormalizedAssignmentManifestV1): boolean {
+    if (this.policyApplyInFlight) return false;
     return (
       manifest.generation === this.lastAcceptedGeneration &&
       manifest.digest === this.lastAcceptedDigest &&

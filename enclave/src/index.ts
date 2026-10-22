@@ -513,9 +513,13 @@ const runtimeDatabaseLease = new RuntimeDatabaseLease<
 let activateRuntimeDatabase: ((config: RuntimeDatabaseConfig) => Promise<void>) | undefined;
 let runtimeDatabaseActivation: Promise<void> | undefined;
 let evictAnswerInference: ((tenantId: string) => Promise<void>) | undefined;
+function exitOnTenantQuiescenceFailure(tenantId: string, phase: 'generation' | 'teardown'): void {
+  logger.fatal('tenant_quiescence_failed', { tenant_id: tenantId, phase });
+  process.exit(1);
+}
 const assignmentApplier = new TenantAssignmentApplier(
   registry,
-  (identity) => tenantFactory.build(identity),
+  (identity, resident) => tenantFactory.build(identity, resident),
   logger,
   async (tenantId) => {
     const requestDrain = tenantRequests.fence(tenantId);
@@ -573,10 +577,7 @@ const assignmentApplier = new TenantAssignmentApplier(
     synthesisConsumer?.finishTenantEviction(tenantId);
     tenantRequests.activate(tenantId);
   },
-  (tenantId, phase) => {
-    logger.fatal('tenant_quiescence_failed', { tenant_id: tenantId, phase });
-    process.exit(1);
-  },
+  exitOnTenantQuiescenceFailure,
 );
 let liveActivePolicySnapshotVerifier: VerifiedActivePolicySnapshotVerifier | undefined;
 const policySnapshots = new TenantPolicySnapshotRegistry<LiveTenantPolicySnapshot, TenantContext>(
@@ -651,7 +652,7 @@ const policyAssignmentApplier = new TenantAssignmentApplier({
   registry,
   generationRegistry,
   snapshots: policySnapshots,
-  build: (identity) => tenantFactory.build(identity),
+  build: (identity, resident) => tenantFactory.build(identity, resident),
   signedRecoveryKey: signedRecoveryKeyFor,
   verifyPolicy: async (assignment: TenantPolicyAssignment) => {
     const carrier = assignment.activePolicyCarrier;
@@ -690,6 +691,7 @@ const policyAssignmentApplier = new TenantAssignmentApplier({
     synthesisConsumer?.finishTenantEviction(tenantId);
     tenantRequests.activate(tenantId);
   },
+  onQuiescenceFailure: exitOnTenantQuiescenceFailure,
 });
 let runtimeAttestation =
   createRuntimeAttestationComposition({

@@ -57,6 +57,10 @@ export interface TenantIdentity {
   processedBucket?: string;
 }
 
+export interface ResidentIndexOffer {
+  readonly factsIndex: HnswStore | null;
+}
+
 export type MintMasterKeyFn = (kmsKeyId: string, tenantId: string) => Promise<MintedMasterKey>;
 
 export type UnsealMasterKeyFn = (
@@ -109,7 +113,10 @@ const VERIFIED_BOOT_PROOF_ERROR = 'verified boot proof failed';
 export class TenantContextFactory {
   constructor(private readonly deps: TenantContextFactoryDeps) {}
 
-  async build(assignedIdentity: TenantIdentity): Promise<TenantContext> {
+  async build(
+    assignedIdentity: TenantIdentity,
+    resident?: ResidentIndexOffer,
+  ): Promise<TenantContext> {
     const identity = this.withKmsKeyArns(assignedIdentity);
     const sealedBlobBucket = this.resolveBucket(
       identity.sealedBlobBucket ?? '',
@@ -125,14 +132,19 @@ export class TenantContextFactory {
     const masterKey = await this.bootMasterKey(identity);
     let hnsw: HnswStore | undefined;
     try {
-      hnsw = HnswStore.deferred(
-        this.deps.s3,
+      hnsw = HnswStore.deferredFacts({
+        s3: this.deps.s3,
         keyring,
-        processedBucket,
-        identity.tenantId,
-        hnswNamespaceFor(ACTIVE_EMBEDDING_SPACE),
-        this.deps.onIndexUnreadable,
-      );
+        bucket: processedBucket,
+        orgId: identity.tenantId,
+        namespace: hnswNamespaceFor(ACTIVE_EMBEDDING_SPACE),
+        space: ACTIVE_EMBEDDING_SPACE,
+        storageKeyId: this.activeStorageKeyId(identity),
+        ...(this.deps.onIndexUnreadable === undefined
+          ? {}
+          : { onUnreadable: this.deps.onIndexUnreadable }),
+        resident: resident?.factsIndex ?? null,
+      });
       const context: { current?: TenantContext } = {};
       const pipeline = new Pipeline(
         hnsw,
@@ -171,10 +183,18 @@ export class TenantContextFactory {
       context.current = tenantContext;
       return tenantContext;
     } catch (error) {
-      hnsw?.free();
+      hnsw?.release();
       masterKey.fill(0);
       throw error;
     }
+  }
+
+  private activeStorageKeyId(identity: TenantIdentity): string {
+    const active = identity.storageKeyHistory.find(
+      (entry) => entry.version === identity.activeStorageKeyVersion,
+    );
+    if (!active) throw new Error('active storage key version is not configured');
+    return active.storageKeyId.trim();
   }
 
   private buildInference(
