@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { KMSClient } from '@aws-sdk/client-kms';
@@ -21,6 +22,8 @@ import {
 import { TenantAssignmentApplier } from './tenant/TenantAssignmentApplier.js';
 import { AssignmentRefusalRecorder } from './tenant/AssignmentRefusalRecorder.js';
 import { AssignmentRefreshFlight } from './tenant/assignment/AssignmentRefreshFlight.js';
+import { AssignmentWakeSubscriber } from './tenant/assignment/AssignmentWakeSubscriber.js';
+import { PoolResidentMemorySampler } from './tenant/PoolResidentMemorySampler.js';
 import type { IsCurrentRefresh } from './tenant/assignment/AssignmentRefreshFlight.js';
 import type { TenantPolicyAssignment } from './tenant/TenantAssignmentApplier.js';
 import { signedRecoveryKeyFor } from './sealing/recovery-key-binding.js';
@@ -1217,6 +1220,7 @@ async function refreshAssignments(isCurrent: IsCurrentRefresh): Promise<void> {
       activePolicyGeneration = policyState.generation;
     }
     logger.info('assignment manifest applied', unsignedAcknowledgment);
+    await residentMemorySampler?.sample();
   } catch (err) {
     if (err instanceof Error && err.message === 'assignment_manifest_stale') return;
     // Log the error NAME only, never the raw error — a message could echo manifest field values.
@@ -1238,6 +1242,15 @@ function stopIfSuperseded(isCurrent: IsCurrentRefresh): boolean {
   return true;
 }
 
+const residentMemorySampler = isSharedPool
+  ? new PoolResidentMemorySampler(haltCache, DEPLOYMENT_ID, {
+      meminfo: () => readFileSync('/proc/meminfo', 'utf8'),
+      rssBytes: () => process.memoryUsage().rss,
+      tenantCount: () => registry.size,
+      now: Date.now,
+    })
+  : undefined;
+
 const ASSIGNMENT_REFRESH_STALL_MS = 300_000;
 const assignmentRefreshFlight = new AssignmentRefreshFlight(
   refreshAssignments,
@@ -1257,9 +1270,13 @@ const ASSIGNMENT_REFRESH_INTERVAL_MS = 30_000;
 // the fact-index save; on timeout we proceed WITHOUT freeing a still-pinned index (shred at exit).
 const SHUTDOWN_QUIESCE_TIMEOUT_MS = 10_000;
 const assignmentRefreshTimer = setInterval(
-  () => void assignmentRefreshFlight.run(),
+  () => void assignmentRefreshFlight.run().then(() => residentMemorySampler?.sample()),
   ASSIGNMENT_REFRESH_INTERVAL_MS,
 );
+const assignmentWakeSubscriber = isSharedPool
+  ? new AssignmentWakeSubscriber(haltCache.redis, POOL_ID, assignmentRefreshFlight, logger)
+  : undefined;
+assignmentWakeSubscriber?.start();
 
 // the enclave has no PostHog egress, so ops telemetry (attestation failures, receipt
 // verifications, model-gate rejections) is buffered onto the shared Redis list the box agent
@@ -1697,6 +1714,7 @@ const canaryAuthorizationConsumer =
 const router = new TenantMessageRouter({
   registry,
   ssm,
+  cursorStore: isSharedPool ? 'sealed' : 'legacy_ssm',
   s3,
   processedBucket: PROCESSED_OUTPUTS_BUCKET,
   controlPlaneUrl: controlPlaneIdentity?.origin ?? CONTROL_PLANE_URL,
@@ -1771,6 +1789,7 @@ drainerRef.current = new QueueSetDrainer({
 async function shutdown(): Promise<void> {
   logger.info('enclave shutting down — saving hnsw indices', { count: registry.size });
   clearInterval(assignmentRefreshTimer);
+  await assignmentWakeSubscriber?.close();
   if ((await entitlementProjectionRunner?.stop(SHUTDOWN_QUIESCE_TIMEOUT_MS)) === false)
     logger.warn('entitlement_projection_stop_timeout');
   if ((await memberIdentityLinkRunner?.stop(SHUTDOWN_QUIESCE_TIMEOUT_MS)) === false)

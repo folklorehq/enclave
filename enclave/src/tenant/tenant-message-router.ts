@@ -108,6 +108,7 @@ const GITHUB_BINDING_MISMATCH = 'github_installation_binding_mismatch';
 export interface TenantMessageRouterDeps {
   registry: TenantRegistry;
   ssm: SSMClient;
+  cursorStore?: PullRunnerDeps['cursorStore'];
   s3?: S3Client;
   processedBucket?: string;
   controlPlaneUrl: string;
@@ -204,6 +205,7 @@ export class TenantMessageRouter {
           : undefined;
       const result = await runPull(raw, {
         ssm: this.deps.ssm,
+        ...(this.deps.cursorStore ? { cursorStore: this.deps.cursorStore } : {}),
         s3: this.deps.s3,
         processedBucket: context.processedOutputsBucket || this.deps.processedBucket,
         orgId: queueTenantId,

@@ -140,8 +140,12 @@ export function resolvePullWindow(
   return { cursor: { value: backfill ? null : storedCursor }, options: { since, backfill } };
 }
 
+export type PullCursorStoreMode = 'sealed' | 'legacy_ssm';
+
 export interface PullRunnerDeps {
   ssm: SSMClient;
+  /** Where every cursor lives; absent keeps `code`, member and Notion cursors sealed and the rest in SSM. */
+  cursorStore?: PullCursorStoreMode;
   s3?: S3Client;
   processedBucket?: string;
   crypto: EnclaveCrypto;
@@ -274,9 +278,37 @@ async function saveSealedCursor(
   await sealedCursorStore(deps, message).save(message.sourceId, value);
 }
 
+const SSM_ACCESS_DENIED = 'AccessDeniedException';
+
+function isSealedMode(deps: PullRunnerDeps): boolean {
+  return deps.cursorStore === 'sealed';
+}
+
+// Only sealed mode names a source that is neither code, member nor Notion; every other mode keeps today's two codes.
+function isGenericSealedSource(deps: PullRunnerDeps, message: PullDueMessage): boolean {
+  return isSealedMode(deps) && message.ownerAccountId === undefined && message.kind !== NOTION_KIND;
+}
+
+// An unreadable sealed cursor re-snapshots; a missing one is read forward once from the legacy SSM parameter.
+async function loadCursorForRun(
+  deps: PullRunnerDeps,
+  message: PullDueMessage,
+): Promise<string | null> {
+  const sealed = await sealedCursorStore(deps, message).loadState(message.sourceId);
+  if (sealed.state === 'present') return sealed.value;
+  if (sealed.state === 'unreadable') return null;
+  try {
+    return await loadCursor(deps.ssm, message.tenant_id, message.sourceId);
+  } catch (error) {
+    if ((error as { name?: unknown } | null)?.name === SSM_ACCESS_DENIED) return null;
+    throw error;
+  }
+}
+
 function sealedCursorStore(deps: PullRunnerDeps, message: PullDueMessage): S3PullCursorStore {
   if (!deps.s3 || !deps.processedBucket) {
     if (message.kind === 'code') throw new Error('code_pull_cursor_store_unavailable');
+    if (isGenericSealedSource(deps, message)) throw new Error('pull_cursor_store_unavailable');
     throw new Error('member_pull_cursor_store_unavailable');
   }
   return new S3PullCursorStore({
@@ -508,10 +540,10 @@ export async function runPull(
 
   const startedAt = Date.now();
   const isCode = message.kind === 'code';
-  const usesSealedCursor = isCode || memberScope !== undefined || message.kind === NOTION_KIND;
+  const usesSealedCursor =
+    isCode || memberScope !== undefined || message.kind === NOTION_KIND || isSealedMode(deps);
   // The code cursor loads BEFORE the mint so a mint-403 early return can bump its tick.
-  const sealedCursor =
-    usesSealedCursor && message.kind !== NOTION_KIND ? await loadSealedCursor(deps, message) : null;
+  const sealedCursor = await loadRunCursor(deps, message, { isCode, memberScope });
 
   const token = await resolveSourceToken(
     message.kind,
@@ -599,6 +631,16 @@ export async function runPull(
       await saveCursor(deps.ssm, message.tenant_id, message.sourceId, cursor);
     },
   };
+}
+
+async function loadRunCursor(
+  deps: PullRunnerDeps,
+  message: PullDueMessage,
+  scope: { isCode: boolean; memberScope: MemberPullScope | undefined },
+): Promise<string | null> {
+  if (message.kind === NOTION_KIND) return null;
+  if (scope.isCode || scope.memberScope !== undefined) return loadSealedCursor(deps, message);
+  return isSealedMode(deps) ? loadCursorForRun(deps, message) : null;
 }
 
 function cursorProgressed(isCode: boolean, previous: string | null, next: string | null): boolean {

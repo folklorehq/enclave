@@ -125,6 +125,7 @@ export const MESSAGE_SENTENCE_REASONS: ReadonlyMap<string, string> = new Map([
   ['911e9bab19b2cb70', 'public_inference_trust_policy_changed'],
   ['dd2533bdcf512d30', 'public_inference_trust_policy_conflicts_legacy'],
   ['4a2e9cf52bfa9e7c', 'public_inference_trust_policy_requires_dstack_tdx'],
+  ['bdd525548fb1683d', 'pull_cursor_store_unavailable'],
   ['5a1a4aa13cc6ceac', 'pull_fact_budget_invalid'],
   ['24d88d573094e993', 'purge_org_requires_a_non_empty_org_id'],
   ['790d5e99c96a4f39', 'purge_org_requires_non_empty_command_id'],
