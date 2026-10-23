@@ -111,6 +111,8 @@ const VERIFIED_BOOT_PROOF_ERROR = 'verified boot proof failed';
 // pipeline). One factory serves the whole enclave; Stage 1 builds exactly one context, but the
 // per-tenant boot/keyring wiring is already parameterized so Stage 2 can build N (design §2.3).
 export class TenantContextFactory {
+  private readonly kmsClients = new Map<string, KMS>();
+
   constructor(private readonly deps: TenantContextFactoryDeps) {}
 
   async build(
@@ -286,14 +288,19 @@ export class TenantContextFactory {
     }
   }
 
+  // ESDK calls clientProvider on every operation, so the client (and its credential fetch) is cached.
+  private kmsClientFor(region: string): KMS {
+    let client = this.kmsClients.get(region);
+    if (!client) {
+      client =
+        this.deps.kmsClientProvider?.(region) ?? new KMS({ region, ...awsClientTransport() });
+      this.kmsClients.set(region, client);
+    }
+    return client;
+  }
+
   private buildKeyring(kmsKeyId: string): KmsKeyringNode {
-    const provider =
-      this.deps.kmsClientProvider ??
-      ((r?: string) =>
-        new KMS({
-          region: r || this.deps.region,
-          ...awsClientTransport(),
-        }));
+    const provider = (region?: string) => this.kmsClientFor(region || this.deps.region);
     return new KmsKeyringNode({
       generatorKeyId: kmsKeyId,
       clientProvider: (region?: string) =>

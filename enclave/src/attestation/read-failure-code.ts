@@ -1,5 +1,5 @@
 export const CREDENTIALS_UNAVAILABLE = 'boot_manifest_credentials_unavailable';
-// The SDK's default chain throws this class when IMDS (relayed on vsock 8003) gives it nothing.
+// The shared IMDS provider (relayed on vsock 8003) throws this class when IMDS gives it nothing.
 const CREDENTIALS_PROVIDER_ERROR = 'CredentialsProviderError';
 // SSM, KMS and Secrets Manager name a refusal AccessDeniedException; S3 names it AccessDenied.
 const ACCESS_DENIED_ERRORS: ReadonlySet<string> = new Set([

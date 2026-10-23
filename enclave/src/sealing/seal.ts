@@ -34,11 +34,14 @@ function masterKeyContext(tenantId: string): Record<string, string> {
   return { purpose: MASTER_KEY_PURPOSE, version: MASTER_KEY_VERSION, tenantId };
 }
 
+let sharedKmsClient: KMSClient | undefined;
+
 function kmsClient(): KMSClient {
-  return new KMSClient({
+  sharedKmsClient ??= new KMSClient({
     region: REGION,
     ...awsClientTransport(),
   });
+  return sharedKmsClient;
 }
 
 // The ephemeral key rides in the attestation document, so KMS encrypts its answer to this enclave alone.

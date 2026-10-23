@@ -9,6 +9,7 @@ export const CLAUDE_STRUCTURED_SCHEMA_DIGESTS: ReadonlyMap<string, string> = new
   ['fix_chart_block', '1f8727b9e8ea990aaff32a2fb89a546d1896bae28e9fd9b110d2e716f3995fc7'],
   ['report_same_concept', 'cf3eff456c35d8ac5afe2c85832abc2d8b32ea540c3a57ea533daadb1d0ed39b'],
   ['report_association', 'c39610d19beea31937d6bdffa1e1e1ef3d64fc4dbf30401b6bb45c393a2da722'],
+  ['report_theme_relation', '88336179de0b8e56dd4f1235e922f9d9d616bfc34610b7e9ebd5388588c8af1f'],
   ['report_visual_warrant', '40286383c4f56fd4928a123fa7219311c1db75e19b45607709e0efd6f86d8800'],
   ['report_support', '668edccaf60c0164199450ae5825638db3ff67f00d8a510d41687ea1c7f287b9'],
   ['report_page_issues', '532b7a1bfec835d4896739e7626bccc30a656a25260abc3e5a733b48fb073e9d'],
