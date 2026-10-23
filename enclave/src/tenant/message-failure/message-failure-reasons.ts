@@ -294,6 +294,12 @@ const SYNTHESIS_REASONS = [
   'synthesis_output_too_large',
   'tenant_cache_salt_zeroized',
   'theme_grouping_embedding_unavailable',
+  'theme_request_fact_source_mismatch',
+  'theme_snapshot_authority_mismatch',
+  'theme_snapshot_containers_mismatch',
+  'theme_snapshot_database_unavailable',
+  'theme_snapshot_unavailable',
+  'theme_synthesis_snapshot_mismatch',
 ] as const;
 
 const PIPELINE_REASONS = ['org_key_unavailable', 'revision_tag_malformed'] as const;

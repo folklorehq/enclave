@@ -58,6 +58,7 @@ import { HNSW_INDEX_UNREADABLE_CODE } from './hnsw/index.js';
 import { createTenantResolver } from './tenant/tenant-resolver.js';
 import { BoxServer } from './http/BoxServer.js';
 import { SynthesisConsumer } from './workers/SynthesisConsumer.js';
+import { ThemeSnapshotFactSource } from './workers/ThemeSnapshotFactSource.js';
 import { recordTokenUsage } from './inference/TokenUsageScope.js';
 import { fetchLinkPreview } from './preview/preview-client.js';
 import { HaltGate, poolHaltKey, tenantHaltKey } from './control/HaltGate.js';
@@ -513,6 +514,16 @@ const runtimeDatabaseLease = new RuntimeDatabaseLease<
 >({
   requestRestart: (exitCode) => process.exit(exitCode),
 });
+// Non-production only: the API container and the theme snapshot reader share this one pool.
+let localThemeDatabase: ReturnType<typeof createRuntimeDatabaseConnection> | undefined;
+function openLocalThemeDatabase(): ReturnType<typeof createRuntimeDatabaseConnection> | undefined {
+  const url = process.env['DATABASE_URL'];
+  if (!url) return undefined;
+  return createRuntimeDatabaseConnection({
+    url,
+    sslServerName: process.env['DB_SSL_SERVERNAME'] ?? '',
+  });
+}
 let activateRuntimeDatabase: ((config: RuntimeDatabaseConfig) => Promise<void>) | undefined;
 let runtimeDatabaseActivation: Promise<void> | undefined;
 let evictAnswerInference: ((tenantId: string) => Promise<void>) | undefined;
@@ -1521,7 +1532,10 @@ try {
     if (!signedRuntimeDatabase) throw new Error(RUNTIME_DATABASE_SIGNED_CONFIG_UNAVAILABLE);
     await activateRuntimeDatabase(signedRuntimeDatabase);
   } else {
-    const startingContainer = createContainer(apiOptions);
+    localThemeDatabase = openLocalThemeDatabase();
+    const startingContainer = createContainer(
+      localThemeDatabase ? { ...apiOptions, database: localThemeDatabase } : apiOptions,
+    );
     try {
       await startingContainer.start();
     } catch (err) {
@@ -1648,6 +1662,9 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
     sqs,
     s3,
     resolveTenant,
+    themeFactRefs: new ThemeSnapshotFactSource(
+      () => runtimeDatabaseLease.database() ?? localThemeDatabase,
+    ),
     processedBucket: PROCESSED_OUTPUTS_BUCKET,
     processedBucketFor: (orgId) => resolveTenant(orgId).processedOutputsBucket,
     activePolicyFreshnessFor,
