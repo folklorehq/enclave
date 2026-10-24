@@ -10,7 +10,11 @@ import type { S3Client } from '@aws-sdk/client-s3';
 import type { EnclaveCrypto } from '../crypto/esdk.js';
 import { resolveSourceToken } from '../pull/pull-runner.js';
 import type { DecryptedSourceConnection } from '../pull/source-connections-client.js';
-import { CodebaseSelectionStore } from './CodebaseSelectionStore.js';
+import {
+  CodebaseSelectionStore,
+  DEFAULT_CODEBASE_SELECTION,
+  isCodebaseSelectionMissing,
+} from './CodebaseSelectionStore.js';
 
 const PAGE_SIZE = 100;
 
@@ -102,9 +106,7 @@ export class EnclaveCodebaseSettingsAdapter implements CodebaseSettingsPort {
     try {
       return response(await this.store(scope).read({ orgId, deploymentId: scope.deploymentId }));
     } catch (error) {
-      if (error instanceof Error && error.message === 'codebase_selection_missing') {
-        return { mode: 'all', revision: 0, repositoryIds: [] };
-      }
+      if (isCodebaseSelectionMissing(error)) return response(DEFAULT_CODEBASE_SELECTION);
       throw error;
     }
   }

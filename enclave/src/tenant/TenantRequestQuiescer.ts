@@ -71,6 +71,10 @@ export class TenantRequestQuiescer {
     return holders?.size === 1 && holders.has(holder);
   }
 
+  isWorkHeldBy(tenantId: string, holder: TenantQuiescenceHolder): boolean {
+    return this.states.get(tenantId)?.workHolders.has(holder) === true;
+  }
+
   isFenced(tenantId: string): boolean {
     return this.states.get(tenantId)?.fenced === true;
   }

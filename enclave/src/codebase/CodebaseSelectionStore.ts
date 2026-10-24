@@ -57,6 +57,17 @@ export type RepositoryRef = z.infer<typeof repositoryRefSchema>;
 export type CodebaseSelection = z.infer<typeof codebaseSelectionSchema>;
 export type CodebaseSelectionWrite = z.infer<typeof codebaseSelectionWriteSchema>;
 
+export const DEFAULT_CODEBASE_SELECTION: CodebaseSelection = {
+  formatVersion: CODEBASE_SELECTION_FORMAT_VERSION,
+  revision: 0,
+  mode: 'all',
+  repositories: [],
+};
+
+export function isCodebaseSelectionMissing(error: unknown): boolean {
+  return error instanceof Error && error.message === 'codebase_selection_missing';
+}
+
 export interface CodebaseSelectionStoreDeps {
   s3: S3Client;
   bucket: string;
@@ -201,7 +212,7 @@ export class CodebaseSelectionStore {
   }
 
   private isMissing(error: unknown): boolean {
-    return error instanceof Error && error.message === 'codebase_selection_missing';
+    return isCodebaseSelectionMissing(error);
   }
 
   private isUnavailable(error: unknown): boolean {

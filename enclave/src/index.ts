@@ -24,6 +24,7 @@ import { AssignmentRefusalRecorder } from './tenant/AssignmentRefusalRecorder.js
 import { AssignmentRefreshFlight } from './tenant/assignment/AssignmentRefreshFlight.js';
 import { AssignmentWakeSubscriber } from './tenant/assignment/AssignmentWakeSubscriber.js';
 import { PoolResidentMemorySampler } from './tenant/PoolResidentMemorySampler.js';
+import { EventLoopDelayMonitor } from './logging/EventLoopDelayMonitor.js';
 import type { IsCurrentRefresh } from './tenant/assignment/AssignmentRefreshFlight.js';
 import type { TenantPolicyAssignment } from './tenant/TenantAssignmentApplier.js';
 import { signedRecoveryKeyFor } from './sealing/recovery-key-binding.js';
@@ -57,6 +58,7 @@ import { saveAllTenantIndices } from './tenant/index-persistence.js';
 import { HNSW_INDEX_UNREADABLE_CODE } from './hnsw/index.js';
 import { createTenantResolver } from './tenant/tenant-resolver.js';
 import { BoxServer } from './http/BoxServer.js';
+import { HostHeadroomGauge } from './workers/HostHeadroomGauge.js';
 import { SynthesisConsumer } from './workers/SynthesisConsumer.js';
 import { ThemeSnapshotFactSource } from './workers/ThemeSnapshotFactSource.js';
 import { recordTokenUsage } from './inference/TokenUsageScope.js';
@@ -222,6 +224,7 @@ import {
   AwsBootManifestSecretsManager,
   AwsBootManifestSsmParameters,
 } from './attestation/boot-manifest-secret-clients.js';
+import { attestedRecipients } from './sealing/seal.js';
 import { getAttestationDoc } from './sealing/nsm.js';
 import { deriveIngestKeypair } from './sealing/keygen.js';
 import { devMasterKeySealers } from './sealing/dev-master-key-sealers.js';
@@ -1284,6 +1287,8 @@ const assignmentRefreshTimer = setInterval(
   () => void assignmentRefreshFlight.run().then(() => residentMemorySampler?.sample()),
   ASSIGNMENT_REFRESH_INTERVAL_MS,
 );
+const eventLoopDelayMonitor = new EventLoopDelayMonitor(logger);
+eventLoopDelayMonitor.start();
 const assignmentWakeSubscriber = isSharedPool
   ? new AssignmentWakeSubscriber(haltCache.redis, POOL_ID, assignmentRefreshFlight, logger)
   : undefined;
@@ -1474,7 +1479,7 @@ try {
       let candidate: ApiContainer | undefined;
       const consumed = await new RuntimeDatabaseCredentialConsumer({
         parameters: new SsmRuntimeDatabaseParameters(ssm),
-        recipientDecryptor: new KmsRecipientDecryptor(kms, getAttestationDoc),
+        recipientDecryptor: new KmsRecipientDecryptor(kms, attestedRecipients),
         createDatabase: createRuntimeDatabaseConnection,
         readiness: createRuntimeDatabaseReadiness(async (database) => {
           const started = createContainer({ ...apiOptions, database });
@@ -1777,6 +1782,7 @@ const collectPoolUsage = (): PoolTenantUsage[] =>
       key_count: 1,
     }));
 
+const drainHeadroomGauge = new HostHeadroomGauge();
 drainerRef.current = new QueueSetDrainer({
   sqs,
   s3,
@@ -1795,6 +1801,7 @@ drainerRef.current = new QueueSetDrainer({
   writeIdle: writeIdleFlag,
   idlePollThreshold: IDLE_POLL_THRESHOLD,
   isBusy: () => activityMonitor.isBusy(),
+  headroom: () => drainHeadroomGauge.read(),
   onDrainComplete: async () => {
     if (!isSharedPool) return;
     await haltCache.set(`pool:usage:${DEPLOYMENT_ID}`, collectPoolUsage(), 300);
@@ -1807,6 +1814,7 @@ async function shutdown(): Promise<void> {
   logger.info('enclave shutting down — saving hnsw indices', { count: registry.size });
   clearInterval(assignmentRefreshTimer);
   await assignmentWakeSubscriber?.close();
+  eventLoopDelayMonitor.stop();
   if ((await entitlementProjectionRunner?.stop(SHUTDOWN_QUIESCE_TIMEOUT_MS)) === false)
     logger.warn('entitlement_projection_stop_timeout');
   if ((await memberIdentityLinkRunner?.stop(SHUTDOWN_QUIESCE_TIMEOUT_MS)) === false)

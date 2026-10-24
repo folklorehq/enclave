@@ -2,7 +2,8 @@ import { once } from 'node:events';
 import { Server, type IncomingMessage } from 'node:http';
 import { createConnection, Socket, type AddressInfo } from 'node:net';
 import type { Duplex } from 'node:stream';
-import { Hono } from 'hono';
+import { Hono, type MiddlewareHandler } from 'hono';
+import { etag } from 'hono/etag';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import {
@@ -35,8 +36,19 @@ const CLOSE_TIMEOUT_MS = 5_000;
 const REFUSED_UNCONFIGURED = 'unconfigured';
 const REFUSED_CAPACITY = 'capacity';
 const REFUSED_UPSTREAM = 'upstream_unreachable';
-const ROLL_SW_FILE = `./dist/box${ROLL_SW_PATH}`;
 const NO_CACHE = 'no-cache';
+const SHELL_CACHE = 'private, no-cache';
+const NO_STORE = 'no-store';
+const IMMUTABLE_CACHE = 'public, max-age=31536000, immutable';
+const HASHED_ASSET_PATH = '/assets/*';
+const BOX_DIST_ROOT = './dist/box';
+const ROLL_SW_FILE = `${BOX_DIST_ROOT}${ROLL_SW_PATH}`;
+const BOX_INDEX_FILE = `${BOX_DIST_ROOT}/index.html`;
+const CACHE_CONTROL = 'Cache-Control';
+const CONTENT_TYPE = 'Content-Type';
+const CONTENT_ENCODING = 'Content-Encoding';
+const VARY = 'Vary';
+const ACCEPT_ENCODING = 'Accept-Encoding';
 const JAVASCRIPT_CONTENT_TYPE = 'text/javascript; charset=utf-8';
 
 export class BoxServer {
@@ -72,6 +84,7 @@ export class BoxServer {
     // Without this a non-upgrade GET would fall through to the catch-all and answer 200 index.html.
     this.app.all(COLLAB_WS_PATH, (c) => c.text('upgrade required', 426));
 
+    this.app.use('/oauth-submission/*', this.uncachedUnlessDeclared);
     if (options.oauthIngress) {
       const oauthIngress = options.oauthIngress;
       this.app.all('/oauth-submission/*', (c) => {
@@ -86,6 +99,7 @@ export class BoxServer {
     // every /api/* request runs in-process over content decrypted only inside this enclave. The
     // handler is resolved per request so a shared pool can attach its first verified database after
     // the static shell has already started.
+    this.app.use('/api/*', this.uncachedUnlessDeclared);
     this.app.all('/api/*', (c) => {
       const api = this.api;
       return api ? api(c.req.raw) : c.json({ error: 'api_unavailable' }, 503);
@@ -97,15 +111,14 @@ export class BoxServer {
       serveStatic({
         path: ROLL_SW_FILE,
         onFound: (_path, c) => {
-          c.header('Cache-Control', NO_CACHE);
-          c.header('Content-Type', JAVASCRIPT_CONTENT_TYPE);
+          c.header(CACHE_CONTROL, NO_CACHE);
+          c.header(CONTENT_TYPE, JAVASCRIPT_CONTENT_TYPE);
         },
       }),
     );
     this.app.get(ROLL_SW_PATH, (c) => c.notFound());
 
-    this.app.use('/*', serveStatic({ root: './dist/box' }));
-    this.app.get('/*', serveStatic({ path: './dist/box/index.html' }));
+    this.mountStaticShell();
   }
 
   get fetch(): FetchHandler {
@@ -116,6 +129,33 @@ export class BoxServer {
     this.api = api;
     this.apiReady = true;
     this.collabPort = this.usableCollabPort(collabPort ?? COLLAB_DEFAULT_PORT);
+  }
+
+  private readonly uncachedUnlessDeclared: MiddlewareHandler = async (c, next) => {
+    await next();
+    if (c.res.headers.has(CACHE_CONTROL)) return;
+    const headers = new Headers(c.res.headers);
+    headers.set(CACHE_CONTROL, NO_STORE);
+    c.res = new Response(c.res.body, { status: c.res.status, headers });
+  };
+
+  // Hashed files never change under their name; everything else is revalidated cheaply by ETag.
+  private mountStaticShell(): void {
+    this.app.use(HASHED_ASSET_PATH, this.staticFiles({ root: BOX_DIST_ROOT }, IMMUTABLE_CACHE));
+    this.app.on(['GET', 'HEAD'], '/*', etag());
+    this.app.use('/*', this.staticFiles({ root: BOX_DIST_ROOT }, SHELL_CACHE));
+    this.app.get('/*', this.staticFiles({ path: BOX_INDEX_FILE }, SHELL_CACHE));
+  }
+
+  private staticFiles(location: { root: string } | { path: string }, cacheControl: string) {
+    return serveStatic({
+      ...location,
+      precompressed: true,
+      onFound: (_path, c) => {
+        c.header(CACHE_CONTROL, cacheControl);
+        if (!c.res.headers.has(CONTENT_ENCODING)) c.header(VARY, ACCEPT_ENCODING, { append: true });
+      },
+    });
   }
 
   // Live relayed-collab count: the activity signal the idle/self-stop path needs.

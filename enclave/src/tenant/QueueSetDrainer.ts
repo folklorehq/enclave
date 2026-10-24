@@ -31,6 +31,13 @@ import { HALT_POLL_INTERVAL_MS, type HaltGate } from '../control/HaltGate.js';
 import { DurableAckBatch } from '../ingest/DurableAckBatch.js';
 import { nextUpstreamMessage, upstreamCallScope } from '../inference/UpstreamCallScope.js';
 import { PausableDeadline } from '../ingest/PausableDeadline.js';
+import {
+  MIN_EXTEND_HEADROOM_BYTES,
+  MIN_EXTEND_HEAP_HEADROOM_BYTES,
+  SaveCostBatching,
+  type ExtendHeadroom,
+} from './SaveCostBatching.js';
+import type { TenantContext } from './tenant-context.js';
 import { IndexTurnQueue, withIndexTurn, type IndexTurn } from '../ingest/IndexTurnQueue.js';
 import { ReceivedMessageLeases } from '../ingest/ReceivedMessageLeases.js';
 import type { VisibilityHeartbeatTimers } from '../ingest/VisibilityHeartbeat.js';
@@ -133,6 +140,8 @@ export interface QueueSetDrainerDeps {
   // Activity the queues cannot see — a reader on the box API, a live editing session, an in-flight
   // synthesis — counts as a busy poll, so the host is never stopped out from under it.
   isBusy?: () => boolean;
+  saveClock?: () => number;
+  headroom?: () => ExtendHeadroom;
   onDrainComplete?: () => Promise<void>;
   // Receives one closed-set code per failed message attempt, for visibility outside the enclave.
   onMessageFailure?: (code: string) => void;
@@ -156,6 +165,7 @@ export class QueueSetDrainer {
   private readonly evictingTenants = new Set<string>();
   private readonly leases: ReceivedMessageLeases;
   private readonly continuations = new PullContinuations();
+  private readonly saveBatching: SaveCostBatching;
   // Tracks the last value actually written, not merely the in-process idle transition: a freshly
   // booted process has no prior write, so its first non-idle sweep must write `false` unconditionally
   // — otherwise a stale `"1"` written before a prior self-stop survives the stop/start cycle and the
@@ -163,6 +173,10 @@ export class QueueSetDrainer {
   private lastWrittenIdle: boolean | undefined;
 
   constructor(private readonly deps: QueueSetDrainerDeps) {
+    this.saveBatching = new SaveCostBatching(BATCH_TARGET, {
+      clock: deps.saveClock,
+      canExtend: () => this.canExtendSweep(),
+    });
     this.leases = new ReceivedMessageLeases(
       { sqs: deps.sqs, logger: deps.logger, timers: deps.visibilityTimers },
       {
@@ -200,7 +214,8 @@ export class QueueSetDrainer {
         return;
       }
       const ackBatch = this.newAckBatch();
-      const received = await this.drainAllQueues(assignments, ackBatch);
+      const sweepStartedAt = this.saveBatching.now();
+      const received = await this.drainAllQueues(assignments, ackBatch, sweepStartedAt);
       await ackBatch.commit();
       const continued = await this.drainContinuations();
       await this.updateIdle(received || continued);
@@ -230,6 +245,7 @@ export class QueueSetDrainer {
 
   async evictTenant(tenantId: string): Promise<void> {
     this.evictingTenants.add(tenantId);
+    this.saveBatching.forget(tenantId);
     if (this.activeDrains === 0) return;
     await new Promise<void>((resolve) => this.drainIdleWaiters.push(resolve));
   }
@@ -292,6 +308,7 @@ export class QueueSetDrainer {
   private async drainAllQueues(
     assignments: QueueAssignment[],
     ackBatch: DurableAckBatch,
+    sweepStartedAt: number,
   ): Promise<boolean> {
     let received = false;
     for (const assignment of assignments) {
@@ -299,7 +316,7 @@ export class QueueSetDrainer {
       if (this.evictingTenants.has(assignment.tenantId)) continue;
       const halted = await this.deps.haltGateFor(assignment.tenantId).isHalted();
       if (halted || this.stopping) continue;
-      const count = await this.drainQueue(assignment, assignments.length, ackBatch);
+      const count = await this.drainQueue(assignment, assignments.length, ackBatch, sweepStartedAt);
       if (count > 0) received = true;
     }
     return received;
@@ -309,10 +326,14 @@ export class QueueSetDrainer {
     assignment: QueueAssignment,
     queueCount: number,
     ackBatch: DurableAckBatch,
+    sweepStartedAt: number,
   ): Promise<number> {
     let total = 0;
     let isFirstPoll = true;
-    while (total < BATCH_TARGET && !this.stopping) {
+    while (
+      this.saveBatching.shouldReceiveMore(assignment.tenantId, total, sweepStartedAt) &&
+      !this.stopping
+    ) {
       const messages = await this.receive(assignment, isFirstPoll, queueCount);
       if (messages.length === 0) break;
       const fresh = await this.admitAll(assignment.queueUrl, messages);
@@ -325,6 +346,36 @@ export class QueueSetDrainer {
       isFirstPoll = false;
     }
     return total;
+  }
+
+  // A rejected save drops the tenant back to the base target; an evicted tenant's save says nothing about its next index.
+  private async saveMeasured(context: TenantContext, assignment: QueueAssignment): Promise<void> {
+    try {
+      await context.hnsw.save(
+        this.deps.s3,
+        context.keyring,
+        assignment.processedBucket || this.deps.processedOutputsBucket || '',
+        context.tenantId,
+      );
+    } catch (error) {
+      this.saveBatching.forget(context.tenantId);
+      throw error;
+    }
+    const savedMs = context.hnsw.lastSaveDurationMs();
+    if (savedMs !== null && !this.evictingTenants.has(context.tenantId)) {
+      this.saveBatching.recordSave(context.tenantId, savedMs);
+    }
+  }
+
+  // Extending a sweep holds more messages and more index state, so it waits out an eviction and a host or JS heap short of headroom.
+  private canExtendSweep(): boolean {
+    if (this.evictingTenants.size > 0) return false;
+    const headroom = this.deps.headroom?.();
+    if (headroom === undefined) return true;
+    return (
+      headroom.memAvailableBytes >= MIN_EXTEND_HEADROOM_BYTES &&
+      headroom.heapLimitBytes - headroom.liveHeapBytes >= MIN_EXTEND_HEAP_HEADROOM_BYTES
+    );
   }
 
   // A receive aborted by stop() reads as an empty queue.
@@ -510,12 +561,7 @@ export class QueueSetDrainer {
         hasUnsavedInserts: () => requiresDurablePersistence && context.hnsw.hasUnsavedInserts(),
         persist: async () => {
           if (!requiresDurablePersistence) return;
-          await context.hnsw.save(
-            this.deps.s3,
-            context.keyring,
-            assignment.processedBucket || this.deps.processedOutputsBucket || '',
-            context.tenantId,
-          );
+          await this.saveMeasured(context, assignment);
         },
         afterDurablePersistence: async () => {
           await afterDurablePersistence?.();

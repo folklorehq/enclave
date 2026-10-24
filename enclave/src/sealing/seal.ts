@@ -5,29 +5,30 @@ import {
   EncryptCommand,
   GenerateDataKeyCommand,
   type GenerateDataKeyCommandOutput,
-  type RecipientInfo,
 } from '@aws-sdk/client-kms';
-import { generateKeyPairSync, type KeyObject } from 'crypto';
+import { generateKeyPair, type KeyObject } from 'crypto';
+import { promisify } from 'util';
 import { awsClientTransport } from '../aws/aws-transport.js';
 import { openKmsRecipientCiphertext } from '../aws/kms-recipient-ciphertext.js';
 import { getAttestationDoc } from './nsm.js';
 import { assertDevKmsStubAllowed } from './dev-kms-stub-guard.js';
+import { logger } from '../logger.js';
+import { AttestedRecipients, type AttestedRecipient } from './AttestedRecipients.js';
+import { RecipientKeyCache, type RecipientKeyPair } from './RecipientKeyCache.js';
 
 const REGION = process.env['AWS_REGION'] ?? 'us-east-1';
 const MASTER_KEY_PURPOSE = 'master-key';
 const MASTER_KEY_VERSION = '2';
 const MASTER_KEY_BYTES = 32;
 const EPHEMERAL_RSA_BITS = 2048;
+// One compromised key exposes only this window of KMS responses, since every request carries its own attested document.
+const RECIPIENT_KEY_TTL_MS = 60_000;
+const RECIPIENT_KEY_REFRESH_LEAD_MS = 15_000;
 const RECIPIENT_OUTPUT_INVALID = 'recipient_kms_output_invalid';
 
 export interface MintedMasterKey {
   masterKey: Buffer;
   sealedBlob: Buffer;
-}
-
-interface AttestedRecipient {
-  recipient: RecipientInfo;
-  privateKey: KeyObject;
 }
 
 function masterKeyContext(tenantId: string): Record<string, string> {
@@ -44,33 +45,47 @@ function kmsClient(): KMSClient {
   return sharedKmsClient;
 }
 
-// The ephemeral key rides in the attestation document, so KMS encrypts its answer to this enclave alone.
-function attestedRecipient(): AttestedRecipient {
-  const { publicKey, privateKey } = generateKeyPairSync('rsa', {
+const generateKeyPairAsync = promisify(generateKeyPair);
+
+async function generateRecipientKeyPair(): Promise<RecipientKeyPair> {
+  const { publicKey, privateKey } = await generateKeyPairAsync('rsa', {
     modulusLength: EPHEMERAL_RSA_BITS,
   });
-  const ephemeralPubDer = Buffer.from(publicKey.export({ type: 'spki', format: 'der' }));
   return {
-    recipient: {
-      KeyEncryptionAlgorithm: 'RSAES_OAEP_SHA_256',
-      AttestationDocument: getAttestationDoc(ephemeralPubDer),
-    },
+    publicKeyDer: Buffer.from(publicKey.export({ type: 'spki', format: 'der' })),
     privateKey,
   };
 }
 
+// The key rides in the attestation document, so KMS encrypts its answer to this enclave alone.
+export const attestedRecipients = new AttestedRecipients(
+  new RecipientKeyCache({
+    generate: generateRecipientKeyPair,
+    ttlMs: RECIPIENT_KEY_TTL_MS,
+    refreshLeadMs: RECIPIENT_KEY_REFRESH_LEAD_MS,
+    logger,
+  }),
+  getAttestationDoc,
+);
+
+const freshRecipients = new AttestedRecipients(
+  { acquire: generateRecipientKeyPair },
+  getAttestationDoc,
+);
+
 // KMS chooses the key and releases it only to the attested enclave, so no other caller can pick it.
 export async function mintMasterKey(kmsKeyId: string, tenantId: string): Promise<MintedMasterKey> {
-  const { recipient, privateKey } = attestedRecipient();
-  const response = await kmsClient().send(
-    new GenerateDataKeyCommand({
-      KeyId: kmsKeyId,
-      NumberOfBytes: MASTER_KEY_BYTES,
-      EncryptionContext: masterKeyContext(tenantId),
-      Recipient: recipient,
-    }),
-  );
-  return openMintedMasterKey(response, kmsKeyId, privateKey);
+  return freshRecipients.withRecipient(async ({ recipient, privateKey }) => {
+    const response = await kmsClient().send(
+      new GenerateDataKeyCommand({
+        KeyId: kmsKeyId,
+        NumberOfBytes: MASTER_KEY_BYTES,
+        EncryptionContext: masterKeyContext(tenantId),
+        Recipient: recipient,
+      }),
+    );
+    return openMintedMasterKey(response, kmsKeyId, privateKey);
+  });
 }
 
 function openMintedMasterKey(
@@ -168,7 +183,17 @@ async function decryptWithContextAndKeyId(
     }
     return { keyId: devResponse.KeyId, plaintext: Buffer.from(devResponse.Plaintext) };
   }
-  const { recipient, privateKey } = attestedRecipient();
+  return attestedRecipients.withRecipient((attested) =>
+    decryptWithRecipient(attested, ciphertext, kmsKeyId, encryptionContext),
+  );
+}
+
+async function decryptWithRecipient(
+  { recipient, privateKey }: AttestedRecipient,
+  ciphertext: Buffer,
+  kmsKeyId: string | undefined,
+  encryptionContext: Record<string, string>,
+): Promise<{ keyId: string; plaintext: Buffer }> {
   const response = await kmsClient().send(
     new DecryptCommand({
       ...(kmsKeyId === undefined ? {} : { KeyId: kmsKeyId }),

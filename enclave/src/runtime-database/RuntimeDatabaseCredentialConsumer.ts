@@ -1,6 +1,6 @@
 import { DecryptCommand } from '@aws-sdk/client-kms';
 import { GetParameterCommand, type GetParameterCommandOutput } from '@aws-sdk/client-ssm';
-import { createHash, generateKeyPairSync, type KeyObject } from 'node:crypto';
+import { createHash, type KeyObject } from 'node:crypto';
 import {
   runtimeDatabaseCredentialReceiptSchema,
   runtimeDatabaseConfigSchema,
@@ -15,6 +15,7 @@ import {
 import { z } from 'zod';
 import type { RuntimeDatabaseCredentialErrorCode } from './runtime-database-failure-codes.js';
 import { openKmsRecipientCiphertext } from '../aws/kms-recipient-ciphertext.js';
+import type { AttestedRecipient, AttestedRecipientSource } from '../sealing/AttestedRecipients.js';
 
 const MAX_PARAMETER_BYTES = 131_072;
 const MAX_CIPHERTEXT_BYTES = 65_536;
@@ -243,32 +244,32 @@ interface KmsDecryptClient {
   }>;
 }
 
-type AttestationDocumentProvider = (publicKey: Uint8Array) => Uint8Array;
-
 export class KmsRecipientDecryptor implements RuntimeDatabaseRecipientDecryptor {
   constructor(
     private readonly client: KmsDecryptClient,
-    private readonly attestationDocument: AttestationDocumentProvider,
+    private readonly recipients: AttestedRecipientSource,
   ) {}
 
-  async decryptForRecipient(input: RecipientDecryptInput): Promise<Buffer> {
-    const keyPair = generateKeyPairSync('rsa', { modulusLength: 2_048 });
-    const publicKey = Buffer.from(keyPair.publicKey.export({ type: 'spki', format: 'der' }));
+  decryptForRecipient(input: RecipientDecryptInput): Promise<Buffer> {
+    return this.recipients.withRecipient((attested) => this.decryptWith(attested, input));
+  }
+
+  private async decryptWith(
+    { recipient, privateKey }: AttestedRecipient,
+    input: RecipientDecryptInput,
+  ): Promise<Buffer> {
     const response = await this.client.send(
       new DecryptCommand({
         KeyId: input.keyId,
         CiphertextBlob: input.ciphertext,
         EncryptionContext: Object.fromEntries(Object.entries(input.encryptionContext)),
-        Recipient: {
-          KeyEncryptionAlgorithm: 'RSAES_OAEP_SHA_256',
-          AttestationDocument: this.attestationDocument(publicKey),
-        },
+        Recipient: recipient,
       }),
     );
     if (response.Plaintext !== undefined || !response.CiphertextForRecipient?.byteLength) {
       throw new RuntimeDatabaseCredentialError('runtime_database_kms_response_invalid');
     }
-    return this.openRecipientCiphertext(keyPair.privateKey, response.CiphertextForRecipient);
+    return this.openRecipientCiphertext(privateKey, response.CiphertextForRecipient);
   }
 
   private openRecipientCiphertext(privateKey: KeyObject, ciphertext: Uint8Array): Buffer {

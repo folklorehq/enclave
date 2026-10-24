@@ -7,7 +7,11 @@ import {
   decryptSourceConnection,
   fetchSourceConnections,
 } from '../pull/source-connections-client.js';
-import type { CodebaseSelection } from './CodebaseSelectionStore.js';
+import {
+  DEFAULT_CODEBASE_SELECTION,
+  isCodebaseSelectionMissing,
+  type CodebaseSelection,
+} from './CodebaseSelectionStore.js';
 
 export type CodebaseConnectionResolution =
   | {
@@ -64,10 +68,7 @@ export class GitHubCodebaseConnectionResolver {
       return parent;
     }
     try {
-      const selection = await this.deps.selectionStore.read({
-        orgId: this.deps.orgId,
-        deploymentId: this.deps.tenantDeploymentId,
-      });
+      const selection = await this.readSelection();
       if (selection.mode === 'selected' && selection.repositories.length === 0) {
         return { outcome: 'not_ready', reason: 'codebase_selection_unavailable' };
       }
@@ -80,14 +81,23 @@ export class GitHubCodebaseConnectionResolver {
         selection,
         capabilityGeneration: parent.capabilityGeneration,
       };
-    } catch (error) {
+    } catch {
       return {
         outcome: 'not_ready',
-        reason:
-          error instanceof Error && error.message === 'codebase_selection_missing'
-            ? 'codebase_selection_missing'
-            : 'codebase_selection_unavailable',
+        reason: 'codebase_selection_unavailable',
       };
+    }
+  }
+
+  private async readSelection(): Promise<CodebaseSelection> {
+    try {
+      return await this.deps.selectionStore.read({
+        orgId: this.deps.orgId,
+        deploymentId: this.deps.tenantDeploymentId,
+      });
+    } catch (error) {
+      if (isCodebaseSelectionMissing(error)) return DEFAULT_CODEBASE_SELECTION;
+      throw error;
     }
   }
 
