@@ -7,7 +7,7 @@ export const PUBLIC_DSTACK_EXECUTABLE = '/usr/local/bin/folklore-dstack-verifier
 export const PUBLIC_DSTACK_COLLATERAL_PATH =
   '/usr/local/share/folklore/attestation/phala-tdx-collateral.json';
 export const PUBLIC_DSTACK_COLLATERAL_SHA256 =
-  '9ff23749c39d1800a616650f00983a48fb9676f9309da6b09530b948d7580ada';
+  '35f59995da8380f790e25b65b8fc92c4fe8f392161067ded67d9e3a475205e6d';
 const PRODUCTION_QUOTE_ROOT = '44a0196b2b99f889b8e149e95b807a350e7424964399e885a7cbb8ccfab674d3';
 const MAX_COLLATERAL_BYTES = 1_048_576;
 
