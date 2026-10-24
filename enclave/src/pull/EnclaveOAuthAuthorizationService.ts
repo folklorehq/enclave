@@ -190,11 +190,12 @@ export class EnclaveOAuthAuthorizationService {
     if (submission.attestationGeneration !== generation) throw new EnclaveOAuthRedemptionError();
     const grant = this.decryptGrant(submission);
     let response: ProviderTokenResponse | undefined;
+    let config: VerifiedProviderConfig | undefined;
     try {
       if (!this.matches(submission, grant, generation)) throw new EnclaveOAuthRedemptionError();
       if (Date.parse(grant.expiresAt) <= Date.now()) throw new EnclaveOAuthRedemptionError();
       if (!grant.accountId || !grant.memberEmail) throw new EnclaveOAuthRedemptionError();
-      const config = this.requireProviderConfig(grant.sourceKind);
+      config = this.requireProviderConfig(grant.sourceKind);
       if (
         !(await this.states.consumeMember({
           orgId: grant.orgId,
@@ -232,12 +233,29 @@ export class EnclaveOAuthAuthorizationService {
       if (error instanceof EnclaveOAuthRedemptionError) throw error;
       throw new EnclaveOAuthRedemptionError(error);
     } finally {
+      await this.revokeMemberToken(config, response);
       grant.authorizationCode = '';
       grant.codeVerifier = null;
       if (response) {
         response.accessToken = '';
         if (response.refreshToken) response.refreshToken = '';
       }
+    }
+  }
+
+  // Best effort so a failed revoke never skips zeroing the token or masks the redemption outcome.
+  private async revokeMemberToken(
+    config: VerifiedProviderConfig | undefined,
+    response: ProviderTokenResponse | undefined,
+  ): Promise<void> {
+    if (config?.kind !== 'github' || !response?.accessToken) return;
+    try {
+      await this.provider.revokeGitHubUserAccessToken({
+        config,
+        accessToken: response.accessToken,
+      });
+    } catch {
+      return;
     }
   }
 

@@ -1,4 +1,5 @@
 import { createSign } from 'node:crypto';
+import type { Logger } from '@folklore/core';
 import type { ProviderTokenClient, ProviderTokenResponse } from './ProviderTokenClient.js';
 import type {
   ProviderRefreshSecretLoader,
@@ -16,7 +17,7 @@ import {
   type ProviderTokenFetchOptions,
   type VerifiedProviderConfig,
 } from '../egress/provider-token-fetch.js';
-import { providerOAuthErrorReason } from './oauth-failure-reason.js';
+import { oauthFailureReason, providerOAuthErrorReason } from './oauth-failure-reason.js';
 
 const TOKEN_MAX_BYTES = 512 * 1024;
 const TOKEN_VALUE_MAX_BYTES = 16 * 1024;
@@ -25,12 +26,16 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 const GITHUB_INSTALLATIONS_MAX_PAGES = 10;
 const GITHUB_OWNERSHIP_DEADLINE_MS = 20_000;
 const GITHUB_REVOKE_MIN_MS = 2_000;
+const REVOKE_FAILED_REASON = 'github_token_revoke_failed';
+const REVOKE_SECRET_TIMEOUT_REASON = 'github_token_revoke_secret_timeout';
+class RevokeSecretTimeoutError extends Error {}
 
 /** Provider token exchange confined to the enclave's signed endpoint + proxy contract. */
 export class HttpProviderTokenClient implements ProviderTokenClient {
   constructor(
     private readonly secrets: ProviderRefreshSecretLoader,
     private readonly options: ProviderTokenFetchOptions,
+    private readonly logger?: Logger,
   ) {}
 
   refreshCapability(config: VerifiedProviderConfig): ProviderRefreshCapability {
@@ -143,6 +148,49 @@ export class HttpProviderTokenClient implements ProviderTokenClient {
     } finally {
       await this.revokeGitHubUserToken(input.config, secret, credential, deadline);
       credential.accessToken = '';
+    }
+  }
+
+  async revokeGitHubUserAccessToken(input: {
+    config: VerifiedProviderConfig;
+    accessToken: string;
+  }): Promise<void> {
+    if (input.config.kind !== 'github') return;
+    const failure = await this.revokeWithinDeadline(input.config, input.accessToken);
+    if (failure) this.logger?.warn('oauth_provider.token_revoke_failed', { errorCode: failure });
+  }
+
+  private async revokeWithinDeadline(
+    config: VerifiedProviderConfig,
+    accessToken: string,
+  ): Promise<string | null> {
+    try {
+      const secret = await this.loadSecretWithin(config, GITHUB_REVOKE_MIN_MS);
+      return await this.revokeGitHubUserToken(
+        config,
+        secret,
+        { accessToken },
+        Date.now() + GITHUB_REVOKE_MIN_MS,
+      );
+    } catch (error) {
+      return error instanceof RevokeSecretTimeoutError
+        ? REVOKE_SECRET_TIMEOUT_REASON
+        : oauthFailureReason(error, REVOKE_FAILED_REASON);
+    }
+  }
+
+  private async loadSecretWithin(
+    config: VerifiedProviderConfig,
+    timeoutMs: number,
+  ): Promise<ProviderSecretMaterial> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new RevokeSecretTimeoutError()), timeoutMs);
+    });
+    try {
+      return await Promise.race([this.secrets.load(config), deadline]);
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -259,7 +307,7 @@ export class HttpProviderTokenClient implements ProviderTokenClient {
     secret: ProviderSecretMaterial,
     credential: { accessToken: string },
     deadline: number,
-  ): Promise<void> {
+  ): Promise<string | null> {
     try {
       await this.execute(
         config,
@@ -271,8 +319,9 @@ export class HttpProviderTokenClient implements ProviderTokenClient {
         },
         Math.max(this.remainingMs(deadline, false), GITHUB_REVOKE_MIN_MS),
       );
-    } catch {
-      return;
+      return null;
+    } catch (error) {
+      return oauthFailureReason(error, REVOKE_FAILED_REASON);
     }
   }
 

@@ -37,4 +37,8 @@ export interface ProviderTokenClient {
     code: string;
     installationId: string;
   }): Promise<boolean>;
+  revokeGitHubUserAccessToken(input: {
+    config: VerifiedProviderConfig;
+    accessToken: string;
+  }): Promise<void>;
 }

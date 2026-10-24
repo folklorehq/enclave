@@ -57,6 +57,25 @@ type OAuthManifestProviderInput = Omit<
   >;
 };
 
+export const GITHUB_IDENTITY_PROVIDER_KIND = 'github_identity';
+
+export function memberIdentityProviderConfig(
+  configs: ReadonlyMap<string, VerifiedProviderConfig>,
+  sourceKind: string,
+): VerifiedProviderConfig | null {
+  if (sourceKind === GITHUB_IDENTITY_PROVIDER_KIND) return null;
+  if (sourceKind !== 'github') return configs.get(sourceKind) ?? null;
+  const identity = configs.get(GITHUB_IDENTITY_PROVIDER_KIND);
+  return identity ? { ...identity, kind: 'github' } : null;
+}
+
+export function sourceProviderConfig(
+  configs: ReadonlyMap<string, VerifiedProviderConfig>,
+  sourceKind: string,
+): VerifiedProviderConfig | null {
+  return sourceKind === GITHUB_IDENTITY_PROVIDER_KIND ? null : (configs.get(sourceKind) ?? null);
+}
+
 const providerConfigSchema = z
   .object({
     kind: z.string().min(1).max(64),
@@ -150,7 +169,11 @@ export function createOAuthRuntime(options: OAuthCompositionOptions): OAuthRunti
     { getSecretValue: options.getSecretValue },
     options.kmsKeyId,
   );
-  const provider = new HttpProviderTokenClient(providerSecrets, providerFetchOptions);
+  const provider = new HttpProviderTokenClient(
+    providerSecrets,
+    providerFetchOptions,
+    options.logger,
+  );
   const leaseResolver = new HttpOAuthLeaseResolver(
     options.controlPlaneUrl,
     options.deploymentId,
@@ -219,7 +242,7 @@ export function createOAuthRuntime(options: OAuthCompositionOptions): OAuthRunti
         sealer,
         persistence,
         provider,
-        (kind) => configs.get(kind) ?? null,
+        (kind) => sourceProviderConfig(configs, kind),
         persistence,
       ).redeem(input, generation);
     },
@@ -231,7 +254,7 @@ export function createOAuthRuntime(options: OAuthCompositionOptions): OAuthRunti
         sealer,
         persistence,
         provider,
-        (kind) => configs.get(kind) ?? null,
+        (kind) => memberIdentityProviderConfig(configs, kind),
         persistence,
       ).redeemMemberIdentity(input, generation);
     },
@@ -241,7 +264,7 @@ export function createOAuthRuntime(options: OAuthCompositionOptions): OAuthRunti
         sealer,
         persistence,
         provider,
-        (kind) => configs.get(kind) ?? null,
+        (kind) => sourceProviderConfig(configs, kind),
         stateGuard,
         new SealedCodeGrantOpener(tenant.ingestPrivateKey),
       ).mint({
@@ -266,7 +289,7 @@ export function createOAuthRuntime(options: OAuthCompositionOptions): OAuthRunti
         sealer,
         persistence,
         provider,
-        (kind) => configs.get(kind) ?? null,
+        (kind) => sourceProviderConfig(configs, kind),
         leaseResolver,
       ).redeem(input);
     },
