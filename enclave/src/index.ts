@@ -91,6 +91,7 @@ import {
 } from './inference/phala.js';
 import { currentInferenceReceiptContext } from './inference/inference-receipt-context.js';
 import { type InferenceModel } from './inference/CachedInference.js';
+import { streamOrBuffer, type StreamingInference } from './inference/generate-stream.js';
 import {
   type TenantPolicyFreshnessPort,
   type TenantPolicyRuntimeEvidencePort,
@@ -546,6 +547,7 @@ const assignmentApplier = new TenantAssignmentApplier(
       // Answers admitted before the fence can memoize again; evict after the drain.
       requestDrain.then(() => evictAnswerInference?.(tenantId)),
       apiContainer?.evictCollabTenant(tenantId),
+      apiContainer?.evictAskStreams(tenantId),
     ].filter((result): result is Promise<void> => result !== undefined);
     try {
       const results = await Promise.allSettled([requestDrain, ...teardown]);
@@ -579,6 +581,7 @@ const assignmentApplier = new TenantAssignmentApplier(
           // Answers admitted before the fence can memoize again; evict after the drain.
           requestDrain.then(() => evictAnswerInference?.(tenantId)),
           apiContainer?.evictCollabTenant(tenantId),
+          apiContainer?.evictAskStreams(tenantId),
         ].filter((result): result is Promise<void> => result !== undefined),
       );
       if (results.some((result) => result.status === 'rejected')) {
@@ -662,7 +665,10 @@ const generationQuiescence = createTenantGenerationQuiescence({
     (tenantId) => drainerRef.current?.evictTenant(tenantId),
     (tenantId) => synthesisConsumer?.evictTenant(tenantId),
   ],
-  evictAlongsideDrain: [(tenantId) => apiContainer?.evictCollabTenant(tenantId)],
+  evictAlongsideDrain: [
+    (tenantId) => apiContainer?.evictCollabTenant(tenantId),
+    (tenantId) => apiContainer?.evictAskStreams(tenantId),
+  ],
   evictAfterDrain: (tenantId) => evictAnswerInference?.(tenantId),
 });
 const policyAssignmentApplier = new TenantAssignmentApplier({
@@ -1023,6 +1029,7 @@ const evictTenantSubsystems = async (tenantId: string): Promise<void> => {
       drainerRef.current?.evictTenant(tenantId),
       synthesisConsumer?.evictTenant(tenantId),
       apiContainer?.evictCollabTenant(tenantId),
+      apiContainer?.evictAskStreams(tenantId),
     ].filter((result): result is Promise<void> => result !== undefined),
   );
   if (results.some((result) => result.status === 'rejected')) {
@@ -1391,7 +1398,7 @@ try {
     });
   // Resolved per request from the answer's orgId, so each cache is sealed under that tenant's key
   // and rebuilt when the org resolves to a new context.
-  const answerInference = new TenantInferenceMemo<InferenceModel>({
+  const answerInference = new TenantInferenceMemo<InferenceModel & Partial<StreamingInference>>({
     s3,
     resolveTenant,
     fenceEpoch: (orgId) => tenantRequests.currentFenceEpoch(orgId),
@@ -1452,6 +1459,13 @@ try {
         buildRetriever(retrieverDeps),
         (orgId, prompt, systemPrompt, shouldCache) =>
           answerInference.get(orgId).generate(prompt, systemPrompt, undefined, shouldCache),
+      ),
+    streamingAnswerServiceFactory: (retrieverDeps) =>
+      new EnclaveFactAnswerer(
+        buildRetriever(retrieverDeps),
+        (orgId, prompt, systemPrompt, shouldCache) =>
+          answerInference.get(orgId).generate(prompt, systemPrompt, undefined, shouldCache),
+        (orgId, request) => streamOrBuffer(answerInference.get(orgId), request),
       ),
     // synthesized wiki text is ciphertext at rest; the read path decrypts audience-visible
     // blocks here, in-enclave, over the requesting tenant's sealed key (resolved from `ref.orgId`).

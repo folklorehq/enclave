@@ -4,6 +4,7 @@ import type { VerifiedBootManifest } from '../attestation/BootManifestVerifier.j
 import type { RuntimeEvidenceSessionPort } from '../attestation/ports.js';
 import type { BootBoundGenerationContext } from '../inference/BootStateActivePolicyReferenceVerifier.js';
 import { ANSWER_CACHE_VERSION, type InferenceModel } from '../inference/CachedInference.js';
+import type { StreamingInference } from '../inference/generate-stream.js';
 import { expectedTenantGenerationContext } from '../inference/expected-tenant-generation-context.js';
 import { SharedPoolRuntimeEvidence } from '../inference/SharedPoolRuntimeEvidence.js';
 import type { UpstreamCallGate } from '../inference/TenantPolicyBoundInference.js';
@@ -33,7 +34,7 @@ export type AnswerInferenceBuild = (
   orgId: string,
   tenant: Pick<TenantContext, 'activePolicySnapshot'>,
   cache: LlmOperationCache,
-) => InferenceModel;
+) => InferenceModel & Partial<StreamingInference>;
 
 /** Binds each tenant's installed policy snapshot to the enclave's boot state and its inference paths. */
 export class TenantPolicyWiring<S extends VerifiedActivePolicySnapshotV1> {

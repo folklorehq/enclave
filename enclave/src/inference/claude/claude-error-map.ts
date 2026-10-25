@@ -23,6 +23,7 @@ const HTTP_UNAUTHORIZED = 401;
 const HTTP_FORBIDDEN = 403;
 const HTTP_TOO_MANY_REQUESTS = 429;
 const HTTP_BAD_GATEWAY = 502;
+const HTTP_OVERLOADED_STATUS = 529;
 const HTTP_OVERLOADED_STATUSES: ReadonlySet<number> = new Set([502, 503, 504, 529]);
 const MAX_RETRY_AFTER_MS = 60_000;
 const SPEND_LIMIT_ERROR_CODE = 'enforced_spend_limit_reached';
@@ -79,7 +80,24 @@ function connectionFailure(
   return new ClaudeRouteError(CLAUDE_UPSTREAM_TIMEOUT);
 }
 
+// An error event inside a 200 stream carries its class in `type` and no HTTP status.
+function fromStreamEvent(error: APIError): ClaudeRouteError | undefined {
+  if (typeof error.status === 'number') return undefined;
+  switch (error.type) {
+    case 'overloaded_error':
+      return new ClaudeRouteError('claude_overloaded', HTTP_OVERLOADED_STATUS, undefined, true);
+    case 'rate_limit_error':
+      return rateLimited(error);
+    case 'api_error':
+      return new ClaudeRouteError('claude_upstream_error', undefined, undefined, true);
+    default:
+      return undefined;
+  }
+}
+
 function fromStatus(error: APIError, context: ClaudeErrorContext): ClaudeRouteError {
+  const streamed = fromStreamEvent(error);
+  if (streamed !== undefined) return streamed;
   const status = typeof error.status === 'number' ? error.status : 0;
   if (status === HTTP_TOO_MANY_REQUESTS) return rateLimited(error);
   if (status === HTTP_BAD_REQUEST && isWorkspaceLimit(error))

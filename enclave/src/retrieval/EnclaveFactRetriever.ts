@@ -164,13 +164,31 @@ export class EnclaveFactRetriever implements FactRetriever, FactExcerptReader {
 
   // Ranks only the facts the caller's lens allows; the per-fact audience gate still runs on every hit.
   async retrieveInLens(params: LensSearchParams, bodyLimit: number): Promise<LensRetrieval> {
+    return this.retrieveInLensWith(params, bodyLimit, () =>
+      this.deps.resolveAudienceAccess(params.orgId, params.userId),
+    );
+  }
+
+  async retrieveInLensForAccess(
+    params: LensSearchParams,
+    access: AudienceAccess,
+    bodyLimit: number,
+  ): Promise<LensRetrieval> {
+    return this.retrieveInLensWith(params, bodyLimit, async () => access);
+  }
+
+  private async retrieveInLensWith(
+    params: LensSearchParams,
+    bodyLimit: number,
+    accessFor: () => Promise<AudienceAccess>,
+  ): Promise<LensRetrieval> {
     const { orgId, userId, query, limit } = params;
     if (!query.trim() || limit <= 0) return { facts: [], matchedOutsideLens: false };
 
     const tenant = this.deps.resolveTenant(orgId);
     assertResolvedLensFor(params.lens, { orgId, userId }, params.lens.audienceId);
     try {
-      return await this.searchLens(tenant, params, bodyLimit);
+      return await this.searchLens(tenant, params, bodyLimit, accessFor);
     } catch (err) {
       // The lens holds up to ~200k fact ids; a raw error from a callee must not carry them into a log.
       if (isAppError(err)) throw err;
@@ -182,6 +200,7 @@ export class EnclaveFactRetriever implements FactRetriever, FactExcerptReader {
     tenant: TenantContext,
     params: LensSearchParams,
     bodyLimit: number,
+    accessFor: () => Promise<AudienceAccess>,
   ): Promise<LensRetrieval> {
     const { orgId, query, limit, lens } = params;
     if (lens.factIds.size === 0) {
@@ -194,9 +213,7 @@ export class EnclaveFactRetriever implements FactRetriever, FactExcerptReader {
       const hits = tenant.hnsw
         .query(orgId, queryVec, limit, lens.factIds)
         .filter((hit) => lens.factIds.has(hit.factId));
-      return this.gateAndDecrypt(tenant, params, hits, bodyLimit, () =>
-        this.deps.resolveAudienceAccess(orgId, params.userId),
-      );
+      return this.gateAndDecrypt(tenant, params, hits, bodyLimit, accessFor);
     });
     if (facts.length > 0) return { facts, matchedOutsideLens: false };
     return { facts: [], matchedOutsideLens: await lens.hasVisibleFactOutside() };

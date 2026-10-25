@@ -15,7 +15,7 @@ import type { AnthropicRoute } from './anthropic-route.js';
 const CLAUDE_INFERENCE_GEO = 'us';
 const HAIKU_MODEL = 'claude-haiku-5-5';
 const SONNET_MODEL = 'claude-sonnet-5-5';
-const CHARS_PER_TOKEN_FLOOR = 3;
+export const CHARS_PER_TOKEN_FLOOR = 3;
 
 export const CLAUDE_REQUEST_TOO_LARGE = 'claude_request_too_large_for_model';
 

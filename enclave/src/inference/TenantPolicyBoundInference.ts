@@ -44,6 +44,14 @@ import { OPENAI_TRANSIENT_STATUSES, OpenAIEmbedRouteError } from './openai/opena
 import { OPENAI_EMBED_DIMENSIONS, OPENAI_EMBED_MODEL } from './openai/openai-embed-route-state.js';
 import { ACTIVE_EMBEDDING_SPACE_IS_LEGACY } from './embedding-space.js';
 import type { SynthesisInference } from './CachedInference.js';
+import { ChunkQueue, ChunkQueueError } from './ChunkQueue.js';
+import {
+  GenerationStreamInterruptedError,
+  assertStreamLive,
+  cacheWhileLive,
+  type GenerateStreamRequest,
+  type StreamingInference,
+} from './generate-stream.js';
 import { llmCacheKey } from './llm-cache.js';
 import { TrustedTimeAuthorityError } from './TrustedTimeAuthority.js';
 import { DEFAULT_REFRESH_TIMEOUT_MS } from './attestation-turn-base.js';
@@ -79,6 +87,8 @@ const REFRESH_READ_ATTEMPTS = 2;
 const REFRESH_TIMEOUT_CODE = 'active_policy_refresh_timeout';
 const HIGH_WATER_CODE_PREFIX = 'high_water_';
 const HIGH_WATER_TRANSPORT_UNAVAILABLE = 'high_water_transport_unavailable';
+const STREAM_EMPTY_CODE = 'stream_empty';
+const STREAM_FAILED_CODE = 'stream_failed';
 export const RUNTIME_EVIDENCE_BACKEND_UNAVAILABLE = 'runtime_evidence_backend_unavailable';
 
 export type TenantPolicySnapshotProvider = () => VerifiedActivePolicySnapshotV1 | undefined;
@@ -108,6 +118,11 @@ export type TenantPolicyVerifiedBindingForwarder = (
 
 export type TenantPolicyOperationBackend = SynthesisInference & {
   generateStructured?: (prompt: string, tool: ToolSpec, systemPrompt?: string) => Promise<unknown>;
+  generateStream?: (
+    prompt: string,
+    systemPrompt: string | undefined,
+    signal: AbortSignal,
+  ) => AsyncIterable<string>;
 };
 
 export type TenantPolicyVerifiedBindingBackendFactory = (
@@ -155,6 +170,10 @@ export interface TenantPolicyBoundInferenceOptions {
   ) => unknown;
 }
 
+type StreamOpening =
+  | { readonly whole: string }
+  | { readonly first: string; readonly rest: AsyncIterator<string> };
+
 export class TenantPolicyBoundInferenceError extends Error {
   constructor(
     readonly code:
@@ -171,7 +190,7 @@ export class TenantPolicyBoundInferenceError extends Error {
   }
 }
 
-export class TenantPolicyBoundInference implements SynthesisInference {
+export class TenantPolicyBoundInference implements SynthesisInference, StreamingInference {
   private trustedDeadline = 0;
   private deadlineSnapshot: VerifiedActivePolicySnapshotV1 | undefined;
   private deadlineEpoch: number | undefined;
@@ -208,6 +227,18 @@ export class TenantPolicyBoundInference implements SynthesisInference {
       () => this.generateUnderPolicy(prompt, systemPrompt, temperature, shouldCache),
       false,
     );
+  }
+
+  generateStream(request: GenerateStreamRequest): AsyncIterable<string> {
+    const abort = new AbortController();
+    const queue = new ChunkQueue<string>(() => abort.abort());
+    const bound = { ...request, signal: AbortSignal.any([request.signal, abort.signal]) };
+    const producer = this.underRole('generate', () => this.streamUnderPolicy(bound, queue), false);
+    void producer.then(
+      () => queue.end(),
+      (error: unknown) => queue.fail(error),
+    );
+    return queue;
   }
 
   async critique(
@@ -375,7 +406,30 @@ export class TenantPolicyBoundInference implements SynthesisInference {
       route.kind === 'provider'
         ? undefined
         : this.validateTemperature(snapshot, binding, temperature);
-    const key = this.cacheKey(
+    const key = this.generateCacheKey(
+      binding,
+      snapshot,
+      route,
+      prompt,
+      systemPrompt,
+      resolvedTemperature,
+    );
+    const hit = await this.operationCacheGet(key, this.modelOf(binding, route), 'generate');
+    if (hit !== null) return hit;
+    const output = await generateOnce(resolvedTemperature);
+    if ((shouldCache ?? (() => true))(output)) await this.options.operationCache?.set(key, output);
+    return output;
+  }
+
+  private generateCacheKey(
+    binding: VerifiedActivePolicyRoleBindingV1,
+    snapshot: VerifiedActivePolicySnapshotV1,
+    route: InferenceRoute,
+    prompt: string,
+    systemPrompt: string | undefined,
+    resolvedTemperature: number | undefined,
+  ): string {
+    return this.cacheKey(
       binding,
       snapshot,
       'generate',
@@ -386,11 +440,141 @@ export class TenantPolicyBoundInference implements SynthesisInference {
       }),
       route,
     );
-    const hit = await this.operationCacheGet(key, this.modelOf(binding, route), 'generate');
-    if (hit !== null) return hit;
-    const output = await generateOnce(resolvedTemperature);
-    if ((shouldCache ?? (() => true))(output)) await this.options.operationCache?.set(key, output);
-    return output;
+  }
+
+  private streamUnderPolicy(
+    request: GenerateStreamRequest,
+    queue: ChunkQueue<string>,
+  ): Promise<void> {
+    return this.withFallback(this.routeChainFor('generate'), (route) =>
+      this.admitted('generate', route, async () => {
+        const { binding, snapshot } = await this.bindingFor('generate');
+        return this.streamOnRoute(binding, snapshot, route, request, queue);
+      }),
+    );
+  }
+
+  private async streamOnRoute(
+    binding: VerifiedActivePolicyRoleBindingV1,
+    snapshot: VerifiedActivePolicySnapshotV1,
+    route: InferenceRoute,
+    request: GenerateStreamRequest,
+    queue: ChunkQueue<string>,
+  ): Promise<void> {
+    assertStreamLive(request.signal);
+    if (route.kind !== 'provider') {
+      queue.push(
+        await this.generateOnRoute(
+          binding,
+          snapshot,
+          route,
+          request.prompt,
+          request.systemPrompt,
+          undefined,
+          cacheWhileLive(request),
+        ),
+      );
+      return;
+    }
+    const key = this.streamCacheKey(binding, snapshot, route, request);
+    const hit =
+      key === undefined
+        ? null
+        : await this.operationCacheGet(key, this.modelOf(binding, route), 'generate');
+    if (hit !== null) {
+      queue.push(hit);
+      return;
+    }
+    const opening = await this.runTransient('generate', route, () =>
+      this.openFirstChunk(binding, snapshot, route, request),
+    );
+    await this.relayStream(opening, key, request, queue);
+  }
+
+  private streamCacheKey(
+    binding: VerifiedActivePolicyRoleBindingV1,
+    snapshot: VerifiedActivePolicySnapshotV1,
+    route: InferenceRoute,
+    request: GenerateStreamRequest,
+  ): string | undefined {
+    if (this.operationCache === undefined) return undefined;
+    return this.generateCacheKey(
+      binding,
+      snapshot,
+      route,
+      request.prompt,
+      request.systemPrompt,
+      undefined,
+    );
+  }
+
+  private async openFirstChunk(
+    binding: VerifiedActivePolicyRoleBindingV1,
+    snapshot: VerifiedActivePolicySnapshotV1,
+    route: InferenceRoute,
+    request: GenerateStreamRequest,
+  ): Promise<StreamOpening> {
+    const backend = await this.backendFor(binding, snapshot, route);
+    if (backend.generateStream === undefined) {
+      const whole = await backend.generate(
+        request.prompt,
+        request.systemPrompt,
+        undefined,
+        cacheWhileLive(request),
+      );
+      return { whole };
+    }
+    const stream = backend.generateStream(request.prompt, request.systemPrompt, request.signal);
+    const rest = stream[Symbol.asyncIterator]();
+    const first = await rest.next();
+    if (first.done) throw new GenerationStreamInterruptedError(STREAM_EMPTY_CODE);
+    return { first: first.value, rest };
+  }
+
+  private async relayStream(
+    opening: StreamOpening,
+    key: string | undefined,
+    request: GenerateStreamRequest,
+    queue: ChunkQueue<string>,
+  ): Promise<void> {
+    const head = 'whole' in opening ? opening.whole : opening.first;
+    queue.push(head);
+    try {
+      const full = 'whole' in opening ? head : await this.relayRest(head, opening.rest, queue);
+      assertStreamLive(request.signal);
+      if (key !== undefined && request.shouldCache(full)) {
+        await this.options.operationCache?.set(key, full);
+      }
+    } catch (error) {
+      if ('rest' in opening) await opening.rest.return?.().catch(() => undefined);
+      throw new GenerationStreamInterruptedError(
+        TenantPolicyBoundInference.streamFailureCode(error),
+      );
+    }
+  }
+
+  private async relayRest(
+    head: string,
+    rest: AsyncIterator<string>,
+    queue: ChunkQueue<string>,
+  ): Promise<string> {
+    let full = head;
+    for (let next = await rest.next(); !next.done; next = await rest.next()) {
+      queue.push(next.value);
+      full += next.value;
+    }
+    return full;
+  }
+
+  private static streamFailureCode(error: unknown): string {
+    if (
+      error instanceof ProviderRouteError ||
+      error instanceof GenerationStreamInterruptedError ||
+      error instanceof ChunkQueueError
+    ) {
+      return error.code;
+    }
+    return STREAM_FAILED_CODE;
   }
 
   private async critiqueUnderPolicy(

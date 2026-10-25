@@ -85,6 +85,8 @@ class ClaudeOperation {
       embed: () => Promise.reject(new ClaudeRouteError('claude_embed_unsupported')),
       generate: (prompt, systemPrompt) =>
         this.invoke('generate', (backend) => backend.generate(prompt, systemPrompt)),
+      generateStream: (prompt, systemPrompt, signal) =>
+        this.invokeStream('generate', (backend) => backend.stream(prompt, systemPrompt, signal)),
       critique: (prompt, systemPrompt) =>
         this.invoke('critique', (backend) => backend.critique(prompt, systemPrompt)),
       generateStructured: (prompt, tool, systemPrompt) =>
@@ -107,6 +109,25 @@ class ClaudeOperation {
       const result = await call(this.messagesBackend(apiKey));
       this.remainingBudget();
       return result;
+    } catch (error) {
+      throw mapClaudeError(error, this.errorContext);
+    }
+  }
+
+  private async *invokeStream(
+    role: InferenceModelRole,
+    call: (backend: ClaudeMessagesBackend) => AsyncIterable<string>,
+  ): AsyncGenerator<string> {
+    if (this.consumed) throw new ClaudeRouteError('claude_operation_consumed');
+    this.consumed = true;
+    try {
+      if (this.binding.role !== role) throw new ClaudeRouteError('claude_operation_role_mismatch');
+      const apiKey = await this.withinBudget(this.credentialSource().key());
+      await this.admission.trustedTime.read(this.admission.trustedTimeContext);
+      await this.withinBudget(this.assertPinned());
+      this.remainingBudget();
+      yield* call(this.messagesBackend(apiKey));
+      this.remainingBudget();
     } catch (error) {
       throw mapClaudeError(error, this.errorContext);
     }

@@ -5,10 +5,32 @@ import { ANTHROPIC_ORIGIN } from '../../egress/anthropic-transport.js';
 import { ClaudeRouteError } from './claude-route-errors.js';
 import { claudeIdentityMismatch } from './ClaudeCredentialSource.js';
 import { mapClaudeError, type ClaudeErrorContext } from './claude-error-map.js';
-import { buildClaudeRequest, type ClaudeRequestInput } from './claude-request.js';
+import {
+  CHARS_PER_TOKEN_FLOOR,
+  buildClaudeRequest,
+  type ClaudeRequestInput,
+} from './claude-request.js';
 import type { AnthropicRoute } from './anthropic-route.js';
 
 type CreatedMessage = Anthropic.Message;
+type MessageEvents = AsyncIterable<Anthropic.RawMessageStreamEvent> & {
+  controller: AbortController;
+};
+
+interface UsageCounts {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+}
+
+interface StreamTally extends UsageCounts {
+  started: boolean;
+  stopped: boolean;
+  stopReason: string | null;
+  emittedChars: number;
+  metered: boolean;
+}
 
 const SDK_LOG_LEVEL = 'off';
 const NO_RETRIES = 0;
@@ -54,6 +76,34 @@ export class ClaudeMessagesBackend {
     return this.text({ route: this.deps.route, prompt, systemPrompt }, 'generate');
   }
 
+  async *stream(
+    prompt: string,
+    systemPrompt: string | undefined,
+    signal: AbortSignal,
+  ): AsyncGenerator<string> {
+    const tally = this.freshTally();
+    try {
+      const request = buildClaudeRequest({
+        route: this.deps.route,
+        prompt,
+        systemPrompt,
+        cachedSystemPrefix: this.deps.cachedSystemPrefix,
+      });
+      for await (const event of await this.openStream(request, signal)) {
+        const text = this.absorb(event, tally);
+        if (text === undefined) continue;
+        tally.emittedChars += text.length;
+        yield text;
+      }
+      if (tally.stopped) this.recordStreamUsage(tally);
+      this.assertStreamStop(tally);
+    } catch (error) {
+      throw mapClaudeError(error, this.deps.errorContext);
+    } finally {
+      this.recordInterruptedStreamUsage(tally);
+    }
+  }
+
   async generateStructured(
     prompt: string,
     tool: ToolSpec,
@@ -92,6 +142,91 @@ export class ClaudeMessagesBackend {
     return data;
   }
 
+  private freshTally(): StreamTally {
+    return {
+      started: false,
+      stopped: false,
+      stopReason: null,
+      emittedChars: 0,
+      metered: false,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    };
+  }
+
+  private async openStream(
+    request: ReturnType<typeof buildClaudeRequest>,
+    signal: AbortSignal,
+  ): Promise<MessageEvents> {
+    const { data, response } = await this.client.messages
+      .create({ ...request, stream: true } as Anthropic.MessageCreateParamsStreaming, { signal })
+      .withResponse();
+    try {
+      this.assertBound(response.headers);
+    } catch (error) {
+      data.controller.abort();
+      throw error;
+    }
+    return data;
+  }
+
+  private absorb(event: Anthropic.RawMessageStreamEvent, tally: StreamTally): string | undefined {
+    if (event.type === 'message_start') {
+      this.assertStreamModel(event.message.model);
+      tally.started = true;
+      tally.inputTokens = event.message.usage.input_tokens;
+      tally.cacheReadTokens = event.message.usage.cache_read_input_tokens ?? 0;
+      tally.cacheWriteTokens = event.message.usage.cache_creation_input_tokens ?? 0;
+      return undefined;
+    }
+    if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+      if (!tally.started) throw new ClaudeRouteError('claude_upstream_error');
+      return event.delta.text;
+    }
+    if (event.type === 'message_delta') {
+      tally.stopReason = event.delta.stop_reason;
+      tally.outputTokens = event.usage.output_tokens;
+    }
+    if (event.type === 'message_stop') tally.stopped = true;
+    return undefined;
+  }
+
+  private assertStreamModel(model: string): void {
+    if (model !== this.deps.route.model) throw new ClaudeRouteError('claude_model_mismatch');
+  }
+
+  private assertStreamStop(tally: StreamTally): void {
+    if (tally.stopReason === 'refusal') throw new ClaudeRouteError('claude_refusal');
+    if (tally.stopReason === 'max_tokens') throw new ClaudeRouteError('claude_output_truncated');
+    if (!tally.stopped || tally.stopReason === null || !END_TURNS.has(tally.stopReason)) {
+      throw new ClaudeRouteError('claude_upstream_error');
+    }
+    if (tally.emittedChars === 0) throw new ClaudeRouteError('claude_response_empty');
+  }
+
+  private recordStreamUsage(tally: StreamTally): void {
+    this.reportUsage(tally, 'generate');
+    tally.metered = true;
+  }
+
+  private recordInterruptedStreamUsage(tally: StreamTally): void {
+    if (tally.metered || !tally.started) return;
+    tally.metered = true;
+    try {
+      this.reportUsage(
+        {
+          ...tally,
+          outputTokens: Math.ceil(tally.emittedChars / CHARS_PER_TOKEN_FLOOR),
+        },
+        'generate',
+      );
+    } catch {
+      /* usage reporting must not mask the stream's own failure */
+    }
+  }
+
   private assertBound(headers: Pick<Headers, 'get'>): void {
     const mismatch = claudeIdentityMismatch(headers, this.deps.expected);
     if (mismatch === undefined) return;
@@ -101,17 +236,29 @@ export class ClaudeMessagesBackend {
 
   private recordUsage(message: CreatedMessage, operation: 'generate' | 'structured'): void {
     const { usage } = message;
+    this.reportUsage(
+      {
+        inputTokens: usage.input_tokens,
+        outputTokens: usage.output_tokens,
+        cacheReadTokens: usage.cache_read_input_tokens ?? 0,
+        cacheWriteTokens: usage.cache_creation_input_tokens ?? 0,
+      },
+      operation,
+    );
+  }
+
+  private reportUsage(counts: UsageCounts, operation: 'generate' | 'structured'): void {
     const route = this.deps.route;
     this.deps.usageSink({
       model: route.model,
       operation,
-      promptTokens: tokenCount(usage.input_tokens),
-      completionTokens: tokenCount(usage.output_tokens),
+      promptTokens: tokenCount(counts.inputTokens),
+      completionTokens: tokenCount(counts.outputTokens),
       cached: false,
       purpose: route.untagged ? 'untagged' : route.purpose,
       outcome: route.arm === 'D' ? 'ok' : 'shadow',
-      cacheReadTokens: tokenCount(usage.cache_read_input_tokens ?? 0),
-      cacheWriteTokens: tokenCount(usage.cache_creation_input_tokens ?? 0),
+      cacheReadTokens: tokenCount(counts.cacheReadTokens),
+      cacheWriteTokens: tokenCount(counts.cacheWriteTokens),
     });
   }
 
