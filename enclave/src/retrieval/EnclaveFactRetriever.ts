@@ -8,6 +8,7 @@ import {
   type FactRetriever,
   type FactSearchParams,
   type FactSnippetParams,
+  type FactVisibilityParams,
   type LensSearchParams,
   type RetrievedFact,
   type RetrieverDeps,
@@ -28,6 +29,7 @@ import { KeyedSemaphore } from './KeyedSemaphore.js';
 
 const LENS_SEARCH_MAX_CONCURRENCY = 4;
 const LENS_FAILURE_MESSAGE = 'lens retrieval failed';
+const VISIBILITY_METADATA_BATCH_MAX = 500;
 
 const FACT_EXCERPT_BATCH_TOO_LARGE = 'fact_excerpt_batch_too_large';
 
@@ -103,6 +105,25 @@ export class EnclaveFactRetriever implements FactRetriever, FactExcerptReader {
       resolveFreshAccess(orgId, userId),
     ]);
     return this.decryptVisible(tenant.crypto, orgId, metaRows, access, limit);
+  }
+
+  async visibleFactIds(params: FactVisibilityParams): Promise<Set<string>> {
+    const { orgId, userId, factIds, lensFactIds } = params;
+    if (factIds.length === 0) return new Set();
+    this.deps.resolveTenant(orgId);
+    const access = params.access ?? (await this.deps.resolveFreshAudienceAccess?.(orgId, userId));
+    if (!access) return new Set();
+
+    const visible = new Set<string>();
+    for (let start = 0; start < factIds.length; start += VISIBILITY_METADATA_BATCH_MAX) {
+      const batch = factIds.slice(start, start + VISIBILITY_METADATA_BATCH_MAX);
+      for (const meta of await this.deps.loadFactMetadata(orgId, batch)) {
+        if (this.isVisible(meta, access) && (lensFactIds?.has(meta.id) ?? true)) {
+          visible.add(meta.id);
+        }
+      }
+    }
+    return visible;
   }
 
   // The page feed: the same fresh access gate and batch bound as the excerpts, then one extractive line per visible fact.

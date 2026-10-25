@@ -19,6 +19,7 @@ const WIKI_SHADOW_PURPOSE = 'wiki-shadow';
 const COLLAB_SNAPSHOT_PURPOSE = 'collab-snapshot';
 const WIKI_COMMENT_PURPOSE = 'wiki-comment';
 const WIKI_FEEDBACK_PURPOSE = 'wiki-feedback';
+const ASK_TURN_PURPOSE = 'ask-turn';
 const LLM_CACHE_PURPOSE = 'llm-cache';
 const OAUTH_CREDENTIAL_PURPOSE = 'oauth-credential';
 const PULL_CURSOR_PURPOSE = 'pull-cursor';
@@ -26,6 +27,8 @@ const CODEBASE_SELECTION_PURPOSE = 'codebase-selection';
 const JIRA_WEBHOOK_REPLAY_PURPOSE = 'jira-webhook-replay';
 const OWNER_ACCOUNT_ID_KEY = 'ownerAccountId';
 const OWNER_STRICT_KEYS = [OWNER_ACCOUNT_ID_KEY] as const;
+
+export const ASK_TURN_TITLE_SUBJECT = 'title';
 
 export const WIKI_PUBLICATION_ENVELOPE_FORMAT = 'esdk-wiki-publication-v1';
 
@@ -49,6 +52,14 @@ export interface WikiCommentRef {
   orgId: string;
   pageId: string;
   field: WikiCommentField;
+}
+
+// Saved chat titles and turns are sealed to (org, chat, owner, subject), so a moved row or a title opened as a turn fails to decrypt.
+export interface AskTurnRef {
+  orgId: string;
+  chatId: string;
+  ownerUserId: string;
+  subject: string;
 }
 
 // A human-written AI-feedback correction is raw wiki prose, sealed bound to (org, block) so a
@@ -450,6 +461,14 @@ export class EnclaveCrypto {
     });
   }
 
+  async encryptAskTurn(plaintext: Buffer, ref: AskTurnRef): Promise<Buffer> {
+    return this.seal(plaintext, { ...this.askTurnIdentity(ref), purpose: ASK_TURN_PURPOSE });
+  }
+
+  async decryptAskTurn(ciphertext: Buffer, expected: AskTurnRef): Promise<Buffer> {
+    return this.open(ciphertext, ASK_TURN_PURPOSE, this.askTurnIdentity(expected));
+  }
+
   encryptWikiFeedback(plaintext: Buffer, ref: WikiFeedbackRef): Promise<Buffer> {
     return this.seal(plaintext, {
       orgId: ref.orgId,
@@ -623,6 +642,20 @@ export class EnclaveCrypto {
       strictKeys.some((key) => expected[key] === undefined && ctx[key] !== undefined);
     if (mismatch) throw new EncryptionContextMismatchError(purpose);
     return Buffer.from(plaintext);
+  }
+
+  private askTurnIdentity(ref: AskTurnRef): Record<string, string> {
+    const subjectValid = ref.subject === ASK_TURN_TITLE_SUBJECT || isLowercaseRfcUuid(ref.subject);
+    const idsValid = [ref.orgId, ref.chatId, ref.ownerUserId].every(isLowercaseRfcUuid);
+    if (!idsValid || !subjectValid) {
+      throw new Error('ask_turn_ref_invalid');
+    }
+    return {
+      orgId: ref.orgId,
+      chatId: ref.chatId,
+      ownerUserId: ref.ownerUserId,
+      subject: ref.subject,
+    };
   }
 
   private ownerContext(ownerAccountId: string | undefined): Record<string, string> {

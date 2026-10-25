@@ -2,6 +2,7 @@
 export const MESSAGE_SENTENCE_REASONS: ReadonlyMap<string, string> = new Map([
   ['54c6729ee10d0ff7', 'agent_database_credential_invalid'],
   ['a39d984147626832', 'ai_feedback_requires_a_resolvable_org'],
+  ['2be5081d08610e9e', 'ask_turn_ref_invalid'],
   ['f63725653f9add87', 'assignment_ack_v4_payload_invalid'],
   ['4b95a79011e5a11c', 'assignment_ack_v4_policy_verification_digest'],
   ['6202e3a8a055ed0f', 'assignment_ack_v4_policy_verification_version'],
@@ -108,6 +109,7 @@ export const MESSAGE_SENTENCE_REASONS: ReadonlyMap<string, string> = new Map([
   ['21fc8bef03be3b0a', 'local_inference_policy_forbidden_production'],
   ['746678fe71f7aa88', 'local_structured_output_mode_invalid'],
   ['0cc3c4fa35f473fa', 'max_resident_must_be_1'],
+  ['dce3486eefb13425', 'member_chat_purge_returned_no_counts'],
   ['b77752362501f248', 'member_identifier_invalid'],
   ['106d7fe72b7450d2', 'member_identifier_key_zeroized'],
   ['78ed3d64b628736a', 'member_pull_cursor_store_unavailable'],
@@ -221,6 +223,7 @@ export const MESSAGE_SENTENCE_REASONS: ReadonlyMap<string, string> = new Map([
   ['c728dc487e8fd341', 'verified_provenance_subject_digest_not_match'],
   ['4205ab2b10d626bf', 'verified_provenance_subject_is_missing'],
   ['1e3ff6103e253200', 'viewer_session_requires_non_empty_viewer_account_id'],
+  ['080cbef9bd15a5c3', 'viewer_user_session_requires_non_empty_viewer_user'],
   ['53e3591c9a4f6a37', 'visibility_renewal_failed'],
   ['9e8f272df3508684', 'wiki_comment_thread_not_found'],
   ['ddd259517392e529', 'wiki_empty_content'],

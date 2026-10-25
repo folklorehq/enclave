@@ -2,6 +2,7 @@ import { contentFreeErrorType, isFailureCodeSlug, type Logger } from '@folklore/
 import {
   EntitlementProjectionRepository,
   EntitlementProjectionService,
+  MemberAskChatPurgeRepository,
   type DirectorySourcePort,
   type EntitlementSyncOutcome,
 } from '@folklore/wiki';
@@ -71,6 +72,8 @@ export class EntitlementProjectionApplier {
       source,
       new EntitlementProjectionRepository(database.orm),
       this.deps.logger,
+      undefined,
+      new MemberAskChatPurgeRepository(database.orm),
     );
   }
 }

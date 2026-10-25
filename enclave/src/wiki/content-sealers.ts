@@ -1,4 +1,6 @@
 import type {
+  AskTurnSealRef,
+  AskTurnSealer,
   WikiCommentSealRef,
   WikiCommentSealer,
   WikiFeedbackSealRef,
@@ -72,5 +74,15 @@ export class EnclaveWikiFeedbackSealer extends EnclaveSealerBase implements Wiki
 
   unseal(ref: WikiFeedbackSealRef, ciphertext: Buffer): Promise<Buffer | null> {
     return this.tryUnseal(() => this.cryptoFor(ref.orgId).decryptWikiFeedback(ciphertext, ref));
+  }
+}
+
+export class EnclaveAskTurnSealer extends EnclaveSealerBase implements AskTurnSealer {
+  seal(ref: AskTurnSealRef, plaintext: Buffer): Promise<Buffer> {
+    return this.cryptoFor(ref.orgId).encryptAskTurn(plaintext, ref);
+  }
+
+  unseal(ref: AskTurnSealRef, ciphertext: Buffer): Promise<Buffer | null> {
+    return this.tryUnseal(() => this.cryptoFor(ref.orgId).decryptAskTurn(ciphertext, ref));
   }
 }
