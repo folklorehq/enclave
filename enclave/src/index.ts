@@ -260,6 +260,7 @@ import { enclaveOutputSignerFailureCode } from './boot/enclave-output-signer-fai
 import { bootModuleLoadGuard } from './boot/boot-module-load-guard.js';
 import { assertDedicatedModeRetired, assertSharedPoolIdentity } from './boot/boot-mode.js';
 import { InferenceApiKeyLoader } from './boot/InferenceApiKeyLoader.js';
+import { UnsubscribeSecretLoader } from './boot/UnsubscribeSecretLoader.js';
 
 const bootStatus = new EnclaveBootStatus();
 bootStatus.installFatalMonitor();
@@ -278,6 +279,7 @@ const PROCESSED_QUEUE_URL = process.env['PROCESSED_QUEUE_URL'] ?? '';
 const RAW_PAYLOADS_BUCKET = process.env['RAW_PAYLOADS_BUCKET'] ?? '';
 const SYNTHESIS_REQUEST_QUEUE_URL = process.env['SYNTHESIS_REQUEST_QUEUE_URL'] ?? '';
 const TEE_API_KEY_SSM_PATH = process.env['TEE_API_KEY_SSM_PATH'] ?? '';
+const UNSUBSCRIBE_SECRET_SSM_PATH = process.env['UNSUBSCRIBE_SECRET_SSM_PATH'] ?? '';
 // pull transports run in-enclave. The control plane only ever hands back
 // ciphertext (source OAuth tokens ECIES-encrypted to this enclave's public key);
 // this shared deployment secret (the same one `apps/agent` uses to check in) is
@@ -317,6 +319,20 @@ async function loadInferenceKey(): Promise<void> {
   process.env['TEE_API_KEY'] = await new InferenceApiKeyLoader(
     new AwsBootManifestSsmParameters(ssm),
   ).load(TEE_API_KEY_SSM_PATH);
+}
+
+// Unlike the inference key, a failed read leaves the unsubscribe route off instead of stopping a pool that serves tenants.
+async function loadUnsubscribeSecret(): Promise<void> {
+  if (!UNSUBSCRIBE_SECRET_SSM_PATH || process.env['UNSUBSCRIBE_SECRET']) return;
+  try {
+    process.env['UNSUBSCRIBE_SECRET'] = await new UnsubscribeSecretLoader(
+      new AwsBootManifestSsmParameters(ssm),
+    ).load(UNSUBSCRIBE_SECRET_SSM_PATH);
+  } catch (error) {
+    logger.error('unsubscribe secret unavailable', {
+      errorCode: error instanceof Error ? error.message : 'unknown',
+    });
+  }
 }
 
 // The token's key releases it only to an attested enclave, so SSM cannot decrypt it for us; a
@@ -890,6 +906,7 @@ assertInferenceConfigured();
 bootStatus.reach('inference_configured');
 bootStatus.begin('agent_token_load');
 await loadAgentToken();
+await loadUnsubscribeSecret();
 
 bootStatus.begin('output_signer_load');
 const outputAuthenticator = createEnclaveOutputAuthenticator();

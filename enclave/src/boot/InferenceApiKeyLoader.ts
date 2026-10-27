@@ -1,5 +1,5 @@
 import type { SsmParameterValuePort } from '../attestation/BootManifestSecretLoader.js';
-import { readFailureCode } from '../attestation/read-failure-code.js';
+import { SsmSecretLoader } from './SsmSecretLoader.js';
 
 export const inferenceApiKeyLoadErrors = {
   read: 'inference_api_key_read_failed',
@@ -8,26 +8,8 @@ export const inferenceApiKeyLoadErrors = {
 } as const;
 
 /** The inference provider's API key; a failed read stops the boot by a guard slug. */
-export class InferenceApiKeyLoader {
-  constructor(private readonly ssm: SsmParameterValuePort) {}
-
-  async load(path: string): Promise<string> {
-    const value = await this.read(path);
-    if (!value) throw new Error(inferenceApiKeyLoadErrors.missing);
-    return value;
-  }
-
-  private async read(path: string): Promise<string | undefined> {
-    try {
-      return (await this.ssm.getParameter({ name: path, withDecryption: true })).value;
-    } catch (error) {
-      throw new Error(
-        readFailureCode(
-          error,
-          inferenceApiKeyLoadErrors.read,
-          inferenceApiKeyLoadErrors.accessDenied,
-        ),
-      );
-    }
+export class InferenceApiKeyLoader extends SsmSecretLoader {
+  constructor(ssm: SsmParameterValuePort) {
+    super(ssm, inferenceApiKeyLoadErrors);
   }
 }
