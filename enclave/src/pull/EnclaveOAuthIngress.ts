@@ -3,10 +3,14 @@ import { Hono, type Context } from 'hono';
 import type { ZodType } from 'zod';
 import type { Logger } from '@folklore/core';
 import {
+  codebaseGraphEraseCommandSchema,
+  codebaseGraphEraseResponseSchema,
   connectorOAuthMetadataUpdateSchema,
   oauthDisconnectCleanupCommandSchema,
   sealedAuthorizationCodeSubmissionSchema,
   sealedGitHubInstallationSubmissionSchema,
+  type CodebaseGraphEraseCommand,
+  type CodebaseGraphEraseResponse,
   type ConnectorOAuthMetadataUpdate,
   type OAuthDisconnectCleanupCommand,
   type SealedAuthorizationCodeSubmission,
@@ -39,6 +43,7 @@ export interface EnclaveOAuthIngressHandlers {
     generation: string,
   ): Promise<ConnectorOAuthMetadataUpdate>;
   cleanupDisconnect?(input: OAuthDisconnectCleanupCommand): Promise<void>;
+  eraseCodebaseGraph?(input: CodebaseGraphEraseCommand): Promise<CodebaseGraphEraseResponse>;
 }
 
 export interface EnclaveOAuthIngressOptions {
@@ -70,6 +75,7 @@ export class EnclaveOAuthIngress {
     this.app.post('/member-identity', (context) => this.handleMemberIdentity(context));
     this.app.post('/github-installation', (context) => this.handleGitHubInstallation(context));
     this.app.post('/disconnect-cleanup', (context) => this.handleDisconnectCleanup(context));
+    this.app.post('/codebase-graph-erase', (context) => this.handleCodebaseGraphErase(context));
   }
 
   get fetch(): (request: Request) => Promise<Response> {
@@ -107,26 +113,51 @@ export class EnclaveOAuthIngress {
   }
 
   private async handleDisconnectCleanup(context: Context): Promise<Response> {
+    const handler = this.handlers.cleanupDisconnect;
+    return this.handleLeasedCommand(
+      context,
+      oauthDisconnectCleanupCommandSchema,
+      handler &&
+        (async (input) => {
+          await handler(input);
+          return { completed: true };
+        }),
+      'cleanup_failed',
+    );
+  }
+
+  private async handleCodebaseGraphErase(context: Context): Promise<Response> {
+    const handler = this.handlers.eraseCodebaseGraph;
+    return this.handleLeasedCommand(
+      context,
+      codebaseGraphEraseCommandSchema,
+      handler && (async (input) => codebaseGraphEraseResponseSchema.parse(await handler(input))),
+      'erase_failed',
+    );
+  }
+
+  // The live lease authorizes the enclave; the retired generation in the command stays data.
+  private async handleLeasedCommand<T extends { orgId: string; tenantDeploymentId: string }>(
+    context: Context,
+    schema: ZodType<T>,
+    handler: ((input: T) => Promise<object>) | undefined,
+    failureCode: string,
+  ): Promise<Response> {
     if (!this.authorized(context.req.header('authorization'))) {
       return context.json({ error: 'unauthorized' }, 401);
     }
-    if (!this.handlers.cleanupDisconnect) return context.json({ error: 'unavailable' }, 503);
-    const body = await this.readBody(context.req.raw);
-    const parsed = oauthDisconnectCleanupCommandSchema.safeParse(body);
+    if (!handler) return context.json({ error: 'unavailable' }, 503);
+    const parsed = schema.safeParse(await this.readBody(context.req.raw));
     if (!parsed.success) return context.json({ error: 'invalid_submission' }, 400);
     const activeGeneration = await this.handlers.resolveGeneration({
       orgId: parsed.data.orgId,
       deploymentId: parsed.data.tenantDeploymentId,
     });
-    if (!activeGeneration) {
-      return context.json({ error: 'attestation_unavailable' }, 409);
-    }
-    // Cleanup keeps the retired generation for credential AAD; the live lease above authorizes the enclave.
+    if (!activeGeneration) return context.json({ error: 'attestation_unavailable' }, 409);
     try {
-      await this.handlers.cleanupDisconnect(parsed.data);
-      return context.json({ completed: true }, 200);
+      return context.json(await handler(parsed.data), 200);
     } catch {
-      return context.json({ error: 'cleanup_failed' }, 503);
+      return context.json({ error: failureCode }, 503);
     }
   }
 

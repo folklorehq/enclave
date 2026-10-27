@@ -25,6 +25,8 @@ const OAUTH_CREDENTIAL_PURPOSE = 'oauth-credential';
 const PULL_CURSOR_PURPOSE = 'pull-cursor';
 const CODEBASE_SELECTION_PURPOSE = 'codebase-selection';
 const JIRA_WEBHOOK_REPLAY_PURPOSE = 'jira-webhook-replay';
+const CODE_GRAPH_NAMES_PURPOSE = 'code-graph-names';
+const CODE_GRAPH_TOMBSTONE_PURPOSE = 'code-graph-tombstone';
 const OWNER_ACCOUNT_ID_KEY = 'ownerAccountId';
 const OWNER_STRICT_KEYS = [OWNER_ACCOUNT_ID_KEY] as const;
 
@@ -88,6 +90,17 @@ export interface CodebaseSelectionRef {
 }
 
 export interface JiraWebhookReplayRef {
+  orgId: string;
+}
+
+export interface CodeGraphNamesRef {
+  orgId: string;
+  generation: string;
+  repoNodeId: string;
+  shard: string;
+}
+
+export interface CodeGraphTombstoneRef {
   orgId: string;
 }
 
@@ -542,6 +555,25 @@ export class EnclaveCrypto {
     });
   }
 
+  encryptCodeGraphNames(plaintext: Buffer, ref: CodeGraphNamesRef): Promise<Buffer> {
+    return this.seal(plaintext, {
+      ...this.codeGraphNamesIdentity(ref),
+      purpose: CODE_GRAPH_NAMES_PURPOSE,
+    });
+  }
+
+  decryptCodeGraphNames(ciphertext: Buffer, expected: CodeGraphNamesRef): Promise<Buffer> {
+    return this.open(ciphertext, CODE_GRAPH_NAMES_PURPOSE, this.codeGraphNamesIdentity(expected));
+  }
+
+  encryptCodeGraphTombstone(plaintext: Buffer, ref: CodeGraphTombstoneRef): Promise<Buffer> {
+    return this.seal(plaintext, { orgId: ref.orgId, purpose: CODE_GRAPH_TOMBSTONE_PURPOSE });
+  }
+
+  decryptCodeGraphTombstone(ciphertext: Buffer, expected: CodeGraphTombstoneRef): Promise<Buffer> {
+    return this.open(ciphertext, CODE_GRAPH_TOMBSTONE_PURPOSE, { orgId: expected.orgId });
+  }
+
   async encryptOAuthCredential(plaintext: Buffer, ref: OAuthCredentialRef): Promise<Buffer> {
     return this.seal(plaintext, {
       orgId: ref.orgId,
@@ -655,6 +687,15 @@ export class EnclaveCrypto {
       chatId: ref.chatId,
       ownerUserId: ref.ownerUserId,
       subject: ref.subject,
+    };
+  }
+
+  private codeGraphNamesIdentity(ref: CodeGraphNamesRef): Record<string, string> {
+    return {
+      orgId: ref.orgId,
+      generation: ref.generation,
+      repoNodeId: ref.repoNodeId,
+      shard: ref.shard,
     };
   }
 

@@ -33,6 +33,7 @@ import {
   JiraWebhookAuthenticator,
   type JiraWebhookClaimPolicy,
 } from '../ingest/JiraWebhookAuthenticator.js';
+import { CodebaseGraphEraser } from '../codebase/CodebaseGraphEraser.js';
 import { S3JiraWebhookReplayStore } from '../ingest/S3JiraWebhookReplayStore.js';
 import type { OAuthRefreshCommand, OAuthRefreshMetadataUpdate } from '@folklore/contracts/enclave';
 import type { WebhookLifecycleDelivery } from '@folklore/contracts/enclave';
@@ -232,6 +233,15 @@ export function createOAuthRuntime(options: OAuthCompositionOptions): OAuthRunti
     cryptoFor(options.resolveTenant(orgId)),
   );
 
+  const codebaseGraphEraser = new CodebaseGraphEraser({
+    s3: options.s3,
+    resolveTenant: options.resolveTenant,
+    controlPlaneUrl: options.controlPlaneUrl,
+    runtimeDeploymentId: options.deploymentId,
+    agentToken: options.agentToken,
+    fetchImpl: controlPlaneFetch,
+  });
+
   const handlers: EnclaveOAuthIngressHandlers = {
     resolveGeneration: (input) => leaseResolver.resolve(input),
     redeemSource: async (input, generation) => {
@@ -276,6 +286,7 @@ export function createOAuthRuntime(options: OAuthCompositionOptions): OAuthRunti
       const tenant = options.resolveTenant(input.orgId);
       await jiraWebhookDisconnect.cleanup(input, tenant.crypto);
     },
+    eraseCodebaseGraph: (input) => codebaseGraphEraser.erase(input),
   };
   return {
     ingress: new EnclaveOAuthIngress(handlers, {

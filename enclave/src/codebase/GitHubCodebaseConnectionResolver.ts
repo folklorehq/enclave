@@ -1,6 +1,7 @@
 import type { EnclaveCrypto } from '../crypto/esdk.js';
 import type {
   DecryptedSourceConnection,
+  RawSourceConnection,
   SourceConnectionResolution,
 } from '../pull/source-connections-client.js';
 import {
@@ -31,6 +32,38 @@ export type CodebaseConnectionResolution =
     }
   | Extract<SourceConnectionResolution, { outcome: 'not_processed' }>;
 
+export type CodebaseConsentResolution =
+  | {
+      outcome: 'ready';
+      selection: CodebaseSelection;
+      capabilityGeneration: string;
+      deploymentId: string;
+    }
+  | Extract<CodebaseConnectionResolution, { outcome: 'not_ready' | 'not_processed' }>;
+
+type ParentResolution =
+  | {
+      outcome: 'connected';
+      connection: DecryptedSourceConnection;
+      capabilityGeneration?: string;
+    }
+  | ParentRefusal;
+
+type ParentRefusal =
+  | {
+      outcome: 'not_ready';
+      reason:
+        | 'codebase_capability_missing'
+        | 'codebase_capability_disabled'
+        | 'codebase_parent_missing'
+        | 'github_parent_missing';
+    }
+  | Extract<SourceConnectionResolution, { outcome: 'not_processed' }>;
+
+type LocatedParent =
+  | { outcome: 'located'; parent: RawSourceConnection; capabilityGeneration?: string }
+  | ParentRefusal;
+
 export interface GitHubCodebaseConnectionResolverDeps {
   controlPlaneUrl: string;
   runtimeDeploymentId: string;
@@ -52,40 +85,50 @@ export class GitHubCodebaseConnectionResolver {
 
   async resolveScheduled(): Promise<CodebaseConnectionResolution> {
     const parent = await this.resolveParent(true);
-    if (parent.outcome !== 'connected') {
-      if (parent.outcome === 'not_ready') {
-        if (parent.reason === 'github_parent_missing') {
-          return { outcome: 'not_ready', reason: 'codebase_parent_missing' };
-        }
-        if (parent.reason === 'codebase_capability_missing') {
-          return { outcome: 'not_ready', reason: 'codebase_capability_missing' };
-        }
-        if (parent.reason === 'codebase_capability_disabled') {
-          return { outcome: 'not_ready', reason: 'codebase_capability_disabled' };
-        }
-        return { outcome: 'not_ready', reason: 'codebase_parent_missing' };
-      }
-      return parent;
+    if (parent.outcome !== 'connected') return this.refusal(parent);
+    const readiness = await this.readReadiness(parent.capabilityGeneration);
+    if (readiness.outcome !== 'ready') return readiness;
+    return { ...readiness, connection: parent.connection };
+  }
+
+  async resolveGraphConsent(): Promise<CodebaseConsentResolution> {
+    const located = await this.locateParent(true);
+    if (located.outcome !== 'located') return this.refusal(located);
+    const readiness = await this.readReadiness(located.capabilityGeneration);
+    if (readiness.outcome !== 'ready') return readiness;
+    return { ...readiness, deploymentId: this.deps.tenantDeploymentId };
+  }
+
+  private refusal(
+    parent: ParentRefusal,
+  ): Extract<CodebaseConnectionResolution, { outcome: 'not_ready' | 'not_processed' }> {
+    if (parent.outcome !== 'not_ready') return parent;
+    if (
+      parent.reason === 'codebase_capability_missing' ||
+      parent.reason === 'codebase_capability_disabled'
+    ) {
+      return { outcome: 'not_ready', reason: parent.reason };
     }
+    return { outcome: 'not_ready', reason: 'codebase_parent_missing' };
+  }
+
+  private async readReadiness(
+    capabilityGeneration: string | undefined,
+  ): Promise<
+    | { outcome: 'ready'; selection: CodebaseSelection; capabilityGeneration: string }
+    | Extract<CodebaseConnectionResolution, { outcome: 'not_ready' }>
+  > {
     try {
       const selection = await this.readSelection();
       if (selection.mode === 'selected' && selection.repositories.length === 0) {
         return { outcome: 'not_ready', reason: 'codebase_selection_unavailable' };
       }
-      if (!parent.capabilityGeneration) {
+      if (!capabilityGeneration) {
         return { outcome: 'not_ready', reason: 'codebase_capability_missing' };
       }
-      return {
-        outcome: 'ready',
-        connection: parent.connection,
-        selection,
-        capabilityGeneration: parent.capabilityGeneration,
-      };
+      return { outcome: 'ready', selection, capabilityGeneration };
     } catch {
-      return {
-        outcome: 'not_ready',
-        reason: 'codebase_selection_unavailable',
-      };
+      return { outcome: 'not_ready', reason: 'codebase_selection_unavailable' };
     }
   }
 
@@ -114,22 +157,29 @@ export class GitHubCodebaseConnectionResolver {
     return parent;
   }
 
-  private async resolveParent(requireCapability: boolean): Promise<
-    | {
-        outcome: 'connected';
-        connection: DecryptedSourceConnection;
-        capabilityGeneration?: string;
-      }
-    | {
-        outcome: 'not_ready';
-        reason:
-          | 'codebase_capability_missing'
-          | 'codebase_capability_disabled'
-          | 'codebase_parent_missing'
-          | 'github_parent_missing';
-      }
-    | Extract<SourceConnectionResolution, { outcome: 'not_processed' }>
-  > {
+  private async resolveParent(requireCapability: boolean): Promise<ParentResolution> {
+    const located = await this.locateParent(requireCapability);
+    if (located.outcome !== 'located') return located;
+    const decrypted = await decryptSourceConnection(
+      located.parent,
+      this.deps.tenantDeploymentId,
+      this.deps.orgId,
+      this.deps.crypto,
+    );
+    if (decrypted.outcome !== 'connected') {
+      return decrypted.outcome === 'missing'
+        ? { outcome: 'not_ready', reason: 'github_parent_missing' }
+        : decrypted;
+    }
+    return {
+      ...decrypted,
+      ...(located.capabilityGeneration
+        ? { capabilityGeneration: located.capabilityGeneration }
+        : {}),
+    };
+  }
+
+  private async locateParent(requireCapability: boolean): Promise<LocatedParent> {
     const fetched = await fetchSourceConnections(
       this.deps.controlPlaneUrl,
       this.deps.runtimeDeploymentId,
@@ -142,6 +192,9 @@ export class GitHubCodebaseConnectionResolver {
     if (fetched.outcome !== 'fetched') {
       if (fetched.outcome === 'missing') {
         return { outcome: 'not_ready', reason: 'github_parent_missing' };
+      }
+      if (fetched.outcome === 'connected') {
+        return { outcome: 'not_processed', reason: 'connection_response_invalid' };
       }
       return fetched;
     }
@@ -163,34 +216,23 @@ export class GitHubCodebaseConnectionResolver {
         reason: requireCapability ? 'codebase_parent_missing' : 'github_parent_missing',
       };
     }
-    if (parents.length !== 1)
+    const parent = parents[0];
+    if (parents.length !== 1 || !parent) {
       return { outcome: 'not_processed', reason: 'connection_response_invalid' };
+    }
+    const capability = fetched.projection.capabilities[0];
     if (requireCapability) {
-      const capability = fetched.projection.capabilities[0];
       if (!capability) return { outcome: 'not_ready', reason: 'codebase_capability_missing' };
       if (!capability.isEnabled) {
         return { outcome: 'not_ready', reason: 'codebase_capability_disabled' };
       }
     }
-    const parent = parents[0];
-    if (!parent) return { outcome: 'not_processed', reason: 'connection_response_invalid' };
-    const decrypted = await decryptSourceConnection(
-      parent,
-      this.deps.tenantDeploymentId,
-      this.deps.orgId,
-      this.deps.crypto,
-    );
-    if (decrypted.outcome !== 'connected') {
-      return decrypted.outcome === 'missing'
-        ? { outcome: 'not_ready', reason: 'github_parent_missing' }
-        : decrypted;
-    }
-    const capabilityGeneration = requireCapability
-      ? fetched.projection.capabilities[0]?.activationGeneration
-      : undefined;
     return {
-      ...decrypted,
-      ...(capabilityGeneration ? { capabilityGeneration } : {}),
+      outcome: 'located',
+      parent,
+      ...(requireCapability && capability
+        ? { capabilityGeneration: capability.activationGeneration }
+        : {}),
     };
   }
 }
