@@ -24,6 +24,12 @@ export class ChunkQueue<T> implements AsyncIterable<T> {
   private ended = false;
   private failure: { readonly error: unknown } | undefined;
   private consumerReturned = false;
+  private markSettled: () => void = () => undefined;
+
+  /** Resolves once the producer has called `end` or `fail`, which an aborted producer does only after it has reported its usage. */
+  readonly settled: Promise<void> = new Promise((resolve) => {
+    this.markSettled = resolve;
+  });
 
   constructor(private readonly onConsumerReturn: () => void) {}
 
@@ -41,12 +47,14 @@ export class ChunkQueue<T> implements AsyncIterable<T> {
   end(): void {
     if (this.ended || this.failure !== undefined) return;
     this.ended = true;
+    this.markSettled();
     if (this.pending !== undefined) this.settle().resolve({ value: undefined, done: true });
   }
 
   fail(error: unknown): void {
     if (this.ended || this.failure !== undefined) return;
     this.failure = { error };
+    this.markSettled();
     if (this.pending !== undefined) this.settle().reject(error);
   }
 

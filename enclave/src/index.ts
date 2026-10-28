@@ -61,6 +61,7 @@ import { BoxServer } from './http/BoxServer.js';
 import { HostHeadroomGauge } from './workers/HostHeadroomGauge.js';
 import { SynthesisConsumer } from './workers/SynthesisConsumer.js';
 import { ThemeSnapshotFactSource } from './workers/ThemeSnapshotFactSource.js';
+import { AskUsageMeter } from './inference/AskUsageMeter.js';
 import { recordTokenUsage } from './inference/TokenUsageScope.js';
 import { fetchLinkPreview } from './preview/preview-client.js';
 import { HaltGate, poolHaltKey, tenantHaltKey } from './control/HaltGate.js';
@@ -148,6 +149,7 @@ import {
   createRuntimeDatabaseConnection,
   createRuntimeDatabaseReadiness,
   type ApiContainer,
+  type AskUsageSinkPort,
   type CreateContainerOptions,
   type RetrieverDeps,
 } from '@folklore/api';
@@ -1436,6 +1438,9 @@ try {
     ),
   });
   evictAnswerInference = (tenantId) => answerInference.evict(tenantId);
+  const askUsageLogger = logger.child({ component: 'ask_usage' });
+  const askUsageMeter = (sink: AskUsageSinkPort) =>
+    new AskUsageMeter({ sink, logger: askUsageLogger });
   const codebaseSettingsPort = createCodebaseSettingsPort();
   const apiOptions: CreateContainerOptions = {
     // content-touching enclave opens no data-carrying egress — box-API telemetry inert by composition, not by omitting POSTHOG_API_KEY.
@@ -1457,14 +1462,18 @@ try {
       isHaltedNow: isTenantHaltedNow,
       isFenced: (tenantId) => tenantRequests.isFenced(tenantId),
     }),
-    agentLoopFactory: (deps) =>
-      new EnclaveAgentLoop({
+    agentLoopFactory: (deps, usage) => {
+      const meter = askUsageMeter(usage);
+      return new EnclaveAgentLoop({
         retriever: buildRetriever(agentRetrieverDeps(deps.loadFactMetadata)),
         listThemes: deps.listThemes,
         readPage: deps.readPage,
         generate: (orgId, prompt, systemPrompt) =>
-          answerInference.get(orgId).generate(prompt, systemPrompt, undefined, () => false),
-      }),
+          meter.generate(orgId, () =>
+            answerInference.get(orgId).generate(prompt, systemPrompt, undefined, () => false),
+          ),
+      });
+    },
     ...(codebaseSettingsPort ? { codebaseSettings: codebaseSettingsPort } : {}),
     retrieverFactory: buildRetriever,
     factExcerptReaderFactory: buildRetriever,
@@ -1472,19 +1481,28 @@ try {
     // audience-visible decrypted bodies to the in-enclave TEE model — nothing leaves the enclave.
     // Both seams resolve per request from the answer's own orgId: the retriever and the sealed
     // generate cache above, so neither can bind to a boot-time tenant.
-    answerServiceFactory: (retrieverDeps) =>
-      new EnclaveFactAnswerer(
+    answerServiceFactory: (retrieverDeps, usage) => {
+      const meter = askUsageMeter(usage);
+      return new EnclaveFactAnswerer(
         buildRetriever(retrieverDeps),
         (orgId, prompt, systemPrompt, shouldCache) =>
-          answerInference.get(orgId).generate(prompt, systemPrompt, undefined, shouldCache),
-      ),
-    streamingAnswerServiceFactory: (retrieverDeps) =>
-      new EnclaveFactAnswerer(
+          meter.generate(orgId, () =>
+            answerInference.get(orgId).generate(prompt, systemPrompt, undefined, shouldCache),
+          ),
+      );
+    },
+    streamingAnswerServiceFactory: (retrieverDeps, usage) => {
+      const meter = askUsageMeter(usage);
+      return new EnclaveFactAnswerer(
         buildRetriever(retrieverDeps),
         (orgId, prompt, systemPrompt, shouldCache) =>
-          answerInference.get(orgId).generate(prompt, systemPrompt, undefined, shouldCache),
-        (orgId, request) => streamOrBuffer(answerInference.get(orgId), request),
-      ),
+          meter.generate(orgId, () =>
+            answerInference.get(orgId).generate(prompt, systemPrompt, undefined, shouldCache),
+          ),
+        (orgId, request) =>
+          meter.stream(orgId, () => streamOrBuffer(answerInference.get(orgId), request)),
+      );
+    },
     // synthesized wiki text is ciphertext at rest; the read path decrypts audience-visible
     // blocks here, in-enclave, over the requesting tenant's sealed key (resolved from `ref.orgId`).
     wikiContentDecryptor,
