@@ -50,6 +50,17 @@ const CONTENT_ENCODING = 'Content-Encoding';
 const VARY = 'Vary';
 const ACCEPT_ENCODING = 'Accept-Encoding';
 const JAVASCRIPT_CONTENT_TYPE = 'text/javascript; charset=utf-8';
+// Same-origin referrers only: box paths carry page slugs, which must not reach linked sites.
+// Popups stay reachable because source connect polls its OAuth popup through window.open.
+const BROWSER_HARDENING_HEADERS: Readonly<Record<string, string>> = {
+  'Strict-Transport-Security': 'max-age=31536000',
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Content-Security-Policy': "frame-ancestors 'none'; base-uri 'self'; object-src 'none'",
+  'Referrer-Policy': 'same-origin',
+  'Cross-Origin-Opener-Policy': 'same-origin-allow-popups',
+  'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
+};
 
 export class BoxServer {
   private readonly app: Hono;
@@ -71,6 +82,7 @@ export class BoxServer {
     this.collabPort = this.usableCollabPort(options.collabPort ?? COLLAB_DEFAULT_PORT);
     this.apiReady = Boolean(this.api);
     this.app = new Hono();
+    this.app.use('*', this.browserHardening);
 
     // Degraded when the API failed to compose at boot: report it so the outage is
     // visible rather than masquerading as a healthy static-only instance.
@@ -130,6 +142,16 @@ export class BoxServer {
     this.apiReady = true;
     this.collabPort = this.usableCollabPort(collabPort ?? COLLAB_DEFAULT_PORT);
   }
+
+  // Rebuilt rather than mutated: a handler may return a Response whose headers are immutable.
+  private readonly browserHardening: MiddlewareHandler = async (c, next) => {
+    await next();
+    const headers = new Headers(c.res.headers);
+    for (const [name, value] of Object.entries(BROWSER_HARDENING_HEADERS)) {
+      if (!headers.has(name)) headers.set(name, value);
+    }
+    c.res = new Response(c.res.body, { status: c.res.status, headers });
+  };
 
   private readonly uncachedUnlessDeclared: MiddlewareHandler = async (c, next) => {
     await next();
