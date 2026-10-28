@@ -17,8 +17,10 @@ import {
 import { NOTION_KIND, supportsPerPersonMode } from '@folklore/contracts';
 import {
   oauthRefreshCommandSchema,
+  pullStatsSchema,
   type OAuthRefreshCommand,
   type OAuthRefreshMetadataUpdate,
+  type PullCompleteSignal,
   type PullDueMessage,
   type PullFailedSignal,
   type PullFailureReason,
@@ -71,22 +73,14 @@ export type PullConnectionMetadata = Pick<
   | 'webhookCleanupExpiresAt'
 >;
 
-// Content-free completion signal the worker uses to advance sync health; the
-// enclave has no DB access, so this is how last_successful_sync_at gets written worker-side.
-export interface PullCompleteSignal {
-  type: 'pull-complete';
-  orgId: string;
-  sourceKind: string;
-  sourceId: string;
-  completedAt: string;
-  backfillLeaseToken?: string;
-}
+export type { PullCompleteSignal };
 
 export type { PullFailedSignal };
 
 export function buildPullCompleteSignal(
   message: PullDueMessage,
   completedAt: Date = new Date(),
+  stats?: PullRunStats,
 ): PullCompleteSignal {
   const backfillLeaseToken =
     'backfillLeaseToken' in message ? message.backfillLeaseToken : undefined;
@@ -97,6 +91,7 @@ export function buildPullCompleteSignal(
     sourceId: message.sourceId,
     completedAt: completedAt.toISOString(),
     ...(backfillLeaseToken ? { backfillLeaseToken } : {}),
+    ...(stats && pullStatsSchema.safeParse(stats).success ? { stats } : {}),
   };
 }
 

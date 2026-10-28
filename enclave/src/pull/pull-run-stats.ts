@@ -1,17 +1,9 @@
 import type { NormalizedFact, PullStats } from '@folklore/connectors';
+import { PULL_CHARS_BUCKET, type PullStatsSignal } from '@folklore/contracts/enclave';
 import { embedTextOf } from '../pipeline/index.js';
 import type { ProcessedFact } from '../pipeline/index.js';
 
-const EMBED_CHARS_BUCKET = 10_000;
-
-export interface PullRunStats extends PullStats {
-  facts: number;
-  contentFacts: number;
-  embedInputCharsBucket: number;
-  durationMs: number;
-  hasMore: boolean;
-  backfill: boolean;
-}
+export type PullRunStats = PullStatsSignal;
 
 export interface PullRunStatsInput {
   pulled: readonly NormalizedFact[];
@@ -52,5 +44,5 @@ function embedInputCharsBucket(pulled: readonly NormalizedFact[]): number {
   const chars = pulled
     .filter((fact) => fact.kind !== 'transition')
     .reduce((total, fact) => total + embedTextOf(fact).length, 0);
-  return Math.ceil(chars / EMBED_CHARS_BUCKET) * EMBED_CHARS_BUCKET;
+  return Math.ceil(chars / PULL_CHARS_BUCKET) * PULL_CHARS_BUCKET;
 }

@@ -237,7 +237,7 @@ export class TenantMessageRouter {
         facts: result.facts,
         // Per chunk, lease token included: an open 15-min lease would expire mid-chain and the
         // planner's re-issued backfill would reset the cursor to the window start.
-        pullComplete: buildPullCompleteSignal(raw),
+        pullComplete: buildPullCompleteSignal(raw, new Date(), result.stats),
         ...(result.hasMore ? { continuation: this.continuationOf(raw) } : {}),
         afterDurablePersistence: result.persistCursor,
         shouldAcknowledge: true,
