@@ -216,6 +216,7 @@ export class EnclaveOAuthAuthorizationService {
       const identity = await this.provider.resolveIdentity({
         config,
         accessToken: response.accessToken,
+        forMember: true,
       });
       const link = memberIdentityLinkPersistenceSchema.parse({
         deploymentId: grant.deploymentId,
@@ -248,12 +249,20 @@ export class EnclaveOAuthAuthorizationService {
     config: VerifiedProviderConfig | undefined,
     response: ProviderTokenResponse | undefined,
   ): Promise<void> {
-    if (config?.kind !== 'github' || !response?.accessToken) return;
+    if (!config || !response?.accessToken) return;
     try {
-      await this.provider.revokeGitHubUserAccessToken({
-        config,
-        accessToken: response.accessToken,
-      });
+      if (config.kind === 'github') {
+        await this.provider.revokeGitHubUserAccessToken({
+          config,
+          accessToken: response.accessToken,
+        });
+      } else {
+        await this.provider.revokeMemberTokens({
+          config,
+          accessToken: response.accessToken,
+          ...(response.refreshToken ? { refreshToken: response.refreshToken } : {}),
+        });
+      }
     } catch {
       return;
     }

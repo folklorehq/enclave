@@ -26,7 +26,13 @@ export interface ProviderTokenClient {
   resolveIdentity(input: {
     config: VerifiedProviderConfig;
     accessToken: string;
-  }): Promise<{ sourceUserId: string; externalTenantId?: string }>;
+    forMember?: true;
+  }): Promise<{ sourceUserId: string; externalTenantId?: string; displayName?: string }>;
+  revokeMemberTokens(input: {
+    config: VerifiedProviderConfig;
+    accessToken: string;
+    refreshToken?: string;
+  }): Promise<void>;
   mintGitHubInstallationToken(input: {
     config: VerifiedProviderConfig;
     installationId: string;

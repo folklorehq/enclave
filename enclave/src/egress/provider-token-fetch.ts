@@ -1,3 +1,4 @@
+import { NOTION_API_VERSION } from '@folklore/contracts';
 import { ProxyAgent } from 'undici';
 import { EGRESS_PROXY_URL } from './proxy.js';
 
@@ -5,6 +6,8 @@ export type ProviderTokenOperation =
   | 'code'
   | 'refresh'
   | 'identity'
+  | 'member_identity_lookup'
+  | 'member_token_revoke'
   | 'jira_resources'
   | 'github_installation'
   | 'github_user_code'
@@ -29,6 +32,17 @@ export type ProviderTokenRequest =
       refreshToken: string;
     }
   | { operation: 'identity'; accessToken: string }
+  | {
+      operation: 'member_identity_lookup';
+      accessToken: string;
+      lookup: {
+        method: 'GET' | 'POST';
+        url: string;
+        graphqlQuery?: string;
+        headers?: Readonly<Record<string, string>>;
+      };
+    }
+  | { operation: 'member_token_revoke'; url: string; token: string; hint: string }
   | { operation: 'jira_resources'; accessToken: string }
   | {
       operation: 'github_installation';
@@ -81,7 +95,6 @@ const SUPPORTED_PROVIDER_KINDS = new Set([
   'google_calendar',
 ]);
 const LINEAR_IDENTITY_QUERY = 'query FolkloreOAuthIdentity { viewer { id organization { id } } }';
-const NOTION_API_VERSION = '2026-03-11';
 const JIRA_ACCESSIBLE_RESOURCES_ENDPOINT =
   'https://api.atlassian.com/oauth/token/accessible-resources';
 const GITHUB_USER_INSTALLATIONS_PATH = '/user/installations';
@@ -255,6 +268,8 @@ function buildProviderRequest(
   if (request.operation === 'identity') {
     return identityRequest(config, request.accessToken);
   }
+  if (request.operation === 'member_identity_lookup') return memberIdentityLookupRequest(request);
+  if (request.operation === 'member_token_revoke') return memberTokenRevokeRequest(request);
   if (request.operation === 'jira_resources') {
     if (config.kind !== 'jira') throw new ProviderEgressError();
     return {
@@ -368,6 +383,53 @@ function withQuery(endpoint: string, query?: Readonly<Record<string, string>>): 
   const url = new URL(endpoint);
   url.search = new URLSearchParams(query).toString();
   return url.href;
+}
+
+function memberIdentityLookupRequest(
+  request: Extract<ProviderTokenRequest, { operation: 'member_identity_lookup' }>,
+): ExecutableProviderRequest {
+  const { lookup } = request;
+  const headers: Record<string, string> = {
+    accept: 'application/json',
+    ...lowercaseKeys(lookup.headers),
+    authorization: `Bearer ${request.accessToken}`,
+  };
+  if (lookup.graphqlQuery === undefined) {
+    return {
+      endpoint: lookup.url,
+      method: lookup.method,
+      headers,
+      allowedContentTypes: ['application/json'],
+    };
+  }
+  headers['content-type'] = 'application/json';
+  return {
+    endpoint: lookup.url,
+    method: lookup.method,
+    headers,
+    body: JSON.stringify({ query: lookup.graphqlQuery }),
+    allowedContentTypes: ['application/json'],
+  };
+}
+
+function lowercaseKeys(headers: Readonly<Record<string, string>> = {}): Record<string, string> {
+  return Object.fromEntries(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]));
+}
+
+function memberTokenRevokeRequest(
+  request: Extract<ProviderTokenRequest, { operation: 'member_token_revoke' }>,
+): ExecutableProviderRequest {
+  return {
+    endpoint: request.url,
+    method: 'POST',
+    headers: {
+      accept: 'application/json',
+      'content-type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ token: request.token, token_type_hint: request.hint }).toString(),
+    allowedContentTypes: ['application/json', 'text/plain'],
+    acceptsNoContent: true,
+  };
 }
 
 function identityRequest(

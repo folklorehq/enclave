@@ -1,4 +1,6 @@
 import { createSign } from 'node:crypto';
+import { identityLinkSpecs, type IdentityLinkSpec } from '@folklore/contracts';
+import { resolveJsonPointer } from '@folklore/utils';
 import type { Logger } from '@folklore/core';
 import type { ProviderTokenClient, ProviderTokenResponse } from './ProviderTokenClient.js';
 import type {
@@ -27,6 +29,8 @@ const GITHUB_INSTALLATIONS_MAX_PAGES = 10;
 const GITHUB_OWNERSHIP_DEADLINE_MS = 20_000;
 const GITHUB_REVOKE_MIN_MS = 2_000;
 const REVOKE_FAILED_REASON = 'github_token_revoke_failed';
+const MEMBER_REVOKE_FAILED_REASON = 'member_token_revoke_failed';
+const MEMBER_REVOKE_DEADLINE_MS = GITHUB_REVOKE_MIN_MS;
 const REVOKE_SECRET_TIMEOUT_REASON = 'github_token_revoke_secret_timeout';
 class RevokeSecretTimeoutError extends Error {}
 
@@ -82,8 +86,11 @@ export class HttpProviderTokenClient implements ProviderTokenClient {
   async resolveIdentity(input: {
     config: VerifiedProviderConfig;
     accessToken: string;
-  }): Promise<{ sourceUserId: string; externalTenantId?: string }> {
+    forMember?: true;
+  }): Promise<{ sourceUserId: string; externalTenantId?: string; displayName?: string }> {
     assertSupportedProvider(input.config.kind);
+    const spec = input.forMember ? this.identitySpec(input.config.kind) : undefined;
+    if (spec) return this.lookupMemberIdentity(input.config, spec, input.accessToken);
     const response = await this.execute(input.config, {
       operation: 'identity',
       accessToken: input.accessToken,
@@ -97,6 +104,60 @@ export class HttpProviderTokenClient implements ProviderTokenClient {
       };
     }
     return this.identityFrom(input.config, parsed);
+  }
+
+  async revokeMemberTokens(input: {
+    config: VerifiedProviderConfig;
+    accessToken: string;
+    refreshToken?: string;
+  }): Promise<void> {
+    const revoke = this.identitySpec(input.config.kind)?.revoke;
+    if (!revoke) return;
+    const deadline = Date.now() + MEMBER_REVOKE_DEADLINE_MS;
+    const tokens = { access_token: input.accessToken, refresh_token: input.refreshToken };
+    try {
+      for (const hint of revoke.tokens) {
+        const token = tokens[hint];
+        if (token) {
+          await this.execute(
+            input.config,
+            { operation: 'member_token_revoke', url: revoke.url, token, hint },
+            this.remainingMs(deadline),
+          );
+        }
+      }
+    } catch (error) {
+      this.logger?.warn('oauth_provider.token_revoke_failed', {
+        errorCode: oauthFailureReason(error, MEMBER_REVOKE_FAILED_REASON),
+      });
+    }
+  }
+
+  private identitySpec(kind: string): IdentityLinkSpec | undefined {
+    return identityLinkSpecs().find((spec) => spec.kind === kind);
+  }
+
+  private async lookupMemberIdentity(
+    config: VerifiedProviderConfig,
+    spec: IdentityLinkSpec,
+    accessToken: string,
+  ): Promise<{ sourceUserId: string; displayName?: string }> {
+    const response = await this.execute(config, {
+      operation: 'member_identity_lookup',
+      accessToken,
+      lookup: spec.lookup,
+    });
+    const parsed = await this.parse(response);
+    const sourceUserId = this.requireId(resolveJsonPointer(parsed, spec.lookup.idPointer));
+    const name = spec.lookup.namePointer
+      ? resolveJsonPointer(parsed, spec.lookup.namePointer)
+      : undefined;
+    return {
+      sourceUserId,
+      ...(typeof name === 'string' && name !== '' && Buffer.byteLength(name) <= ID_MAX_BYTES
+        ? { displayName: name }
+        : {}),
+    };
   }
 
   async mintGitHubInstallationToken(input: {
