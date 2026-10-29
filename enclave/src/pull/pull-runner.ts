@@ -91,8 +91,15 @@ export function buildPullCompleteSignal(
     sourceId: message.sourceId,
     completedAt: completedAt.toISOString(),
     ...(backfillLeaseToken ? { backfillLeaseToken } : {}),
-    ...(stats && pullStatsSchema.safeParse(stats).success ? { stats } : {}),
+    ...(validStats(stats) ? { stats } : {}),
   };
+}
+
+function validStats(stats: PullRunStats | undefined): stats is PullRunStats {
+  if (!stats) return false;
+  if (pullStatsSchema.safeParse(stats).success) return true;
+  logger.warn('pull_stats_dropped', { reason: 'schema_invalid' });
+  return false;
 }
 
 export function buildPullFailedSignal(
