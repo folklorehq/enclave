@@ -148,6 +148,7 @@ export const NOT_PROCESSED_REASONS = [
   'connection_integrity_failed',
   'connection_decrypt_failed',
   'export_refs_unavailable',
+  'resource_scope_unavailable',
 ] as const satisfies readonly PullNotProcessedReason[];
 
 const EVIDENCE_SESSION_REASONS = [

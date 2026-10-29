@@ -14,7 +14,7 @@ import {
   type PullResult,
   type SyncCursor,
 } from '@folklore/connectors';
-import { NOTION_KIND, supportsPerPersonMode } from '@folklore/contracts';
+import { NOTION_KIND, isPausableSourceKind, supportsPerPersonMode } from '@folklore/contracts';
 import {
   oauthRefreshCommandSchema,
   pullStatsSchema,
@@ -34,6 +34,14 @@ import type { EnclaveCrypto } from '../crypto/esdk.js';
 import { GitHubCodebaseConnectionResolver } from '../codebase/GitHubCodebaseConnectionResolver.js';
 import type { CodebaseSelectionStore } from '../codebase/CodebaseSelectionStore.js';
 import {
+  ADMIT_ALL,
+  admissionOf,
+  type ResourceAdmission,
+} from '../resource-scope/resource-admission.js';
+import { ResourceScopeConflictError } from '../resource-scope/resource-scope-errors.js';
+import type { ResourceScope } from '../resource-scope/ResourceScopeStore.js';
+import type { TenantResourceScope } from '../resource-scope/TenantResourceScope.js';
+import {
   getDecryptedConnectionForKind,
   getDecryptedConnectionForMember,
   type DecryptedSourceConnection,
@@ -47,6 +55,7 @@ import {
 } from './document-body-release.js';
 import type { ExportedPageRefReaderPort } from './ExportedPageRefReader.js';
 import { S3PullCursorStore } from './S3PullCursorStore.js';
+import { SingleFlight } from './SingleFlight.js';
 import { boundGitHubInstallationId } from './github-installation-binding.js';
 import { buildPullRunStats, type PullRunStats } from './pull-run-stats.js';
 
@@ -164,6 +173,7 @@ export interface PullRunnerDeps {
     installationId: string;
   }) => Promise<{ accessToken: string; expiresAt: string }>;
   codebaseSelectionStore?: Pick<CodebaseSelectionStore, 'read'>;
+  resourceScope: Pick<TenantResourceScope, 'read' | 'transitionBackfill'>;
   exportedPageRefs?: ExportedPageRefReaderPort;
   signal?: AbortSignal;
 }
@@ -191,7 +201,8 @@ export type PullRunResult =
         | 'connection_response_invalid'
         | 'connection_integrity_failed'
         | 'connection_decrypt_failed'
-        | 'export_refs_unavailable';
+        | 'export_refs_unavailable'
+        | 'resource_scope_unavailable';
       sourceId: string;
       sourceKind: string;
     }
@@ -203,6 +214,11 @@ export type PullRunResult =
   | {
       outcome: 'declined';
       reason: 'body_release_off';
+      sourceId: string;
+      sourceKind: string;
+    }
+  | {
+      outcome: 'paused';
       sourceId: string;
       sourceKind: string;
     };
@@ -519,6 +535,11 @@ export async function runPull(
   if (mode === 'off' && !memberScope && BODY_GATED_KINDS.has(message.kind)) {
     return declined(message);
   }
+  const scope = await readResourceScope(deps, message, memberScope);
+  if (scope === RESOURCE_SCOPE_UNAVAILABLE) {
+    return notProcessed(message, 'resource_scope_unavailable');
+  }
+  if (scope?.paused) return pausedPull(message);
   const resolved =
     message.kind === 'code'
       ? await resolveCodebaseConnection(deps)
@@ -573,11 +594,15 @@ export async function runPull(
     return notProcessed(message, 'connector_missing');
   }
 
-  const window = budgetedWindow(
-    resolvePullWindow(
-      message.backfill,
-      message.backfill ? null : await resumeCursor(deps, message, usesSealedCursor, sealedCursor),
+  const backfill = message.backfill || scope?.backfill === 'owed';
+  const window = scopedWindow(
+    budgetedWindow(
+      resolvePullWindow(
+        backfill,
+        backfill ? null : await resumeCursor(deps, message, usesSealedCursor, sealedCursor),
+      ),
     ),
+    scope,
   );
   const result = await pullWithRefresh(
     message,
@@ -594,15 +619,8 @@ export async function runPull(
   const cursor =
     result.earlyReturn && isCode ? advanceCodeCursorTick(result.cursor.value) : result.cursor.value;
   await reconcileJiraWebhook(message, deps, result.connection);
-  const facts = memberScope
-    ? await deps.pipeline.handlePulled(
-        result.facts,
-        result.containers,
-        message.kind,
-        deps.signal,
-        memberScope,
-      )
-    : await deps.pipeline.handlePulled(result.facts, result.containers, message.kind, deps.signal);
+  const admission = scope ? admissionOf(scope) : ADMIT_ALL;
+  const facts = await handlePulledFacts(deps, message.kind, result, { memberScope, admission });
   // A connector that claims more without moving its cursor would loop, so only progress counts.
   const hasMore =
     result.hasMore && !result.earlyReturn && cursorProgressed(isCode, window.cursor.value, cursor);
@@ -613,26 +631,106 @@ export async function runPull(
     hasMore,
     stats: buildPullRunStats({
       pulled: result.facts,
+      admitted: result.facts.filter((fact) => admission(fact.resourceExternalId)),
       processed: facts,
       connectorStats: result.stats,
       durationMs: Date.now() - startedAt,
       hasMore,
-      backfill: message.backfill,
+      backfill,
     }),
     sourceId: message.sourceId,
     sourceKind: message.kind,
     persistCursor: async () => {
-      if (usesSealedCursor) {
-        await saveSealedCursor(
-          deps,
-          message,
-          message.kind === NOTION_KIND ? (cursor ?? '') : cursor,
-        );
-        return;
-      }
-      await saveCursor(deps.ssm, message.tenant_id, message.sourceId, cursor);
+      await persistRunCursor(deps, message, usesSealedCursor, cursor);
+      await settleBackfill(deps, message.kind, scope, hasMore);
     },
   };
+}
+
+async function persistRunCursor(
+  deps: PullRunnerDeps,
+  message: PullDueMessage,
+  usesSealedCursor: boolean,
+  cursor: string | null,
+): Promise<void> {
+  if (usesSealedCursor) {
+    await saveSealedCursor(deps, message, message.kind === NOTION_KIND ? (cursor ?? '') : cursor);
+    return;
+  }
+  await saveCursor(deps.ssm, message.tenant_id, message.sourceId, cursor);
+}
+
+const RESOURCE_SCOPE_UNAVAILABLE = 'unavailable';
+
+// The runner's own read is the one snapshot: the pipeline never reads the scope again for a pull.
+function handlePulledFacts(
+  deps: PullRunnerDeps,
+  kind: string,
+  pulled: Pick<PullResult, 'facts' | 'containers'>,
+  scope: { memberScope: MemberPullScope | undefined; admission: ResourceAdmission },
+): Promise<ProcessedFact[]> {
+  const { facts, containers } = pulled;
+  if (scope.memberScope) {
+    return deps.pipeline.handlePulled(
+      facts,
+      containers,
+      kind,
+      ADMIT_ALL,
+      deps.signal,
+      scope.memberScope,
+    );
+  }
+  return deps.pipeline.handlePulled(facts, containers, kind, scope.admission, deps.signal);
+}
+
+// Idle by design and neither done nor failed: the cursor and any lease stay as they are, so a resume continues from there.
+function pausedPull(message: PullDueMessage): PullRunResult {
+  return { outcome: 'paused', sourceId: message.sourceId, sourceKind: message.kind };
+}
+
+// Only a definitive "never configured" reads as everything; a missing reader or any other failure stops the pull before the cursor can move.
+async function readResourceScope(
+  deps: PullRunnerDeps,
+  message: PullDueMessage,
+  memberScope: MemberPullScope | undefined,
+): Promise<ResourceScope | undefined | typeof RESOURCE_SCOPE_UNAVAILABLE> {
+  if (memberScope || !isPausableSourceKind(message.kind)) return undefined;
+  if (!deps.resourceScope) return RESOURCE_SCOPE_UNAVAILABLE;
+  try {
+    return await deps.resourceScope.read(message.kind);
+  } catch {
+    return RESOURCE_SCOPE_UNAVAILABLE;
+  }
+}
+
+function scopedWindow(window: PullWindow, scope: ResourceScope | undefined): PullWindow {
+  if (scope?.mode !== 'selected') return window;
+  const selected = new Set(scope.resourceIds);
+  return {
+    cursor: window.cursor,
+    options: { ...window.options, includesResource: (id) => selected.has(id) },
+  };
+}
+
+// Runs after the cursor is durable, so a state that moved always has a cursor that matches it.
+async function settleBackfill(
+  deps: PullRunnerDeps,
+  sourceKind: string,
+  scope: ResourceScope | undefined,
+  hasMore: boolean,
+): Promise<void> {
+  if (!scope || scope.backfill === 'none') return;
+  const base = { sourceKind, expectedRevision: scope.revision };
+  try {
+    if (scope.backfill === 'owed') {
+      await deps.resourceScope.transitionBackfill({ ...base, from: 'owed', to: 'running' });
+    }
+    if (!hasMore) {
+      await deps.resourceScope.transitionBackfill({ ...base, from: 'running', to: 'none' });
+    }
+  } catch (error) {
+    if (!(error instanceof ResourceScopeConflictError)) throw error;
+  }
 }
 
 async function loadRunCursor(
@@ -821,6 +919,33 @@ function notProcessed(message: PullDueMessage, reason: PullNotProcessedReason): 
   return { outcome: 'not_processed', reason, sourceId: message.sourceId, sourceKind: message.kind };
 }
 
+export interface UnauthorizedRefresh {
+  sourceKind: string;
+  connection: DecryptedSourceConnection;
+  originalError: unknown;
+  deps: Pick<
+    PullRunnerDeps,
+    'orgId' | 'deploymentId' | 'refreshOAuthCredential' | 'mintGitHubInstallationToken'
+  >;
+  ownerAccountId?: string;
+  reconnect(): Promise<SourceConnectionResolution>;
+  build(token: string, connection: DecryptedSourceConnection): Connector | null;
+}
+
+export type RefreshedConnector =
+  | { outcome: 'ready'; connector: Connector; connection: DecryptedSourceConnection }
+  | { outcome: 'rate_limited' };
+
+/** One recovery for a 401, shared by pulls and live listings; every failure rethrows the original error. */
+export async function refreshConnectorAfterUnauthorized(
+  input: UnauthorizedRefresh,
+): Promise<RefreshedConnector> {
+  if (input.connection.kind === 'github' || input.connection.kind === 'code') {
+    return remintGitHubConnector(input);
+  }
+  return refreshOAuthConnector(input);
+}
+
 export async function pullWithRefresh(
   message: PullDueMessage,
   deps: PullRunnerDeps,
@@ -839,74 +964,52 @@ export async function pullWithRefresh(
     };
   } catch (error) {
     if (!isUnauthorized(error)) throw error;
-    if (connection.kind === 'github' || connection.kind === 'code') {
-      return retryPullWithFreshGitHubToken(
-        deps,
-        message.kind,
-        connection,
-        window,
-        connectorBuilder,
-        error,
-        codebaseSelection,
-        bodyPolicy,
-      );
-    }
-    if (!deps.refreshOAuthCredential) throw error;
-    if (!connection.encryptedRefreshToken || !connection.refreshCiphertextSha256) throw error;
-    const command = oauthRefreshCommandSchema.parse({
-      encryptedRefreshToken: connection.encryptedRefreshToken,
-      orgId: deps.orgId,
-      deploymentId: deps.deploymentId,
+    const fresh = await refreshConnectorAfterUnauthorized({
       sourceKind: message.kind,
-      connectionId: connection.connectionId,
-      activationGeneration: connection.activationGeneration,
-      attestationGeneration: connection.attestationGeneration,
-      attemptId: randomBytes(32).toString('hex'),
-      expectedRefreshCiphertextSha256: connection.refreshCiphertextSha256,
+      connection,
+      originalError: error,
+      deps,
       ...(memberScope === undefined ? {} : { ownerAccountId: memberScope.ownerAccountId }),
+      reconnect: () => resolveSourceConnection(message, deps, memberScope),
+      build: (token, fresher) =>
+        buildPullConnector(
+          connectorBuilder,
+          message.kind,
+          token,
+          connectionMetadata(fresher),
+          codebaseSelection,
+          bodyPolicy,
+        ),
     });
-    try {
-      const refresh = await deps.refreshOAuthCredential(command);
-      if (refresh.outcome !== 'success') throw error;
-    } catch {
-      throw error;
-    }
-    const refreshedResolution = await resolveSourceConnection(message, deps, memberScope);
-    if (refreshedResolution.outcome !== 'connected') throw error;
-    const refreshed = refreshedResolution.connection;
-    if (refreshed.activationGeneration !== connection.activationGeneration) throw error;
-    const refreshedToken = await resolveSourceToken(message.kind, refreshed, undefined, {
-      orgId: deps.orgId,
-    });
-    if (!refreshedToken) throw error;
-    const refreshedConnector = buildPullConnector(
-      connectorBuilder,
-      message.kind,
-      refreshedToken,
-      connectionMetadata(refreshed),
-      codebaseSelection,
-      bodyPolicy,
-    );
-    if (!refreshedConnector) throw error;
+    if (fresh.outcome === 'rate_limited') return rateLimitedRetry(message.kind, window, connection);
     return {
-      ...(await refreshedConnector.pull(window.cursor, window.options)),
-      connection: refreshed,
+      ...(await fresh.connector.pull(window.cursor, window.options)),
+      connection: fresh.connection,
     };
   }
 }
 
+// A code pull has no backoff of its own, so a throttled re-mint ends the attempt and the tick moves on.
+function rateLimitedRetry(
+  sourceKind: string,
+  window: PullWindow,
+  connection: DecryptedSourceConnection,
+): PullResult & { connection: DecryptedSourceConnection } {
+  if (sourceKind !== 'code') throw new Error('github_mint_rate_limited');
+  return {
+    facts: [],
+    containers: [],
+    cursor: window.cursor,
+    hasMore: false,
+    earlyReturn: true,
+    connection,
+  };
+}
+
 // A github/code pull has no refresh token: re-mint the ~1h install token and retry once.
 // The retry mint bypasses the TTL cache — recovery is always a fresh mint.
-async function retryPullWithFreshGitHubToken(
-  deps: PullRunnerDeps,
-  sourceKind: string,
-  connection: DecryptedSourceConnection,
-  window: PullWindow,
-  connectorBuilder: PullConnectorBuilder,
-  originalError: unknown,
-  codebaseSelection?: CodebaseRepositorySelection,
-  bodyPolicy?: PullBodyPolicy,
-): Promise<PullResult & { connection: DecryptedSourceConnection }> {
+async function remintGitHubConnector(input: UnauthorizedRefresh): Promise<RefreshedConnector> {
+  const { deps, connection, originalError } = input;
   if (!deps.mintGitHubInstallationToken || !connection.installationId) throw originalError;
   const minted = await mintGitHubInstallationTokenForPull(
     sealedInstallationId(connection),
@@ -918,32 +1021,78 @@ async function retryPullWithFreshGitHubToken(
     },
     { bypassCache: true },
   );
-  if (minted.outcome === 'rate_limited') {
-    if (sourceKind === 'code') {
-      return {
-        facts: [],
-        containers: [],
-        cursor: window.cursor,
-        hasMore: false,
-        earlyReturn: true,
-        connection,
-      };
-    }
-    throw new Error('github_mint_rate_limited');
-  }
-  const connector = buildPullConnector(
-    connectorBuilder,
-    sourceKind,
-    minted.accessToken,
-    connectionMetadata(connection),
-    codebaseSelection,
-    bodyPolicy,
-  );
+  if (minted.outcome === 'rate_limited') return { outcome: 'rate_limited' };
+  const connector = input.build(minted.accessToken, connection);
   if (!connector) throw originalError;
-  return {
-    ...(await connector.pull(window.cursor, window.options)),
-    connection,
-  };
+  return { outcome: 'ready', connector, connection };
+}
+
+async function refreshOAuthConnector(input: UnauthorizedRefresh): Promise<RefreshedConnector> {
+  const { deps, connection, originalError } = input;
+  const refreshCredential = deps.refreshOAuthCredential;
+  if (!refreshCredential) throw originalError;
+  if (!connection.encryptedRefreshToken || !connection.refreshCiphertextSha256) {
+    throw originalError;
+  }
+  const refreshed = await oauthRefreshFlights.run(`${deps.orgId}:${connection.connectionId}`, () =>
+    rotateOrAdoptOAuthConnection(input, refreshCredential),
+  );
+  if (!refreshed || refreshed.activationGeneration !== connection.activationGeneration) {
+    throw originalError;
+  }
+  const token = await resolveSourceToken(input.sourceKind, refreshed, undefined, {
+    orgId: deps.orgId,
+  });
+  if (!token) throw originalError;
+  const connector = input.build(token, refreshed);
+  if (!connector) throw originalError;
+  return { outcome: 'ready', connector, connection: refreshed };
+}
+
+// A rotating refresh token is single-use, so a second refresh from a stale snapshot would revoke the first one's result.
+const oauthRefreshFlights = new SingleFlight<DecryptedSourceConnection | null>();
+
+async function rotateOrAdoptOAuthConnection(
+  input: UnauthorizedRefresh,
+  refreshOAuthCredential: NonNullable<PullRunnerDeps['refreshOAuthCredential']>,
+): Promise<DecryptedSourceConnection | null> {
+  const { deps, connection } = input;
+  const rotated = await rotatedConnectionSince(input);
+  if (rotated) return rotated;
+  const command = oauthRefreshCommandSchema.parse({
+    encryptedRefreshToken: connection.encryptedRefreshToken,
+    orgId: deps.orgId,
+    deploymentId: deps.deploymentId,
+    sourceKind: input.sourceKind,
+    connectionId: connection.connectionId,
+    activationGeneration: connection.activationGeneration,
+    attestationGeneration: connection.attestationGeneration,
+    attemptId: randomBytes(32).toString('hex'),
+    expectedRefreshCiphertextSha256: connection.refreshCiphertextSha256,
+    ...(input.ownerAccountId === undefined ? {} : { ownerAccountId: input.ownerAccountId }),
+  });
+  try {
+    const refresh = await refreshOAuthCredential(command);
+    if (refresh.outcome !== 'success') return null;
+  } catch {
+    return null;
+  }
+  const resolution = await input.reconnect();
+  return resolution.outcome === 'connected' ? resolution.connection : null;
+}
+
+async function rotatedConnectionSince(
+  input: UnauthorizedRefresh,
+): Promise<DecryptedSourceConnection | null> {
+  try {
+    const current = await input.reconnect();
+    const rotated =
+      current.outcome === 'connected' &&
+      current.connection.refreshCiphertextSha256 !== input.connection.refreshCiphertextSha256;
+    return rotated ? current.connection : null;
+  } catch {
+    return null;
+  }
 }
 
 async function reconcileJiraWebhook(
@@ -978,7 +1127,7 @@ async function reconcileJiraWebhook(
   }
 }
 
-function connectionMetadata(connection: DecryptedSourceConnection): PullConnectionMetadata {
+export function connectionMetadata(connection: DecryptedSourceConnection): PullConnectionMetadata {
   return {
     externalTenantId: connection.externalTenantId,
     webhookRouteId: connection.webhookRouteId,
@@ -1000,7 +1149,7 @@ function connectionMetadata(connection: DecryptedSourceConnection): PullConnecti
   };
 }
 
-function isUnauthorized(error: unknown, seen = new Set<object>()): boolean {
+export function isUnauthorized(error: unknown, seen = new Set<object>()): boolean {
   if (typeof error !== 'object' || error === null) return false;
   if (seen.has(error)) return false;
   seen.add(error);

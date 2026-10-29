@@ -26,7 +26,7 @@ interface SelectionScope {
 
 interface TenantCodebaseContext {
   crypto: EnclaveCrypto;
-  codebaseSelectionScope(): SelectionScope;
+  processedOutputsScope(): SelectionScope;
 }
 
 interface InteractiveConnectionResolver {
@@ -102,7 +102,7 @@ export class EnclaveCodebaseSettingsAdapter implements CodebaseSettingsPort {
   }
 
   async readSelection(orgId: string): Promise<CodebaseSelectionResponse> {
-    const scope = this.deps.resolveTenant(orgId).codebaseSelectionScope();
+    const scope = this.deps.resolveTenant(orgId).processedOutputsScope();
     try {
       return response(await this.store(scope).read({ orgId, deploymentId: scope.deploymentId }));
     } catch (error) {

@@ -217,6 +217,8 @@ import { ManifestProviderSecretReader } from './pull/ManifestProviderSecretReade
 import { GitHubCodebaseConnectionResolver } from './codebase/GitHubCodebaseConnectionResolver.js';
 import { CodebaseSelectionStore } from './codebase/CodebaseSelectionStore.js';
 import { EnclaveCodebaseSettingsAdapter } from './codebase/EnclaveCodebaseSettingsAdapter.js';
+import { EnclaveResourceScopeAdapter } from './resource-scope/EnclaveResourceScopeAdapter.js';
+import { EnclaveSourceResourceLister } from './resource-scope/EnclaveSourceResourceLister.js';
 import type { EnclaveOAuthIngress } from './pull/EnclaveOAuthIngress.js';
 import type { JiraWebhookLifecycleService } from './pull/JiraWebhookLifecycleService.js';
 import type { JiraWebhookAuthenticator } from './ingest/JiraWebhookAuthenticator.js';
@@ -1368,7 +1370,7 @@ async function resolveInteractiveCodebaseConnection(orgId: string) {
     throw new Error('codebase_selection_unavailable');
   }
   const tenant = resolveTenant(orgId);
-  const scope = tenant.codebaseSelectionScope();
+  const scope = tenant.processedOutputsScope();
   const resolver = new GitHubCodebaseConnectionResolver({
     controlPlaneUrl: controlPlaneIdentity.origin,
     runtimeDeploymentId: DEPLOYMENT_ID,
@@ -1396,6 +1398,26 @@ function createCodebaseSettingsPort() {
     resolveConnection: resolveInteractiveCodebaseConnection,
     mintGitHubInstallationToken,
   });
+}
+
+function createResourceScopePort() {
+  const connectors =
+    controlPlaneIdentity && controlPlaneFetch
+      ? new EnclaveSourceResourceLister({
+          controlPlaneUrl: controlPlaneIdentity.origin,
+          runtimeDeploymentId: DEPLOYMENT_ID,
+          agentToken: () => process.env['AGENT_TOKEN'] ?? '',
+          fetchImpl: controlPlaneFetch,
+          resolveTenant,
+          ...(mintGitHubInstallationToken ? { mintGitHubInstallationToken } : {}),
+          ...(refreshOAuthCredential ? { refreshOAuthCredential } : {}),
+        })
+      : {
+          listResources: async (): Promise<never> => {
+            throw new Error('source_connection_unavailable');
+          },
+        };
+  return new EnclaveResourceScopeAdapter({ s3, resolveTenant, connectors });
 }
 
 // the box API is composed and served in-process. Every /api/* request
@@ -1475,6 +1497,7 @@ try {
       });
     },
     ...(codebaseSettingsPort ? { codebaseSettings: codebaseSettingsPort } : {}),
+    resourceScope: createResourceScopePort(),
     retrieverFactory: buildRetriever,
     factExcerptReaderFactory: buildRetriever,
     // grounded answers reuse the same per-request gated retrieval spine, then feed only

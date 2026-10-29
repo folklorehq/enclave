@@ -24,6 +24,7 @@ const LLM_CACHE_PURPOSE = 'llm-cache';
 const OAUTH_CREDENTIAL_PURPOSE = 'oauth-credential';
 const PULL_CURSOR_PURPOSE = 'pull-cursor';
 const CODEBASE_SELECTION_PURPOSE = 'codebase-selection';
+const RESOURCE_SCOPE_PURPOSE = 'resource-scope';
 const JIRA_WEBHOOK_REPLAY_PURPOSE = 'jira-webhook-replay';
 const CODE_GRAPH_NAMES_PURPOSE = 'code-graph-names';
 const CODE_GRAPH_TOMBSTONE_PURPOSE = 'code-graph-tombstone';
@@ -87,6 +88,12 @@ export interface PullCursorRef {
 export interface CodebaseSelectionRef {
   orgId: string;
   deploymentId: string;
+}
+
+export interface ResourceScopeRef {
+  orgId: string;
+  deploymentId: string;
+  sourceKind: string;
 }
 
 export interface JiraWebhookReplayRef {
@@ -539,6 +546,23 @@ export class EnclaveCrypto {
     return this.open(ciphertext, CODEBASE_SELECTION_PURPOSE, {
       orgId: expected.orgId,
       deploymentId: expected.deploymentId,
+    });
+  }
+
+  encryptResourceScope(plaintext: Buffer, ref: ResourceScopeRef): Promise<Buffer> {
+    return this.seal(plaintext, {
+      orgId: ref.orgId,
+      deploymentId: ref.deploymentId,
+      sourceKind: ref.sourceKind,
+      purpose: RESOURCE_SCOPE_PURPOSE,
+    });
+  }
+
+  decryptResourceScope(ciphertext: Buffer, expected: ResourceScopeRef): Promise<Buffer> {
+    return this.open(ciphertext, RESOURCE_SCOPE_PURPOSE, {
+      orgId: expected.orgId,
+      deploymentId: expected.deploymentId,
+      sourceKind: expected.sourceKind,
     });
   }
 

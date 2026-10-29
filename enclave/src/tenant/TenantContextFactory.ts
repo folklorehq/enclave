@@ -40,6 +40,8 @@ import {
 } from '../inference/tenant-inference-builders.js';
 import type { InferenceRouteResolver } from '../inference/routing/InferenceRouteResolver.js';
 import type { EmbeddingProvider } from '../inference/openai/OpenAIEmbedRouteComposition.js';
+import { ResourceScopeFilter } from '../resource-scope/ResourceScopeFilter.js';
+import { TenantResourceScope } from '../resource-scope/TenantResourceScope.js';
 import { TenantContext } from './tenant-context.js';
 
 export interface TenantIdentity {
@@ -148,6 +150,10 @@ export class TenantContextFactory {
         resident: resident?.factsIndex ?? null,
       });
       const context: { current?: TenantContext } = {};
+      const resourceScope = new ResourceScopeFilter({
+        orgId: identity.tenantId,
+        readScope: (sourceKind) => this.readResourceScope(context, identity.tenantId, sourceKind),
+      });
       const pipeline = new Pipeline(
         hnsw,
         this.deps.s3,
@@ -165,6 +171,7 @@ export class TenantContextFactory {
         {
           entityKey: () => context.current?.entityKey() ?? null,
           emitAuthors: this.deps.emitAuthors === true,
+          resourceScope,
         },
       );
       const tenantContext = new TenantContext(
@@ -181,6 +188,7 @@ export class TenantContextFactory {
         identity.deploymentId ?? '',
         identity.tenantDeploymentId,
         () => this.deps.activePolicySnapshotFor?.(identity.tenantId),
+        resourceScope,
       );
       context.current = tenantContext;
       return tenantContext;
@@ -189,6 +197,16 @@ export class TenantContextFactory {
       masterKey.fill(0);
       throw error;
     }
+  }
+
+  private readResourceScope(
+    context: { current?: TenantContext },
+    orgId: string,
+    sourceKind: string,
+  ) {
+    if (!context.current) throw new Error('resource_scope_unavailable');
+    const scope = context.current.processedOutputsScope();
+    return new TenantResourceScope({ s3: this.deps.s3, orgId, scope }).read(sourceKind);
   }
 
   private activeStorageKeyId(identity: TenantIdentity): string {

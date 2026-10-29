@@ -41,6 +41,8 @@ import {
 import { withInferenceReceiptContext } from '../inference/inference-receipt-context.js';
 import { boundGitHubInstallationId } from '../pull/github-installation-binding.js';
 import { CodebaseSelectionStore } from '../codebase/CodebaseSelectionStore.js';
+import { ResourceScopeUnavailableError } from '../resource-scope/resource-scope-errors.js';
+import { TenantResourceScope } from '../resource-scope/TenantResourceScope.js';
 import { errorType } from '../logging/error-fields.js';
 import { logger } from '../logger.js';
 import type { ExportedPageRefReaderPort } from '../pull/ExportedPageRefReader.js';
@@ -88,6 +90,8 @@ export interface RoutedResult {
   context: TenantContext;
   facts: ProcessedFact[];
   pullComplete?: PullCompleteSignal;
+  // A paused tick is a settled pull for failure accounting, though it moved no cursor.
+  pullPaused?: boolean;
   // The next chunk of a pull the budget cut short; it resumes at the cursor this one persists.
   continuation?: PullDueMessage;
   afterDurablePersistence?: () => Promise<void>;
@@ -99,6 +103,11 @@ export interface RoutedResult {
   // The pull runner's fixed not-processed reason, carried into the pull-failed signal.
   failureCode?: PullNotProcessedReason;
 }
+
+const UNAVAILABLE_RESOURCE_SCOPE: NonNullable<PullRunnerDeps['resourceScope']> = {
+  read: () => Promise.reject(new ResourceScopeUnavailableError()),
+  transitionBackfill: () => Promise.reject(new ResourceScopeUnavailableError()),
+};
 
 const PRE_NORMALIZED_MESSAGE_TYPE = 'pull-normalized';
 const MESSAGE_TYPE_UNSUPPORTED = 'message_type_unsupported';
@@ -195,7 +204,7 @@ export class TenantMessageRouter {
       const codebaseSelectionStore =
         raw.kind === 'code' && this.deps.s3
           ? (() => {
-              const scope = context.codebaseSelectionScope();
+              const scope = context.processedOutputsScope();
               return new CodebaseSelectionStore({
                 s3: this.deps.s3,
                 bucket: scope.bucket,
@@ -221,6 +230,7 @@ export class TenantMessageRouter {
         jiraWebhookLifecycle: this.deps.jiraWebhookLifecycle,
         mintGitHubInstallationToken: this.deps.mintGitHubInstallationToken,
         ...(codebaseSelectionStore ? { codebaseSelectionStore } : {}),
+        ...this.resourceScopeDeps(context, queueTenantId),
         ...(this.deps.exportedPageRefs ? { exportedPageRefs: this.deps.exportedPageRefs } : {}),
         ...(options.signal ? { signal: options.signal } : {}),
       });
@@ -232,6 +242,9 @@ export class TenantMessageRouter {
         return this.acknowledgedWithoutFacts(context);
       }
       if (result.outcome === 'superseded') return this.acknowledgedWithoutFacts(context);
+      if (result.outcome === 'paused') {
+        return { ...this.acknowledgedWithoutFacts(context), pullPaused: true };
+      }
       return {
         context,
         facts: result.facts,
@@ -330,11 +343,25 @@ export class TenantMessageRouter {
     }
   }
 
-  // A backfill flag would restart from the window start; a member pull keeps its owner or routing refuses the chunk.
+  // A context that cannot name its scope location, or a router with no object store, must stop the pull, never read as "not configured".
+  private resourceScopeDeps(
+    context: TenantContext,
+    orgId: string,
+  ): Pick<PullRunnerDeps, 'resourceScope'> {
+    if (!this.deps.s3) return { resourceScope: UNAVAILABLE_RESOURCE_SCOPE };
+    try {
+      const scope = context.processedOutputsScope();
+      return { resourceScope: new TenantResourceScope({ s3: this.deps.s3, orgId, scope }) };
+    } catch {
+      return { resourceScope: UNAVAILABLE_RESOURCE_SCOPE };
+    }
+  }
+
   private acknowledgedWithoutFacts(context: TenantContext): RoutedResult {
     return { context, facts: [], requiresDurablePersistence: false, shouldAcknowledge: true };
   }
 
+  // A backfill flag would restart from the window start; a member pull keeps its owner or routing refuses the chunk.
   private continuationOf(raw: PullDueMessage): PullDueMessage {
     return {
       type: 'pull-due',

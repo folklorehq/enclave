@@ -1,6 +1,7 @@
 import { GetObjectCommand, NoSuchKey, PutObjectCommand, type S3Client } from '@aws-sdk/client-s3';
 import { z } from 'zod';
 import type { EnclaveCrypto } from '../crypto/esdk.js';
+import { isS3ConditionalConflict } from '../storage/s3-conditional.js';
 
 const CODEBASE_SELECTION_FORMAT_VERSION = 1;
 const CODEBASE_SELECTION_PURPOSE = 'codebase-selection';
@@ -171,7 +172,7 @@ export class CodebaseSelectionStore {
       );
       if (!response.ETag) throw new Error('codebase_selection_unavailable');
     } catch (error) {
-      if (this.isConditionalConflict(error)) throw new CodebaseSelectionConflictError();
+      if (isS3ConditionalConflict(error)) throw new CodebaseSelectionConflictError();
       if (this.isUnavailable(error)) throw error;
       throw new Error('codebase_selection_unavailable');
     } finally {
@@ -217,16 +218,5 @@ export class CodebaseSelectionStore {
 
   private isUnavailable(error: unknown): boolean {
     return error instanceof Error && error.message === 'codebase_selection_unavailable';
-  }
-
-  private isConditionalConflict(error: unknown): boolean {
-    if (!error || typeof error !== 'object') return false;
-    const candidate = error as { name?: unknown; $metadata?: { httpStatusCode?: unknown } };
-    return (
-      candidate.name === 'PreconditionFailed' ||
-      candidate.name === 'ConditionalRequestConflict' ||
-      candidate.$metadata?.httpStatusCode === 409 ||
-      candidate.$metadata?.httpStatusCode === 412
-    );
   }
 }

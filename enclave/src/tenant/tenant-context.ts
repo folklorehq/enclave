@@ -4,6 +4,7 @@ import type { KmsKeyringNode } from '@aws-crypto/client-node';
 import { EnclaveCrypto, type SealedContentKeyringConfig } from '../crypto/esdk.js';
 import type { HnswStore } from '../hnsw/index.js';
 import type { Pipeline } from '../pipeline/index.js';
+import type { ResourceScopeFilter } from '../resource-scope/ResourceScopeFilter.js';
 import { llmCacheObjectName, type LlmCacheNamer } from '../inference/llm-cache.js';
 import { TenantCacheSalt } from '../workers/page/draft/TenantCacheSalt.js';
 import { deriveIngestKeypair, deriveKey, deriveLlmCacheNameKey } from '../sealing/keygen.js';
@@ -49,6 +50,7 @@ export class TenantContext implements LlmCacheNamer {
     private readonly activePolicySnapshotProvider?: () =>
       | VerifiedActivePolicySnapshotV1
       | undefined,
+    readonly resourceScope?: Pick<ResourceScopeFilter, 'predicateFor' | 'invalidate'>,
   ) {
     this.keyringOrNull = keyring;
     this.hnswOrNull = hnsw;
@@ -115,14 +117,14 @@ export class TenantContext implements LlmCacheNamer {
     return this.activePolicySnapshotProvider?.();
   }
 
-  codebaseSelectionScope(): {
+  processedOutputsScope(): {
     crypto: EnclaveCrypto;
     bucket: string;
     deploymentId: string;
   } {
     const deploymentId = this.tenantDeploymentId ?? this.deploymentId;
     if (!this.processedOutputsBucket || !deploymentId) {
-      throw new Error('codebase_selection_context_unavailable');
+      throw new Error('processed_outputs_context_unavailable');
     }
     return { crypto: this.crypto, bucket: this.processedOutputsBucket, deploymentId };
   }

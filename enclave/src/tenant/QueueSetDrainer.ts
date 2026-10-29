@@ -542,6 +542,9 @@ export class QueueSetDrainer {
       }
       phase = 'emit';
       await this.emitFacts(facts, assignment.assignmentGeneration);
+      if (routed.pullPaused && this.isPullDue(raw)) {
+        this.pullFailures.delete(this.pullFailureKey(raw, assignment.assignmentGeneration));
+      }
       if (!shouldAcknowledge) {
         phase = 'release';
         this.reportMessageFailure(notProcessedFailureCode(routed.failureCode));

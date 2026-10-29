@@ -8,12 +8,7 @@ import {
 } from './code-graph-failure.js';
 import { codeGraphTombstoneKey } from './code-graph-layout.js';
 import { codeGraphTombstoneSchema, type CodeGraphTombstone } from './code-graph-tombstone.js';
-
-const CONDITIONAL_CONFLICT_STATUSES: ReadonlySet<number> = new Set([409, 412]);
-const CONDITIONAL_CONFLICT_NAMES: ReadonlySet<string> = new Set([
-  'PreconditionFailed',
-  'ConditionalRequestConflict',
-]);
+import { isS3ConditionalConflict } from '../storage/s3-conditional.js';
 
 export type TombstoneRead =
   | { kind: 'missing' }
@@ -59,7 +54,7 @@ export class CodeGraphTombstoneStore {
       );
       return 'written';
     } catch (error) {
-      if (this.isConditionalConflict(error)) return 'conflict';
+      if (isS3ConditionalConflict(error)) return 'conflict';
       throw new CodeGraphStoreUnavailableError(CODE_GRAPH_TOMBSTONE_UNAVAILABLE);
     } finally {
       ciphertext.fill(0);
@@ -103,15 +98,5 @@ export class CodeGraphTombstoneStore {
     } finally {
       plaintext.fill(0);
     }
-  }
-
-  private isConditionalConflict(error: unknown): boolean {
-    if (!error || typeof error !== 'object') return false;
-    const candidate = error as { name?: unknown; $metadata?: { httpStatusCode?: unknown } };
-    const status = candidate.$metadata?.httpStatusCode;
-    return (
-      (typeof candidate.name === 'string' && CONDITIONAL_CONFLICT_NAMES.has(candidate.name)) ||
-      (typeof status === 'number' && CONDITIONAL_CONFLICT_STATUSES.has(status))
-    );
   }
 }

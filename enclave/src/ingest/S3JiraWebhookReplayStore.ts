@@ -4,6 +4,7 @@ import type {
   JiraWebhookReplayEntry,
   JiraWebhookReplayReservation,
 } from './JiraWebhookAuthenticator.js';
+import { isS3ConditionalConflict } from '../storage/s3-conditional.js';
 
 const REPLAY_ADMISSION_LIMIT_PER_MINUTE = 120;
 const REPLAY_RETENTION_MINUTES = 24 * 60;
@@ -146,7 +147,7 @@ export class S3JiraWebhookReplayStore {
         await this.persist(input.orgId, state);
         return { status: 'reserved', leaseId: input.leaseId };
       } catch (error) {
-        if (!this.isConditionalConflict(error) || attempt === MAX_PERSIST_ATTEMPTS - 1) {
+        if (!isS3ConditionalConflict(error) || attempt === MAX_PERSIST_ATTEMPTS - 1) {
           this.states.delete(input.orgId);
           throw new Error('jira_webhook_replay_persistence_failed');
         }
@@ -192,7 +193,7 @@ export class S3JiraWebhookReplayStore {
         return;
       } catch (error) {
         this.states.delete(input.orgId);
-        if (!this.isConditionalConflict(error) || attempt === MAX_PERSIST_ATTEMPTS - 1) {
+        if (!isS3ConditionalConflict(error) || attempt === MAX_PERSIST_ATTEMPTS - 1) {
           throw new Error('jira_webhook_replay_commit_failed');
         }
       }
@@ -229,7 +230,7 @@ export class S3JiraWebhookReplayStore {
         await this.persist(input.orgId, state);
         return;
       } catch (error) {
-        if (!this.isConditionalConflict(error) || attempt === MAX_PERSIST_ATTEMPTS - 1) {
+        if (!isS3ConditionalConflict(error) || attempt === MAX_PERSIST_ATTEMPTS - 1) {
           this.states.delete(input.orgId);
           throw new Error('jira_webhook_replay_release_failed');
         }
@@ -256,7 +257,7 @@ export class S3JiraWebhookReplayStore {
         return;
       } catch (error) {
         this.states.delete(input.orgId);
-        if (!this.isConditionalConflict(error) || attempt === MAX_PERSIST_ATTEMPTS - 1) {
+        if (!isS3ConditionalConflict(error) || attempt === MAX_PERSIST_ATTEMPTS - 1) {
           throw new Error('jira_webhook_cleanup_receipt_persistence_failed');
         }
       }
@@ -513,17 +514,6 @@ export class S3JiraWebhookReplayStore {
     return (
       (candidate.name === 'NoSuchKey' || candidate.name === 'NotFound') &&
       candidate.$metadata?.httpStatusCode === 404
-    );
-  }
-
-  private isConditionalConflict(error: unknown): boolean {
-    if (!error || typeof error !== 'object') return false;
-    const candidate = error as { name?: unknown; $metadata?: { httpStatusCode?: unknown } };
-    return (
-      candidate.name === 'PreconditionFailed' ||
-      candidate.name === 'ConditionalRequestConflict' ||
-      candidate.$metadata?.httpStatusCode === 409 ||
-      candidate.$metadata?.httpStatusCode === 412
     );
   }
 }

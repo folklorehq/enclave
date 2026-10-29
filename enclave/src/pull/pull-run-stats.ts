@@ -7,6 +7,7 @@ export type PullRunStats = PullStatsSignal;
 
 export interface PullRunStatsInput {
   pulled: readonly NormalizedFact[];
+  admitted: readonly NormalizedFact[];
   processed: readonly ProcessedFact[];
   connectorStats: PullStats | undefined;
   durationMs: number;
@@ -33,15 +34,15 @@ export function buildPullRunStats(input: PullRunStatsInput): PullRunStats {
     ...(base.truncatedBodies === undefined ? {} : { truncatedBodies: base.truncatedBodies }),
     facts: input.processed.length,
     contentFacts: input.processed.filter((fact) => fact.kind === 'content').length,
-    embedInputCharsBucket: embedInputCharsBucket(input.pulled),
+    embedInputCharsBucket: embedInputCharsBucket(input.admitted),
     durationMs: Math.max(0, Math.round(input.durationMs)),
     hasMore: input.hasMore,
     backfill: input.backfill || input.connectorStats?.backfillChunk === true,
   };
 }
 
-function embedInputCharsBucket(pulled: readonly NormalizedFact[]): number {
-  const chars = pulled
+function embedInputCharsBucket(admitted: readonly NormalizedFact[]): number {
+  const chars = admitted
     .filter((fact) => fact.kind !== 'transition')
     .reduce((total, fact) => total + embedTextOf(fact).length, 0);
   return Math.ceil(chars / PULL_CHARS_BUCKET) * PULL_CHARS_BUCKET;

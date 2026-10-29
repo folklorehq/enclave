@@ -27,7 +27,7 @@ export class CodebaseGraphEraser {
     const { s3 } = this.deps;
     if (!s3) throw new Error(CODE_GRAPH_ERASE_UNAVAILABLE);
     const tenant = this.deps.resolveTenant(command.orgId);
-    const scope = tenant.codebaseSelectionScope();
+    const scope = tenant.processedOutputsScope();
     const resolver = new GitHubCodebaseConnectionResolver({
       controlPlaneUrl: this.deps.controlPlaneUrl,
       runtimeDeploymentId: this.deps.runtimeDeploymentId,
