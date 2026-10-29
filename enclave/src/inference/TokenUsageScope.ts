@@ -75,7 +75,7 @@ export class TokenUsageScope {
   // `onPartial` rather than discarded — undercounting is the gap this instrumentation exists to close.
   async measure<T>(
     run: () => Promise<T>,
-    onPartial?: (usage: TokenUsage[]) => void,
+    onPartial?: (usage: TokenUsage[], error: unknown) => void | Promise<void>,
     classify: SpanFailureClassifier = UNCLASSIFIED,
     onStart?: (peek: () => TokenUsage[]) => void,
   ): Promise<MeasuredRun<T>> {
@@ -93,8 +93,21 @@ export class TokenUsageScope {
         timeline: current.timeline.snapshot(),
       };
     } catch (err) {
-      onPartial?.(this.snapshot(current.totals));
+      await this.reportPartial(onPartial, current, err);
       throw err;
+    }
+  }
+
+  // The run's own error always wins, so a failing hook is dropped here.
+  private async reportPartial(
+    onPartial: ((usage: TokenUsage[], error: unknown) => void | Promise<void>) | undefined,
+    current: UsageRun,
+    error: unknown,
+  ): Promise<void> {
+    try {
+      await onPartial?.(this.snapshot(current.totals), error);
+    } catch {
+      return;
     }
   }
 
