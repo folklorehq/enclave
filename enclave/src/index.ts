@@ -74,6 +74,7 @@ import { EnclaveWikiContentDecryptor } from './wiki/EnclaveWikiContentDecryptor.
 import { EnclaveWikiEditSealer } from './wiki/EnclaveWikiEditSealer.js';
 import { EnclaveWikiPublicationSealer } from './wiki/EnclaveWikiPublicationSealer.js';
 import {
+  EnclaveAgentRunAuditSealer,
   EnclaveAskTurnSealer,
   EnclaveWikiCommentSealer,
   EnclaveWikiFeedbackSealer,
@@ -1539,6 +1540,7 @@ try {
     wikiCommentSealer: new EnclaveWikiCommentSealer(resolveTenant),
     wikiFeedbackSealer: new EnclaveWikiFeedbackSealer(resolveTenant),
     askTurnSealer: new EnclaveAskTurnSealer(resolveTenant),
+    agentRunAuditSealer: new EnclaveAgentRunAuditSealer(resolveTenant),
   };
   const signedRuntimeDatabase: RuntimeDatabaseConfig | undefined =
     verifiedPoolManifest?.runtimeDatabase ?? verifiedManifest?.runtimeDatabase;

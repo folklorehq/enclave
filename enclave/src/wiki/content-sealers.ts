@@ -1,4 +1,6 @@
 import type {
+  AgentRunAuditSealRef,
+  AgentRunAuditSealer,
   AskTurnSealRef,
   AskTurnSealer,
   WikiCommentSealRef,
@@ -84,5 +86,15 @@ export class EnclaveAskTurnSealer extends EnclaveSealerBase implements AskTurnSe
 
   unseal(ref: AskTurnSealRef, ciphertext: Buffer): Promise<Buffer | null> {
     return this.tryUnseal(() => this.cryptoFor(ref.orgId).decryptAskTurn(ciphertext, ref));
+  }
+}
+
+export class EnclaveAgentRunAuditSealer extends EnclaveSealerBase implements AgentRunAuditSealer {
+  seal(ref: AgentRunAuditSealRef, plaintext: Buffer): Promise<Buffer> {
+    return this.cryptoFor(ref.orgId).encryptAgentRunAudit(plaintext, ref);
+  }
+
+  unseal(ref: AgentRunAuditSealRef, ciphertext: Buffer): Promise<Buffer | null> {
+    return this.tryUnseal(() => this.cryptoFor(ref.orgId).decryptAgentRunAudit(ciphertext, ref));
   }
 }
