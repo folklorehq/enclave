@@ -16,6 +16,7 @@ import {
   ResourceScopeInvalidError,
   ResourceScopeUnavailableError,
 } from './resource-scope-errors.js';
+import type { SourceResourceLister } from './ports.js';
 import { ResourceListingCache } from './ResourceListingCache.js';
 import type { ResourceScopeFilter } from './ResourceScopeFilter.js';
 import type { ResourceScope } from './ResourceScopeStore.js';
@@ -23,10 +24,6 @@ import { TenantResourceScope } from './TenantResourceScope.js';
 
 const PAGE_SIZE = 100;
 const PROVIDER_UNAVAILABLE = 'source_provider_unavailable';
-
-export interface SourceResourceLister {
-  listResources(input: { orgId: string; sourceKind: string }): Promise<NormalizedResource[]>;
-}
 
 interface TenantScopeContext {
   processedOutputsScope(): { crypto: EnclaveCrypto; bucket: string; deploymentId: string };
@@ -134,15 +131,18 @@ export class EnclaveResourceScopeAdapter implements ResourceScopePort {
   }
 
   private async listLive(target: ScopeTarget): Promise<NormalizedResource[]> {
-    const cached = this.listings.get(target.orgId, target.sourceKind);
-    if (cached) return cached;
     try {
-      const resources = await this.deps.connectors.listResources({
+      const cached = this.listings.get(target.orgId, target.sourceKind);
+      if (cached && cached.connectionKey === (await this.deps.connectors.connectionKey(target))) {
+        return cached.resources;
+      }
+      this.listings.delete(target.orgId, target.sourceKind);
+      const listing = await this.deps.connectors.listResources({
         orgId: target.orgId,
         sourceKind: target.sourceKind,
       });
-      this.listings.set(target.orgId, target.sourceKind, resources);
-      return resources;
+      this.listings.set(target.orgId, target.sourceKind, listing);
+      return listing.resources;
     } catch {
       throw new Error(PROVIDER_UNAVAILABLE);
     }

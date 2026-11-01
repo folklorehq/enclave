@@ -1417,6 +1417,9 @@ function createResourceScopePort() {
           listResources: async (): Promise<never> => {
             throw new Error('source_connection_unavailable');
           },
+          connectionKey: async (): Promise<never> => {
+            throw new Error('source_connection_unavailable');
+          },
         };
   return new EnclaveResourceScopeAdapter({ s3, resolveTenant, connectors });
 }

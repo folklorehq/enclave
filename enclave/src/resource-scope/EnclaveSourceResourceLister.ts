@@ -13,7 +13,7 @@ import {
   type DecryptedSourceConnection,
   type SourceConnectionResolution,
 } from '../pull/source-connections-client.js';
-import type { SourceResourceLister } from './EnclaveResourceScopeAdapter.js';
+import type { SourceResourceLister, SourceResourceListing } from './ports.js';
 
 export interface EnclaveSourceResourceListerDeps {
   controlPlaneUrl: string;
@@ -45,8 +45,20 @@ const CONNECTION_UNAVAILABLE = 'source_connection_unavailable';
 export class EnclaveSourceResourceLister implements SourceResourceLister {
   constructor(private readonly deps: EnclaveSourceResourceListerDeps) {}
 
-  async listResources(target: SourceTarget): Promise<NormalizedResource[]> {
+  async listResources(target: SourceTarget): Promise<SourceResourceListing> {
     const opened = await this.open(target);
+    const connectionKey = this.keyOf(opened.connection);
+    return { connectionKey, resources: await this.listOpened(target, opened) };
+  }
+
+  async connectionKey(target: SourceTarget): Promise<string> {
+    return this.keyOf(await this.connected(target));
+  }
+
+  private async listOpened(
+    target: SourceTarget,
+    opened: OpenedConnector,
+  ): Promise<NormalizedResource[]> {
     try {
       return await opened.connector.listResources();
     } catch (error) {
@@ -56,19 +68,29 @@ export class EnclaveSourceResourceLister implements SourceResourceLister {
     }
   }
 
-  private async open(target: SourceTarget): Promise<OpenedConnector> {
+  // A reconnect issues a new connection or activation, so a listing from the old one never matches.
+  private keyOf(connection: DecryptedSourceConnection): string {
+    return JSON.stringify([connection.connectionId, connection.activationGeneration]);
+  }
+
+  private async connected(target: SourceTarget): Promise<DecryptedSourceConnection> {
     const resolved = await this.resolve(target);
     if (resolved.outcome !== 'connected') throw new Error(CONNECTION_UNAVAILABLE);
+    return resolved.connection;
+  }
+
+  private async open(target: SourceTarget): Promise<OpenedConnector> {
+    const connection = await this.connected(target);
     const token = await resolveSourceToken(
       target.sourceKind,
-      resolved.connection,
+      connection,
       this.deps.mintGitHubInstallationToken,
       { orgId: target.orgId },
     );
     if (!token) throw new Error(CONNECTION_UNAVAILABLE);
-    const connector = this.build(target.sourceKind, token, resolved.connection);
+    const connector = this.build(target.sourceKind, token, connection);
     if (!connector) throw new Error(CONNECTION_UNAVAILABLE);
-    return { connector, connection: resolved.connection };
+    return { connector, connection };
   }
 
   private async refreshed(
