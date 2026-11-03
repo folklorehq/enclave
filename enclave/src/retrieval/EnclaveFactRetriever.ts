@@ -29,6 +29,7 @@ import { KeyedSemaphore } from './KeyedSemaphore.js';
 
 const LENS_SEARCH_MAX_CONCURRENCY = 4;
 const LENS_FAILURE_MESSAGE = 'lens retrieval failed';
+const SCOPED_FAILURE_MESSAGE = 'scoped retrieval failed';
 const VISIBILITY_METADATA_BATCH_MAX = 500;
 
 const FACT_EXCERPT_BATCH_TOO_LARGE = 'fact_excerpt_batch_too_large';
@@ -223,21 +224,55 @@ export class EnclaveFactRetriever implements FactRetriever, FactExcerptReader {
     bodyLimit: number,
     accessFor: () => Promise<AudienceAccess>,
   ): Promise<LensRetrieval> {
-    const { orgId, query, limit, lens } = params;
+    const { lens } = params;
     if (lens.factIds.size === 0) {
       return { facts: [], matchedOutsideLens: await lens.hasVisibleFactOutside() };
     }
 
-    const queryVec = await this.embed(orgId, query);
-    await tenant.hnsw.whenReady();
-    const facts = await this.lensSlots.run(orgId, async () => {
-      const hits = tenant.hnsw
-        .query(orgId, queryVec, limit, lens.factIds)
-        .filter((hit) => lens.factIds.has(hit.factId));
-      return this.gateAndDecrypt(tenant, params, hits, bodyLimit, accessFor);
-    });
+    const facts = await this.rankWithin(tenant, params, lens.factIds, bodyLimit, accessFor);
     if (facts.length > 0) return { facts, matchedOutsideLens: false };
     return { facts: [], matchedOutsideLens: await lens.hasVisibleFactOutside() };
+  }
+
+  // Ranks only inside the given facts under the passed access; the per-fact gate still runs on every hit.
+  async retrieveInFactSetForAccess(
+    params: FactSearchParams & { lens?: LensSearchParams['lens'] },
+    factIds: ReadonlySet<string>,
+    access: AudienceAccess,
+    bodyLimit: number,
+  ): Promise<GatedFact[]> {
+    if (!params.query.trim() || params.limit <= 0 || factIds.size === 0) return [];
+
+    const tenant = this.deps.resolveTenant(params.orgId);
+    if (params.lens) {
+      const { orgId, userId, lens } = params;
+      assertResolvedLensFor(lens, { orgId, userId }, lens.audienceId);
+    }
+    try {
+      return await this.rankWithin(tenant, params, factIds, bodyLimit, async () => access);
+    } catch (err) {
+      // The set can hold thousands of fact ids; a raw error from a callee must not carry them into a log.
+      if (isAppError(err)) throw err;
+      throw new InternalError(SCOPED_FAILURE_MESSAGE);
+    }
+  }
+
+  private async rankWithin(
+    tenant: TenantContext,
+    params: FactSearchParams,
+    factIds: ReadonlySet<string>,
+    bodyLimit: number,
+    accessFor: () => Promise<AudienceAccess>,
+  ): Promise<GatedFact[]> {
+    const { orgId, query, limit } = params;
+    const queryVec = await this.embed(orgId, query);
+    await tenant.hnsw.whenReady();
+    return this.lensSlots.run(orgId, async () => {
+      const hits = tenant.hnsw
+        .query(orgId, queryVec, limit, factIds)
+        .filter((hit) => factIds.has(hit.factId));
+      return this.gateAndDecrypt(tenant, params, hits, bodyLimit, accessFor);
+    });
   }
 
   private embed(orgId: string, query: string): Promise<number[]> {
