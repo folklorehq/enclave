@@ -32,7 +32,7 @@ const WITHHOLDING_REASON_PREFIXES = [
 ] as const;
 // An echo is attributed to the code before it only this long; after that it is reported as its own.
 const WITHHELD_SNAPSHOT_ECHO_WINDOW_MS = 15 * 60 * 1000;
-// The shared-host agent's check-in interval (infra AGENT_CHECKIN_INTERVAL_MS); a test pins it.
+// The shared-host agent's check-in interval, which infra sets from POOL_AGENT_CHECKIN_INTERVAL_MS; a test pins them equal.
 export const SHARED_HOST_CHECKIN_INTERVAL_MS = 30_000;
 // At least two check-ins read an alarm code before an ordinary failure may replace it.
 export const ALARM_HOLD_MS = 2.5 * SHARED_HOST_CHECKIN_INTERVAL_MS;
