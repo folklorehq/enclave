@@ -4,9 +4,12 @@ import {
   EntitlementProjectionRepository,
   EntitlementProjectionService,
   MemberAskChatPurgeRepository,
+  TeamProjectionRepository,
   type DirectorySourcePort,
   type EntitlementSyncOutcome,
 } from '@folklore/wiki';
+import type { TelemetryClient } from '@folklore/telemetry';
+import { TeamProjectionFailureReporter } from './TeamProjectionFailureReporter.js';
 import type { TenantBatchConsent } from './TenantBatchConsent.js';
 import type { TenantProjectionOutcome } from './TenantEntitlementProjectionRunner.js';
 
@@ -22,6 +25,8 @@ export interface EntitlementProjectionApplierDeps {
   readonly database: () => ProjectionDatabase | undefined;
   readonly logger: Logger;
   readonly batchConsent?: TenantBatchConsent;
+  readonly opsTelemetry?: TelemetryClient;
+  readonly now?: () => number;
   readonly createService?: (
     source: DirectorySourcePort,
     database: ProjectionDatabase,
@@ -32,7 +37,12 @@ export interface EntitlementProjectionApplierDeps {
 export class EntitlementProjectionApplier {
   private readonly createService: NonNullable<EntitlementProjectionApplierDeps['createService']>;
 
+  private readonly teamFailures: TeamProjectionFailureReporter | null;
+
   constructor(private readonly deps: EntitlementProjectionApplierDeps) {
+    this.teamFailures = deps.opsTelemetry
+      ? new TeamProjectionFailureReporter(deps.opsTelemetry, deps.now ?? (() => performance.now()))
+      : null;
     this.createService =
       deps.createService ?? ((source, database) => this.service(source, database));
   }
@@ -89,12 +99,14 @@ export class EntitlementProjectionApplier {
     source: DirectorySourcePort,
     database: ProjectionDatabase,
   ): EntitlementProjectionSync {
+    const teams = new TeamProjectionRepository(database.orm);
     return new EntitlementProjectionService(
       source,
       new EntitlementProjectionRepository(database.orm),
       this.deps.logger,
       undefined,
       new MemberAskChatPurgeRepository(database.orm),
+      this.teamFailures?.reporting(teams) ?? teams,
     );
   }
 }

@@ -1673,6 +1673,7 @@ const tenantBatchConsent = new TenantBatchConsent();
 const entitlementProjectionApplier = new EntitlementProjectionApplier({
   database: () => runtimeDatabaseLease.database(),
   batchConsent: tenantBatchConsent,
+  opsTelemetry,
   logger: logger.child({ component: 'entitlement_projection' }),
 });
 const entitlementProjectionRunner =
