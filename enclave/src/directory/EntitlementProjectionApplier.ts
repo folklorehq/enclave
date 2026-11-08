@@ -1,3 +1,4 @@
+import type { DirectorySync } from '@folklore/contracts';
 import { contentFreeErrorType, isFailureCodeSlug, type Logger } from '@folklore/core';
 import {
   EntitlementProjectionRepository,
@@ -6,6 +7,7 @@ import {
   type DirectorySourcePort,
   type EntitlementSyncOutcome,
 } from '@folklore/wiki';
+import type { TenantBatchConsent } from './TenantBatchConsent.js';
 import type { TenantProjectionOutcome } from './TenantEntitlementProjectionRunner.js';
 
 export interface ProjectionDatabase {
@@ -19,6 +21,7 @@ export interface EntitlementProjectionSync {
 export interface EntitlementProjectionApplierDeps {
   readonly database: () => ProjectionDatabase | undefined;
   readonly logger: Logger;
+  readonly batchConsent?: TenantBatchConsent;
   readonly createService?: (
     source: DirectorySourcePort,
     database: ProjectionDatabase,
@@ -37,16 +40,34 @@ export class EntitlementProjectionApplier {
   async apply(orgId: string, source: DirectorySourcePort): Promise<TenantProjectionOutcome> {
     const database = this.deps.database();
     if (!database) return 'database_unavailable';
-    return this.createService(this.observed(orgId, source), database).sync();
+    const seen: { directory?: DirectorySync } = {};
+    const outcome = await this.createService(
+      this.observed(orgId, source, (directory) => (seen.directory = directory)),
+      database,
+    ).sync();
+    if (outcome === 'applied' && seen.directory) this.recordConsent(orgId, seen.directory);
+    return outcome;
+  }
+
+  // Consent comes only from a projection that was applied, so a stale or rejected pass never moves it.
+  private recordConsent(orgId: string, directory: DirectorySync): void {
+    if (directory.orgId !== orgId) return;
+    this.deps.batchConsent?.record(orgId, directory.revision, directory.entitlement.batchAllowed);
   }
 
   // The service folds every fetch failure into 'unavailable'; the fixed code is what tells an org
   // mismatch apart from a missing directory.
-  private observed(orgId: string, source: DirectorySourcePort): DirectorySourcePort {
+  private observed(
+    orgId: string,
+    source: DirectorySourcePort,
+    onFetched: (directory: DirectorySync) => void,
+  ): DirectorySourcePort {
     return {
       fetch: async () => {
         try {
-          return await source.fetch();
+          const directory = await source.fetch();
+          if (directory) onFetched(directory);
+          return directory;
         } catch (err) {
           this.logSourceFailure(orgId, err);
           throw err;

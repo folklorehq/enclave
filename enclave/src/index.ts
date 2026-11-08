@@ -38,6 +38,7 @@ import {
   EntitlementProjectionApplier,
   type ProjectionDatabase,
 } from './directory/EntitlementProjectionApplier.js';
+import { TenantBatchConsent } from './directory/TenantBatchConsent.js';
 import {
   TenantEntitlementProjectionRunner,
   type ProjectionTenant,
@@ -1667,9 +1668,11 @@ const projectionTenants = (): ProjectionTenant[] =>
     const tenantDeploymentId = context.tenantDeploymentId ?? context.deploymentId;
     return tenantDeploymentId ? [{ tenantId: context.tenantId, tenantDeploymentId }] : [];
   });
+const tenantBatchConsent = new TenantBatchConsent();
 // The shared-pool tenant DB has no other writer of each tenant's entitlement row.
 const entitlementProjectionApplier = new EntitlementProjectionApplier({
   database: () => runtimeDatabaseLease.database(),
+  batchConsent: tenantBatchConsent,
   logger: logger.child({ component: 'entitlement_projection' }),
 });
 const entitlementProjectionRunner =
