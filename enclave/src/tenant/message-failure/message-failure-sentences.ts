@@ -212,6 +212,8 @@ export const MESSAGE_SENTENCE_REASONS: ReadonlyMap<string, string> = new Map([
   ['d3dc0d4cfdbbdddc', 'signer_root_quorum_invalid'],
   ['ee4bcb56aa6c6e28', 'signer_root_signature_invalid'],
   ['45e3c17ee51d217c', 'source_connections_org_required'],
+  ['ce8b808408a40551', 'source_id_invalid'],
+  ['7a379cc366cf6890', 'source_id_key_zeroized'],
   ['f56ad7e40e5fa43f', 'team_onboarding_synthesis_produced_empty_content'],
   ['cb838a677b2796f2', 'tenant_output_drain_timeout'],
   ['0f010cd30f6012af', 'tenant_policy_admission_digest_invalid'],
