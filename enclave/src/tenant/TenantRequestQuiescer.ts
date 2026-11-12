@@ -79,6 +79,10 @@ export class TenantRequestQuiescer {
     return this.states.get(tenantId)?.fenced === true;
   }
 
+  isWorkHeld(tenantId: string): boolean {
+    return (this.states.get(tenantId)?.workHolders.size ?? 0) > 0;
+  }
+
   private stateFor(tenantId: string): TenantRequestState {
     let state = this.states.get(tenantId);
     if (!state) {

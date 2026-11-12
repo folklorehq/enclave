@@ -8,7 +8,7 @@ import {
 } from '@aws-sdk/client-kms';
 import { generateKeyPair, type KeyObject } from 'crypto';
 import { promisify } from 'util';
-import { awsClientTransport } from '../aws/aws-transport.js';
+import { awsShortCallTransport } from '../aws/aws-transport.js';
 import { openKmsRecipientCiphertext } from '../aws/kms-recipient-ciphertext.js';
 import { getAttestationDoc } from './nsm.js';
 import { assertDevKmsStubAllowed } from './dev-kms-stub-guard.js';
@@ -40,7 +40,7 @@ let sharedKmsClient: KMSClient | undefined;
 function kmsClient(): KMSClient {
   sharedKmsClient ??= new KMSClient({
     region: REGION,
-    ...awsClientTransport(),
+    ...awsShortCallTransport(),
   });
   return sharedKmsClient;
 }

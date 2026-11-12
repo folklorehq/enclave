@@ -28,6 +28,7 @@ import {
 } from './VerifiedAssignmentManifest.js';
 import { PolicyGenerationQuiescence } from './quiescence/PolicyGenerationQuiescence.js';
 import type { TenantEviction } from './quiescence/tenant-generation-quiescence.js';
+import { ManifestRetryBackoff } from './assignment/ManifestRetryBackoff.js';
 
 export type BuildTenantContext = (
   identity: TenantIdentity,
@@ -44,6 +45,10 @@ export const MAX_REPLACED_CONTEXTS_PER_GENERATION = 12;
 // Covers a full queue sweep and a synthesis job's visibility window; requests stay admitted meanwhile.
 export const GENERATION_WORK_TIMEOUT_MS = 120_000;
 const ACTIVATION_SUPERSEDED = 'assignment_generation_activation_superseded';
+// A manifest that keeps failing after pausing open tenants pauses them again every few minutes, not every refresh.
+const MANIFEST_RETRY_BASE_MS = 180_000;
+// Bounds how long a fix outside the manifest (a restored KMS grant, say) waits for the next attempt.
+const MANIFEST_RETRY_MAX_MS = 900_000;
 
 // Called for every replaced or dropped context before it is zeroized so co-resident subsystems can
 // synchronously detach independently-held key material. Content-free: tenant id only.
@@ -75,6 +80,8 @@ export interface TenantPolicyAssignmentApplierOptions<TSnapshot extends TenantPo
   readonly onGenerationChanged?: TenantEviction;
   readonly onGenerationWorkQuiescing?: TenantEviction;
   readonly onQuiescenceFailure?: OnTenantQuiescenceFailure;
+  readonly onManifestRetryBackoff?: () => void;
+  readonly now?: () => number;
 }
 
 type StagedEntry = TenantGenerationEntry<TenantContext, TenantPolicySnapshotLike>;
@@ -131,6 +138,7 @@ export class TenantAssignmentApplier {
     | TenantPolicyAssignmentApplierOptions<TenantPolicySnapshotLike>
     | undefined;
   private readonly policyQuiescence: PolicyGenerationQuiescence | undefined;
+  private readonly retryBackoff: ManifestRetryBackoff;
 
   constructor(
     registryOrOptions:
@@ -159,6 +167,7 @@ export class TenantAssignmentApplier {
       this.onGenerationCommitted = onGenerationCommitted;
       this.onQuiescenceFailure = onQuiescenceFailure;
       this.policyQuiescence = undefined;
+      this.retryBackoff = this.manifestRetryBackoff();
       return;
     }
     this.registry = registryOrOptions.registry;
@@ -179,6 +188,7 @@ export class TenantAssignmentApplier {
       requestTimeoutMs: TENANT_TEARDOWN_TIMEOUT_MS,
       logger: registryOrOptions.logger,
     });
+    this.retryBackoff = this.manifestRetryBackoff(registryOrOptions.now);
   }
 
   async applyAssignments(
@@ -246,12 +256,15 @@ export class TenantAssignmentApplier {
     if (generation < expectedGeneration) {
       throw new Error('assignment_manifest_generation_mismatch');
     }
+    this.refuseWhileRetryDeferred(generation, digest);
     await quiescence.settleLate();
+    const rejectionsBefore = quiescence.rejectionCount();
     const previous = this.policyMode.generationRegistry.read();
     const staged = new Map<string, StagedEntry>();
     const built = new Set<TenantContext>();
     const quiesced = new Set<string>();
     const progress: PublishProgress = { published: false, teardownReported: false };
+    let pausedQueueWork = false;
     try {
       const signedRecoveryKeys = this.signedRecoveryKeysFor(
         assignments,
@@ -265,6 +278,7 @@ export class TenantAssignmentApplier {
       const previousTenantIds = [...previous.entries.keys()];
       const onLateQuiesced = (tenantId: string, attempt: number) =>
         this.queueLateReactivation(tenantId, previous.generation, attempt);
+      const onLateRejected = () => this.queueFreeRetryClaim(generation, digest);
       const stage: StageInputs = {
         previous: previous.entries,
         staged,
@@ -276,13 +290,14 @@ export class TenantAssignmentApplier {
         assignments.filter(({ tenantId }) => !previous.entries.has(tenantId)),
         stage,
       );
-      await quiescence.quiesceWork(previousTenantIds, quiesced, onLateQuiesced);
+      pausedQueueWork = true;
+      await quiescence.quiesceWork(previousTenantIds, quiesced, onLateQuiesced, onLateRejected);
       await this.stageBatch(
         assignments.filter(({ tenantId }) => previous.entries.has(tenantId)),
         stage,
       );
       const nextState = this.inManifestOrder(assignments, staged);
-      await quiescence.quiesceRequests(previousTenantIds, quiesced, onLateQuiesced);
+      await quiescence.quiesceRequests(previousTenantIds, quiesced, onLateQuiesced, onLateRejected);
       this.policyMode.generationRegistry.replaceGeneration(
         previous.generation,
         nextState,
@@ -311,7 +326,12 @@ export class TenantAssignmentApplier {
       if (!progress.published) {
         for (const context of built) context.zeroize();
         if (!this.keepsClosed(previous.generation)) {
+          if (pausedQueueWork) {
+            const leftTenantClosed = quiescence.rejectionCount() > rejectionsBefore;
+            this.retryBackoff.recordFailure(generation, digest, error, leftTenantClosed);
+          }
           for (const tenantId of quiesced) this.onActivated?.(tenantId);
+          if (pausedQueueWork) this.policyMode.onManifestRetryBackoff?.();
         }
       } else if (!progress.teardownReported) {
         for (const tenantId of this.policyMode.generationRegistry.read().entries.keys()) {
@@ -457,6 +477,24 @@ export class TenantAssignmentApplier {
     return ordered;
   }
 
+  private manifestRetryBackoff(now?: () => number): ManifestRetryBackoff {
+    return new ManifestRetryBackoff({
+      baseDelayMs: MANIFEST_RETRY_BASE_MS,
+      maxDelayMs: MANIFEST_RETRY_MAX_MS,
+      ...(now ? { now } : {}),
+    });
+  }
+
+  private refuseWhileRetryDeferred(generation: number, digest: string | undefined): void {
+    const deferred = this.retryBackoff.deferral(generation, digest);
+    if (!deferred) return;
+    this.logger.error('assignment manifest retry deferred', {
+      generation,
+      attempt: deferred.failures,
+    });
+    throw deferred.refusal;
+  }
+
   // Tenants stay closed only on a generation this applier published and has not yet activated.
   private keepsClosed(generation: number): boolean {
     return this.lastAcceptedGeneration === generation && this.activePolicyGeneration !== generation;
@@ -472,6 +510,17 @@ export class TenantAssignmentApplier {
         this.onActivated?.(tenantId);
       } catch {
         this.logger.error('tenant generation reactivation failed', { tenant_id: tenantId });
+      }
+    });
+  }
+
+  // Queued behind the apply that spawned the hook, and it only touches that manifest's record.
+  private queueFreeRetryClaim(generation: number, digest: string | undefined): void {
+    this.policyApplyTail = this.policyApplyTail.then(() => {
+      try {
+        this.retryBackoff.claimFreeRetry(generation, digest);
+      } catch {
+        this.logger.error('assignment manifest retry claim failed', { generation });
       }
     });
   }

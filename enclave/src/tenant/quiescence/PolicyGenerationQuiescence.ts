@@ -28,11 +28,16 @@ const TIMED_OUT = 'timeout';
 export class PolicyGenerationQuiescence {
   private readonly late = new Map<string, Promise<boolean>>();
   private readonly attempts = new Map<string, number>();
+  private rejections = 0;
 
   constructor(private readonly options: PolicyGenerationQuiescenceOptions) {}
 
   attemptOf(tenantId: string): number {
     return this.attempts.get(tenantId) ?? 0;
+  }
+
+  rejectionCount(): number {
+    return this.rejections;
   }
 
   // An overrun from an earlier apply gets one more bounded wait; refused before anything is built or fenced.
@@ -53,15 +58,25 @@ export class PolicyGenerationQuiescence {
     tenantIds: readonly string[],
     quiesced: Set<string>,
     onLateQuiesced: OnLateTenantQuiesced,
+    onLateRejected?: OnLateTenantQuiesced,
   ): Promise<void> {
     const { quiesceWork, workTimeoutMs } = this.options;
-    await this.runPhase('work', quiesceWork, workTimeoutMs, tenantIds, quiesced, onLateQuiesced);
+    await this.runPhase(
+      'work',
+      quiesceWork,
+      workTimeoutMs,
+      tenantIds,
+      quiesced,
+      onLateQuiesced,
+      onLateRejected,
+    );
   }
 
   async quiesceRequests(
     tenantIds: readonly string[],
     quiesced: Set<string>,
     onLateQuiesced: OnLateTenantQuiesced,
+    onLateRejected?: OnLateTenantQuiesced,
   ): Promise<void> {
     const { quiesceRequests, requestTimeoutMs } = this.options;
     await this.runPhase(
@@ -71,6 +86,7 @@ export class PolicyGenerationQuiescence {
       tenantIds,
       quiesced,
       onLateQuiesced,
+      onLateRejected,
     );
   }
 
@@ -81,6 +97,7 @@ export class PolicyGenerationQuiescence {
     tenantIds: readonly string[],
     quiesced: Set<string>,
     onLateQuiesced: OnLateTenantQuiesced,
+    onLateRejected: OnLateTenantQuiesced | undefined,
   ): Promise<void> {
     const runs = await Promise.all(
       tenantIds.map((tenantId) => this.runBounded(hook, tenantId, timeoutMs)),
@@ -91,7 +108,8 @@ export class PolicyGenerationQuiescence {
         continue;
       }
       quiesced.delete(run.tenantId);
-      this.trackLate(run, onLateQuiesced);
+      if (run.status === 'rejected') this.rejections += 1;
+      this.trackLate(run, onLateQuiesced, onLateRejected);
       this.options.logger.error('tenant generation quiesce failed', {
         tenant_id: run.tenantId,
         phase,
@@ -131,12 +149,17 @@ export class PolicyGenerationQuiescence {
     return result ? 'completed' : 'rejected';
   }
 
-  private trackLate(run: BoundedRun, onLateQuiesced: OnLateTenantQuiesced): void {
+  private trackLate(
+    run: BoundedRun,
+    onLateQuiesced: OnLateTenantQuiesced,
+    onLateRejected: OnLateTenantQuiesced | undefined,
+  ): void {
     const { tenantId, attempt, outcome } = run;
     this.late.set(tenantId, outcome);
     void outcome.then((succeeded) => {
       this.late.delete(tenantId);
       if (succeeded) onLateQuiesced(tenantId, attempt);
+      else onLateRejected?.(tenantId, attempt);
     });
   }
 

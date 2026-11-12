@@ -5,7 +5,7 @@ import { KMSClient } from '@aws-sdk/client-kms';
 import { SQSClient } from '@aws-sdk/client-sqs';
 import { SSMClient, PutParameterCommand } from '@aws-sdk/client-ssm';
 import { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
-import { awsClientTransport } from './aws/aws-transport.js';
+import { awsLongCallTransport, awsShortCallTransport } from './aws/aws-transport.js';
 import { TenantInferenceMemo } from './tenant/TenantInferenceMemo.js';
 import { TenantContextFactory } from './tenant/TenantContextFactory.js';
 import { TenantRegistry } from './tenant/tenant-registry.js';
@@ -30,6 +30,8 @@ import type { TenantPolicyAssignment } from './tenant/TenantAssignmentApplier.js
 import { signedRecoveryKeyFor } from './sealing/recovery-key-binding.js';
 import { TenantRequestQuiescer } from './tenant/TenantRequestQuiescer.js';
 import { TenantRequestQuiescenceMonitor } from './tenant/TenantRequestQuiescenceMonitor.js';
+import { createAssignmentReactivation } from './tenant/quiescence/assignment-reactivation.js';
+import { MANIFEST_RETRY_BACKOFF_ALARM } from './tenant/assignment/ManifestRetryBackoff.js';
 import { createTenantGenerationQuiescence } from './tenant/quiescence/tenant-generation-quiescence.js';
 import { TenantMessageRouter } from './tenant/tenant-message-router.js';
 import { HttpCanaryAuthorizationConsumer } from './ingest/HttpCanaryAuthorizationConsumer.js';
@@ -158,6 +160,7 @@ import {
 import { NoopTelemetryClient } from '@folklore/telemetry';
 import { RedisCache } from '@folklore/cache';
 import { logger } from './logger.js';
+import { contentFreeErrorType } from '@folklore/core';
 import {
   BufferedOpsTelemetryClient,
   inferenceReceiptProofPayload,
@@ -310,14 +313,14 @@ const ACTIVITY_QUIET_WINDOW_MS = 60 * 60 * 1000;
 // the S3 client must address path-style against it. Production (unset) keeps virtual-host, unchanged.
 const s3 = new S3Client({
   region: REGION,
-  ...awsClientTransport(),
+  ...awsLongCallTransport(),
   forcePathStyle: process.env['ENCLAVE_S3_FORCE_PATH_STYLE'] === 'true',
 });
-const dynamodb = new DynamoDBClient({ region: REGION, ...awsClientTransport() });
-const sqs = new SQSClient({ region: REGION, ...awsClientTransport() });
-const ssm = new SSMClient({ region: REGION, ...awsClientTransport() });
-const kms = new KMSClient({ region: REGION, ...awsClientTransport() });
-const secretsManager = new SecretsManagerClient({ region: REGION, ...awsClientTransport() });
+const dynamodb = new DynamoDBClient({ region: REGION, ...awsShortCallTransport() });
+const sqs = new SQSClient({ region: REGION, ...awsLongCallTransport() });
+const ssm = new SSMClient({ region: REGION, ...awsShortCallTransport() });
+const kms = new KMSClient({ region: REGION, ...awsShortCallTransport() });
+const secretsManager = new SecretsManagerClient({ region: REGION, ...awsShortCallTransport() });
 
 // A failed read stops the boot by name: logged inside the enclave, it surfaced later as an unnamed crash.
 async function loadInferenceKey(): Promise<void> {
@@ -560,11 +563,22 @@ function exitOnTenantQuiescenceFailure(tenantId: string, phase: 'generation' | '
   logger.fatal('tenant_quiescence_failed', { tenant_id: tenantId, phase });
   process.exit(1);
 }
+const finishWorkEviction = [
+  (tenantId: string) => drainerRef.current?.finishTenantEviction(tenantId),
+  (tenantId: string) => synthesisConsumer?.finishTenantEviction(tenantId),
+];
+const reactivateAssignment = createAssignmentReactivation({
+  releaseWork: (tenantId) => tenantRequests.releaseWork(tenantId),
+  isWorkHeld: (tenantId) => tenantRequests.isWorkHeld(tenantId),
+  finishWorkEviction,
+  activate: (tenantId) => tenantRequests.activate(tenantId),
+});
 const assignmentApplier = new TenantAssignmentApplier(
   registry,
   (identity, resident) => tenantFactory.build(identity, resident),
   logger,
   async (tenantId) => {
+    tenantRequests.holdWork(tenantId);
     const requestDrain = tenantRequests.fence(tenantId);
     const teardown = [
       drainerRef.current?.evictTenant(tenantId),
@@ -589,13 +603,9 @@ const assignmentApplier = new TenantAssignmentApplier(
   },
   undefined,
   DEPLOYMENT_ID,
-  (tenantId) => {
-    tenantRequests.releaseWork(tenantId);
-    drainerRef.current?.finishTenantEviction(tenantId);
-    synthesisConsumer?.finishTenantEviction(tenantId);
-    tenantRequests.activate(tenantId);
-  },
+  reactivateAssignment,
   async (tenantId) => {
+    tenantRequests.holdWork(tenantId);
     const requestDrain = tenantRequests.fence(tenantId);
     try {
       const results = await Promise.allSettled(
@@ -616,12 +626,7 @@ const assignmentApplier = new TenantAssignmentApplier(
       evictMintedTokensForOrg(tenantId);
     }
   },
-  (tenantId) => {
-    tenantRequests.releaseWork(tenantId);
-    drainerRef.current?.finishTenantEviction(tenantId);
-    synthesisConsumer?.finishTenantEviction(tenantId);
-    tenantRequests.activate(tenantId);
-  },
+  reactivateAssignment,
   exitOnTenantQuiescenceFailure,
 );
 let liveActivePolicySnapshotVerifier: VerifiedActivePolicySnapshotVerifier | undefined;
@@ -733,12 +738,8 @@ const policyAssignmentApplier = new TenantAssignmentApplier({
       void synthesisConsumer?.forgetTenant(tenantId);
     }
   },
-  onActivated: (tenantId) => {
-    tenantRequests.releaseWork(tenantId);
-    drainerRef.current?.finishTenantEviction(tenantId);
-    synthesisConsumer?.finishTenantEviction(tenantId);
-    tenantRequests.activate(tenantId);
-  },
+  onActivated: reactivateAssignment,
+  onManifestRetryBackoff: () => bootStatus.recordAlarm(MANIFEST_RETRY_BACKOFF_ALARM),
   onQuiescenceFailure: exitOnTenantQuiescenceFailure,
 });
 let runtimeAttestation =
@@ -1073,8 +1074,7 @@ const tenantRequestQuiescence = new TenantRequestQuiescenceMonitor({
     await evictAnswerInference?.(tenantId);
   },
   onActivate: (tenantId) => {
-    drainerRef.current?.finishTenantEviction(tenantId);
-    synthesisConsumer?.finishTenantEviction(tenantId);
+    for (const finish of finishWorkEviction) finish(tenantId);
   },
 });
 const isTenantHaltedNow = (tenantId: string) =>
@@ -1816,11 +1816,9 @@ async function writeIdleFlag(idle: boolean): Promise<void> {
         Overwrite: true,
       }),
     )
-    .catch((err) =>
-      console.error('shutdown: non-fatal', {
-        reason: err instanceof Error ? err.message : String(err),
-      }),
-    ); // non-fatal — parent timer will catch next cycle
+    .catch((err: unknown) =>
+      logger.warn('idle_flag_write_failed', { error_type: contentFreeErrorType(err) }),
+    ); // non-fatal: the parent timer catches the next cycle
 }
 
 const canaryAuthorizationConsumer =

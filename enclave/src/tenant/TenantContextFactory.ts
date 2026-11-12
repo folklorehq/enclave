@@ -2,7 +2,7 @@ import { timingSafeEqual, type KeyObject } from 'node:crypto';
 import { PutObjectCommand, type S3Client } from '@aws-sdk/client-s3';
 import { KMS } from '@aws-sdk/client-kms';
 import { KmsKeyringNode } from '@aws-crypto/client-node';
-import { awsClientTransport } from '../aws/aws-transport.js';
+import { awsShortCallTransport } from '../aws/aws-transport.js';
 import { createRecipientKmsClient } from '../aws/RecipientKmsClient.js';
 import {
   decryptRecipientCiphertextWithKeyId,
@@ -311,7 +311,7 @@ export class TenantContextFactory {
     let client = this.kmsClients.get(region);
     if (!client) {
       client =
-        this.deps.kmsClientProvider?.(region) ?? new KMS({ region, ...awsClientTransport() });
+        this.deps.kmsClientProvider?.(region) ?? new KMS({ region, ...awsShortCallTransport() });
       this.kmsClients.set(region, client);
     }
     return client;

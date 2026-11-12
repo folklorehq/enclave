@@ -4,8 +4,10 @@ import { awsHttpsProxyAgent } from '../egress/proxy.js';
 
 const DEV_ENDPOINT_PORT_VAR = 'VSOCK_KMS_PROXY_PORT';
 const DEV_NODE_ENV = 'development';
-// Three times the longest SQS long poll (20 s), so only a stalled socket is cut, never a quiet one.
-export const AWS_SOCKET_IDLE_TIMEOUT_MS = 60_000;
+// Under the SDK's 6 s threshold, so the idle timer arms at once and also bounds the response body.
+export const AWS_SOCKET_IDLE_TIMEOUT_MS = 5_000;
+// Three times the longest SQS long poll (20 s); a one-write TLS upload to S3 also looks idle this long.
+const AWS_LONG_SOCKET_IDLE_TIMEOUT_MS = 60_000;
 export const AWS_CONNECTION_TIMEOUT_MS = 10_000;
 
 type AwsCredentialIdentityProvider = ReturnType<typeof fromInstanceMetadata>;
@@ -78,15 +80,26 @@ export function resetAwsCredentialsForTest(): void {
 
 // SDK v3 uses node:http, not undici, so the global egress dispatcher misses it — hand the agent to
 // the client, which builds its own NodeHttpHandler from these options (HttpHandlerUserInput).
-export function awsClientTransport(): AwsClientTransport | DevEndpointTransport {
+export function awsClientTransport(
+  socketTimeout: number,
+): AwsClientTransport | DevEndpointTransport {
   return (
     devEndpoint() ?? {
       credentials: awsCredentials(),
       requestHandler: {
         httpsAgent: awsHttpsProxyAgent(),
         connectionTimeout: AWS_CONNECTION_TIMEOUT_MS,
-        socketTimeout: AWS_SOCKET_IDLE_TIMEOUT_MS,
+        socketTimeout,
       },
     }
   );
+}
+
+export function awsShortCallTransport(): AwsClientTransport | DevEndpointTransport {
+  return awsClientTransport(AWS_SOCKET_IDLE_TIMEOUT_MS);
+}
+
+// Long polls and one-write uploads look idle for far longer than a short call, so a 5 s bound would cut them.
+export function awsLongCallTransport(): AwsClientTransport | DevEndpointTransport {
+  return awsClientTransport(AWS_LONG_SOCKET_IDLE_TIMEOUT_MS);
 }
