@@ -240,6 +240,10 @@ const CLAUDE_REASONS = [
   'anthropic_request_refused',
   'anthropic_tls_root_set_mismatch',
   'anthropic_transport_closed',
+  'claude_batch_identity_unset',
+  'claude_batch_request_invalid',
+  'claude_batch_response_invalid',
+  'claude_batch_unavailable',
   'claude_connection_failed',
   'claude_credential_access_denied',
   'claude_credential_decrypt_failed',
@@ -279,6 +283,7 @@ const CLAUDE_REASONS = [
 ] as const;
 
 const SYNTHESIS_REASONS = [
+  'batch_manifest_identity_mismatch',
   'claude_usage_tokens_invalid',
   'page_empty',
   'page_outline_invalid',

@@ -57,6 +57,7 @@ interface UsageRun {
   readonly totals: Map<string, TokenUsage>;
   readonly timeline: InferenceTimeline;
   readonly classify: SpanFailureClassifier;
+  readonly orgId?: string;
 }
 
 export interface MeasuredRun<T> {
@@ -78,11 +79,13 @@ export class TokenUsageScope {
     onPartial?: (usage: TokenUsage[], error: unknown) => void | Promise<void>,
     classify: SpanFailureClassifier = UNCLASSIFIED,
     onStart?: (peek: () => TokenUsage[]) => void,
+    orgId?: string,
   ): Promise<MeasuredRun<T>> {
     const current: UsageRun = {
       totals: new Map(),
       timeline: new InferenceTimeline(this.now()),
       classify,
+      ...(orgId === undefined ? {} : { orgId }),
     };
     onStart?.(() => this.snapshot(current.totals));
     try {
@@ -111,6 +114,10 @@ export class TokenUsageScope {
     }
   }
 
+  recordingFor(orgId: string): boolean {
+    return this.runs.getStore()?.orgId === orgId;
+  }
+
   record(event: InferenceUsageEvent): void {
     const current = this.runs.getStore();
     if (!current) return;
@@ -128,6 +135,9 @@ export class TokenUsageScope {
     }
     if (event.cacheWriteTokens !== undefined) {
       total.cacheWriteTokens = (total.cacheWriteTokens ?? 0) + event.cacheWriteTokens;
+    }
+    if (event.cacheWrite1hTokens !== undefined) {
+      total.cacheWrite1hTokens = (total.cacheWrite1hTokens ?? 0) + event.cacheWrite1hTokens;
     }
   }
 

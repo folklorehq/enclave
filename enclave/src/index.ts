@@ -60,7 +60,7 @@ import { HNSW_INDEX_UNREADABLE_CODE } from './hnsw/index.js';
 import { createTenantResolver } from './tenant/tenant-resolver.js';
 import { BoxServer } from './http/BoxServer.js';
 import { HostHeadroomGauge } from './workers/HostHeadroomGauge.js';
-import { SynthesisConsumer } from './workers/SynthesisConsumer.js';
+import { SynthesisConsumer, type SynthesisConsumerDeps } from './workers/SynthesisConsumer.js';
 import { ThemeSnapshotFactSource } from './workers/ThemeSnapshotFactSource.js';
 import { AskUsageMeter } from './inference/AskUsageMeter.js';
 import { recordTokenUsage } from './inference/TokenUsageScope.js';
@@ -407,6 +407,7 @@ const routingTables = new RoutingTableRefresher({
 });
 const claudeRoutes = new InferenceRouteResolver(routingTables);
 if (claudeRoutes.invalidReason !== undefined) bootStatus.recordAlarm(CLAUDE_ROUTE_CONFIG_INVALID);
+const tenantBatchConsent = new TenantBatchConsent();
 const claudeComposition = new ClaudeRouteComposition({
   resolver: claudeRoutes,
   reader: () =>
@@ -417,6 +418,7 @@ const claudeComposition = new ClaudeRouteComposition({
     ),
   manifest: () => verifiedBootManifest,
   onAlarm: (code: string) => bootStatus.recordAlarm(code),
+  batch: { consent: tenantBatchConsent },
 });
 
 const providerRoutes = new ProviderRouteRegistry([claudeComposition]);
@@ -1668,11 +1670,11 @@ const projectionTenants = (): ProjectionTenant[] =>
     const tenantDeploymentId = context.tenantDeploymentId ?? context.deploymentId;
     return tenantDeploymentId ? [{ tenantId: context.tenantId, tenantDeploymentId }] : [];
   });
-const tenantBatchConsent = new TenantBatchConsent();
 // The shared-pool tenant DB has no other writer of each tenant's entitlement row.
 const entitlementProjectionApplier = new EntitlementProjectionApplier({
   database: () => runtimeDatabaseLease.database(),
   batchConsent: tenantBatchConsent,
+  onBatchNotAllowed: (orgId) => synthesisConsumer?.cancelBatches(orgId) ?? Promise.resolve(0),
   opsTelemetry,
   logger: logger.child({ component: 'entitlement_projection' }),
 });
@@ -1743,6 +1745,20 @@ const memberIdentityLinkRunner =
 memberIdentityLinkRunner?.start();
 bootStatus.begin('workers_start');
 
+// UNWIRED: no brake-level source reaches the enclave yet, so a batch can be collected but never submitted.
+function batchSynthesisDeps(): { batch?: NonNullable<SynthesisConsumerDeps['batch']> } {
+  const route = claudeComposition.batchRoute();
+  if (route === undefined) return {};
+  return {
+    batch: {
+      api: route.api,
+      ready: () => route.ready(),
+      consent: tenantBatchConsent,
+      allowedModels: claudeRoutes.allowedModels(),
+    },
+  };
+}
+
 // One consumer serves every assigned tenant: it resolves each request's keyring/crypto from the
 // message's own orgId (§4.2/§2.2), so wiki + theme synthesis run for the whole pool, not just N=1.
 if (SYNTHESIS_REQUEST_QUEUE_URL) {
@@ -1760,6 +1776,7 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
     activePolicyBindingForwarderFor,
     activePolicyBackendFor,
     claudeRoutes,
+    ...batchSynthesisDeps(),
     ...(embeddingProvider === undefined ? {} : { embeddingProvider }),
     providerRoutes,
     upstreamPaused: (upstream) => (upstreamGate?.pauseRemainingMs(upstream) ?? 0) > 0,

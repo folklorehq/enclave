@@ -9,6 +9,21 @@ import type {
 // prettier-ignore
 export const CLAUDE_ROUTE_IDENTITY = {"enabled":true,"organizationIdSha256":"33db0107520c9f427f15cb96fa19ba66c0660e1e268f59321ec4e165c493c38b","workspaceIdSha256":"c85508b0386c3af3347ce71e1a2872bbc7ce14de5d87c5d1ad0141a1d5332613","models":["claude-haiku-5-5","claude-opus-5-5","claude-sonnet-5-5"]} as const;
 
+// UNWIRED: nothing turns the Batch route on until its activation change flips this and fills the workspace hashes.
+export const BATCH_ROUTE_ENABLED = false;
+
+// Empty until the batch workspace exists: an empty hash can never bind a key, so the route cannot activate.
+export const BATCH_WORKSPACE_IDENTITY = {
+  organizationIdSha256: '',
+  workspaceIdSha256: '',
+} as const;
+
+export interface BatchRouteSettings {
+  readonly enabled: boolean;
+  readonly organizationIdSha256: string;
+  readonly workspaceIdSha256: string;
+}
+
 export type ClaudeCallGraph = 'v2' | 'reference';
 
 export interface ClaudePurposeRoute {
@@ -28,6 +43,7 @@ export interface ClaudeRouteConfig {
     readonly workspaceIdSha256: string;
     readonly models: readonly ClaudeModelId[];
   };
+  readonly batch: BatchRouteSettings;
   readonly callGraph: ClaudeCallGraph;
   readonly arms: Readonly<Record<ShadowArm, ClaudeArmConfig>>;
   readonly shadowOrgIdSha256: string;
@@ -40,6 +56,7 @@ const SHADOW_ORG_ID_SHA256 = '';
 
 export const CLAUDE_ROUTE_CONFIG: ClaudeRouteConfig = deepFreeze({
   identity: CLAUDE_ROUTE_IDENTITY,
+  batch: { enabled: BATCH_ROUTE_ENABLED, ...BATCH_WORKSPACE_IDENTITY },
   callGraph: 'v2',
   arms: {
     R: { callGraph: 'reference', purposes: {} },

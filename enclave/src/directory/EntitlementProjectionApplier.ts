@@ -25,6 +25,7 @@ export interface EntitlementProjectionApplierDeps {
   readonly database: () => ProjectionDatabase | undefined;
   readonly logger: Logger;
   readonly batchConsent?: TenantBatchConsent;
+  readonly onBatchNotAllowed?: (orgId: string) => Promise<unknown>;
   readonly opsTelemetry?: TelemetryClient;
   readonly now?: () => number;
   readonly createService?: (
@@ -55,8 +56,24 @@ export class EntitlementProjectionApplier {
       this.observed(orgId, source, (directory) => (seen.directory = directory)),
       database,
     ).sync();
-    if (outcome === 'applied' && seen.directory) this.recordConsent(orgId, seen.directory);
+    if (outcome === 'applied' && seen.directory) {
+      this.recordConsent(orgId, seen.directory);
+      await this.cancelBatchesWithoutConsent(orgId, seen.directory);
+    }
     return outcome;
+  }
+
+  // Decided from the applied state alone, so a restart between two passes cannot skip it.
+  private async cancelBatchesWithoutConsent(
+    orgId: string,
+    directory: DirectorySync,
+  ): Promise<void> {
+    if (directory.orgId !== orgId || directory.entitlement.batchAllowed === true) return;
+    try {
+      await this.deps.onBatchNotAllowed?.(orgId);
+    } catch {
+      this.deps.logger.warn('batch_opt_out_cancel_failed', {});
+    }
   }
 
   // Consent comes only from a projection that was applied, so a stale or rejected pass never moves it.

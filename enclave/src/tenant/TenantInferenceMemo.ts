@@ -40,6 +40,14 @@ export class TenantInferenceMemo<T> {
     return entry.value;
   }
 
+  cacheOf(orgId: string): S3LlmCache {
+    this.get(orgId);
+    const entry = this.entries.get(orgId);
+    if (entry === undefined)
+      throw new ServiceUnavailableError('tenant inference fenced', TENANT_INFERENCE_FENCED);
+    return entry.cache;
+  }
+
   take(orgId: string): S3LlmCache | undefined {
     const entry = this.entries.get(orgId);
     this.entries.delete(orgId);

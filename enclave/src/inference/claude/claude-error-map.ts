@@ -11,9 +11,11 @@ import {
   UPSTREAM_TIMEOUT_CAUSE,
   transportFailureOf,
 } from '../../egress/anthropic-transport-failure.js';
+import { BatchPendingError } from './batch-errors.js';
 import { inferenceOutageScope } from '../routing/inference-outage-scope.js';
 import {
   CLAUDE_OPERATION_DEADLINE,
+  CLAUDE_REQUEST_INVALID,
   CLAUDE_UPSTREAM_TIMEOUT,
   ClaudeRouteError,
 } from './claude-route-errors.js';
@@ -42,7 +44,11 @@ const RECORDED = new WeakSet<ClaudeRouteError>();
 const ALARMED = new WeakSet<ClaudeRouteError>();
 const ALARM_CODES: ReadonlySet<string> = new Set([TLS_UNTRUSTED, ANTHROPIC_ROOT_SET_MISMATCH]);
 
-export function mapClaudeError(error: unknown, context: ClaudeErrorContext): ClaudeRouteError {
+export function mapClaudeError(
+  error: unknown,
+  context: ClaudeErrorContext,
+): ClaudeRouteError | BatchPendingError {
+  if (error instanceof BatchPendingError) return error;
   const mapped = error instanceof ClaudeRouteError ? error : classify(error, context);
   raiseAlarm(mapped, context);
   recordOutage(mapped, context);
@@ -112,7 +118,7 @@ function fromStatus(error: APIError, context: ClaudeErrorContext): ClaudeRouteEr
     return new ClaudeRouteError('claude_upstream_error', undefined, undefined, true);
   }
   return status >= CLIENT_ERROR_FLOOR
-    ? new ClaudeRouteError('claude_request_invalid')
+    ? new ClaudeRouteError(CLAUDE_REQUEST_INVALID)
     : new ClaudeRouteError('claude_upstream_error');
 }
 

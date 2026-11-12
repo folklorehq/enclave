@@ -143,15 +143,28 @@ function assertArms(config: ClaudeRouteConfig): void {
   }
 }
 
+function assertBatch(config: ClaudeRouteConfig): void {
+  const { batch, identity } = config;
+  if (!batch.enabled) return;
+  if (!SHA256_HEX.test(batch.organizationIdSha256)) invalid('batch_organization_hash');
+  if (!SHA256_HEX.test(batch.workspaceIdSha256)) invalid('batch_workspace_hash');
+  if (batch.workspaceIdSha256 === identity.workspaceIdSha256) invalid('batch_workspace_shared');
+}
+
 export function assertClaudeRouteConfig(config: ClaudeRouteConfig, routing: CompiledRouting): void {
   assertIdentity(config.identity);
+  assertBatch(config);
   assertArms(config);
   assertModelsAndTimeouts(config, routing);
   assertCompiledRouting(routing);
 }
 
 function disabledCopy(config: ClaudeRouteConfig): ClaudeRouteConfig {
-  return { ...config, identity: { ...config.identity, enabled: false } };
+  return {
+    ...config,
+    identity: { ...config.identity, enabled: false },
+    batch: { ...config.batch, enabled: false },
+  };
 }
 
 function sha256Hex(value: string): string {
@@ -183,6 +196,15 @@ export class InferenceRouteResolver {
 
   get enabled(): boolean {
     return this.#config.identity.enabled && this.#invalidReason === undefined;
+  }
+
+  get batchActive(): boolean {
+    return this.enabled && this.#config.batch.enabled;
+  }
+
+  batchIdentity(): { readonly organizationIdSha256: string; readonly workspaceIdSha256: string } {
+    const { organizationIdSha256, workspaceIdSha256 } = this.#config.batch;
+    return { organizationIdSha256, workspaceIdSha256 };
   }
 
   get invalidReason(): string | undefined {

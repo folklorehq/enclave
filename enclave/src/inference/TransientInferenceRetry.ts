@@ -1,4 +1,5 @@
 import { ProviderHttpError } from '@folklore/inference';
+import { BatchPendingError } from './claude/batch-errors.js';
 
 export const TRANSIENT_INFERENCE_ATTEMPTS = 3;
 const BACKOFF_BASE_MS = 250;
@@ -88,6 +89,7 @@ export class TransientInferenceRetry {
     windows: TransientRetryWindows,
     transientStatuses: ReadonlySet<number>,
   ): number | undefined {
+    if (error instanceof BatchPendingError) return undefined;
     if (attempt >= TRANSIENT_INFERENCE_ATTEMPTS || elapsedMs >= windows.retryMs) return undefined;
     const transient = this.transientLink(error, transientStatuses);
     if (!transient) return undefined;

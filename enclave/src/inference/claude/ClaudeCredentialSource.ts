@@ -22,13 +22,18 @@ import {
 import { ProviderKeyHolder, type KeyInvalidation } from '../credentials/ProviderKeyHolder.js';
 import { ClaudeRouteError } from './claude-route-errors.js';
 
-const ANTHROPIC_API_VERSION = '2023-06-01';
+export const ANTHROPIC_API_VERSION = '2023-06-01';
 const ANTHROPIC_ORGANIZATION_HEADER = 'anthropic-organization-id';
 const ANTHROPIC_WORKSPACE_HEADER = 'anthropic-workspace-id';
 
 export const CLAUDE_CREDENTIAL_PARAMETER_ROOT = '/folklore/prod';
 export const CLAUDE_CREDENTIAL_PARAMETER_SUFFIX = '/provider-inference/anthropic-api-key';
 export const CLAUDE_CREDENTIAL_KEY_ALIAS = 'alias/folklore-prod-anthropic-credential';
+
+export const CLAUDE_BATCH_CREDENTIAL_LOCATION = {
+  parameterSuffix: '/provider-inference/anthropic-batch-api-key',
+  keyAlias: 'alias/folklore-prod-anthropic-batch-credential',
+} as const;
 
 export const claudeCredentialLoadErrors: AttestedParameterReadErrors = {
   missing: 'claude_credential_missing',
@@ -49,6 +54,11 @@ export const CLAUDE_WORKSPACE_HEADER_UNEXPECTED = 'claude_workspace_header_unexp
 
 export type ClaudeCredentialManifest = ProviderKeyManifest;
 
+export interface ClaudeCredentialLocation {
+  readonly parameterSuffix: string;
+  readonly keyAlias: string;
+}
+
 export interface ClaudeCredentialDeps {
   readonly reader: Pick<AttestedSsmParameterReader, 'read'>;
   readonly manifest: () => ClaudeCredentialManifest | undefined;
@@ -60,6 +70,7 @@ export interface ClaudeCredentialDeps {
   readonly transport: AnthropicTransport;
   readonly onAlarm?: (code: string) => void;
   readonly now?: () => number;
+  readonly location?: ClaudeCredentialLocation;
 }
 
 /** The Anthropic key, read only through the attested reader and bound to the compiled org hash before use. */
@@ -70,8 +81,10 @@ export class ClaudeCredentialSource {
   constructor(private readonly deps: ClaudeCredentialDeps) {
     this.keyReader = new AttestedProviderKeyReader(
       {
-        parameterPath: `${CLAUDE_CREDENTIAL_PARAMETER_ROOT}${CLAUDE_CREDENTIAL_PARAMETER_SUFFIX}`,
-        keyAlias: CLAUDE_CREDENTIAL_KEY_ALIAS,
+        parameterPath: `${CLAUDE_CREDENTIAL_PARAMETER_ROOT}${
+          deps.location?.parameterSuffix ?? CLAUDE_CREDENTIAL_PARAMETER_SUFFIX
+        }`,
+        keyAlias: deps.location?.keyAlias ?? CLAUDE_CREDENTIAL_KEY_ALIAS,
         keyShape: KEY_SHAPE,
         maxKeyBytes: MAX_KEY_BYTES,
         unavailable: () => new ClaudeRouteError('claude_credential_unavailable'),

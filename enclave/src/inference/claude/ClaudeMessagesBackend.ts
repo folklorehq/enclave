@@ -6,13 +6,17 @@ import { ClaudeRouteError } from './claude-route-errors.js';
 import { claudeIdentityMismatch } from './ClaudeCredentialSource.js';
 import { mapClaudeError, type ClaudeErrorContext } from './claude-error-map.js';
 import {
+  BATCH_CACHE_TTL,
   CHARS_PER_TOKEN_FLOOR,
   buildClaudeRequest,
+  type ClaudeRequestBody,
   type ClaudeRequestInput,
 } from './claude-request.js';
 import type { AnthropicRoute } from './anthropic-route.js';
+import type { BatchSendRoute, BatchingClaudeSender } from './BatchingClaudeSender.js';
+import { batchRunScope } from './BatchRunScope.js';
 
-type CreatedMessage = Anthropic.Message;
+export type CreatedMessage = Anthropic.Message;
 type MessageEvents = AsyncIterable<Anthropic.RawMessageStreamEvent> & {
   controller: AbortController;
 };
@@ -32,6 +36,12 @@ interface StreamTally extends UsageCounts {
   metered: boolean;
 }
 
+const ZERO_COUNTS: UsageCounts = {
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+};
 const SDK_LOG_LEVEL = 'off';
 const NO_RETRIES = 0;
 const END_TURNS: ReadonlySet<string> = new Set(['end_turn', 'stop_sequence']);
@@ -49,6 +59,8 @@ export interface ClaudeMessagesBackendDeps {
   readonly errorContext: ClaudeErrorContext;
   readonly onIdentityMismatch: () => void;
   readonly cachedSystemPrefix?: CachedSystemPrefix;
+  readonly batching?: BatchSendRoute;
+  readonly orgId?: string;
 }
 
 /** One Messages call per operation, with the response bound to the compiled identity before it is used. */
@@ -83,6 +95,7 @@ export class ClaudeMessagesBackend {
   ): AsyncGenerator<string> {
     const tally = this.freshTally();
     try {
+      batchRunScope.assertMaySpend();
       const request = buildClaudeRequest({
         route: this.deps.route,
         prompt,
@@ -121,19 +134,43 @@ export class ClaudeMessagesBackend {
     operation: 'generate' | 'structured',
   ): Promise<string> {
     try {
-      const request = buildClaudeRequest({
-        ...input,
-        cachedSystemPrefix: this.deps.cachedSystemPrefix,
-      });
-      const message = await this.send(request);
-      this.recordUsage(message, operation);
+      const full = { ...input, cachedSystemPrefix: this.deps.cachedSystemPrefix };
+      const message = (await this.replayed(full, operation)) ?? (await this.sent(full, operation));
       return this.completedText(message);
     } catch (error) {
       throw mapClaudeError(error, this.deps.errorContext);
     }
   }
 
-  private async send(request: ReturnType<typeof buildClaudeRequest>): Promise<CreatedMessage> {
+  private senderOf(): BatchingClaudeSender | undefined {
+    const { batching, orgId, route } = this.deps;
+    if (batching === undefined || orgId === undefined) return undefined;
+    return batching.senderFor(orgId, route.untagged ? 'untagged' : route.purpose, route.arm);
+  }
+
+  // The lookup is keyed by the one-hour bytes a batch would carry; only a hit uses them.
+  private async replayed(
+    input: ClaudeRequestInput,
+    operation: 'generate' | 'structured',
+  ): Promise<CreatedMessage | undefined> {
+    const sender = this.senderOf();
+    if (sender === undefined) return undefined;
+    const message = await sender.send(buildClaudeRequest({ ...input, cacheTtl: BATCH_CACHE_TTL }));
+    if (message !== undefined) this.reportUsage(ZERO_COUNTS, operation, true);
+    return message;
+  }
+
+  private async sent(
+    input: ClaudeRequestInput,
+    operation: 'generate' | 'structured',
+  ): Promise<CreatedMessage> {
+    batchRunScope.assertMaySpend();
+    const message = await this.send(buildClaudeRequest(input));
+    this.recordUsage(message, operation);
+    return message;
+  }
+
+  private async send(request: ClaudeRequestBody): Promise<CreatedMessage> {
     const { data, response } = await this.client.messages
       .create(request as Anthropic.MessageCreateParamsNonStreaming)
       .withResponse();
@@ -247,14 +284,18 @@ export class ClaudeMessagesBackend {
     );
   }
 
-  private reportUsage(counts: UsageCounts, operation: 'generate' | 'structured'): void {
+  private reportUsage(
+    counts: UsageCounts,
+    operation: 'generate' | 'structured',
+    cached = false,
+  ): void {
     const route = this.deps.route;
     this.deps.usageSink({
       model: route.model,
       operation,
       promptTokens: tokenCount(counts.inputTokens),
       completionTokens: tokenCount(counts.outputTokens),
-      cached: false,
+      cached,
       purpose: route.untagged ? 'untagged' : route.purpose,
       outcome: route.arm === 'D' ? 'ok' : 'shadow',
       cacheReadTokens: tokenCount(counts.cacheReadTokens),

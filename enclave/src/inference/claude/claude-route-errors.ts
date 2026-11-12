@@ -7,6 +7,7 @@ import {
 export const CLAUDE_UPSTREAM_TIMEOUT = 'claude_upstream_timeout';
 export const CLAUDE_OPERATION_DEADLINE = 'claude_operation_deadline';
 export const CLAUDE_ROUTE_PROVIDER_MISMATCH = 'claude_route_provider_mismatch';
+export const CLAUDE_REQUEST_INVALID = 'claude_request_invalid';
 
 export const CLAUDE_TRANSIENT_STATUSES: ReadonlySet<number> = new Set([429, 502, 503, 504, 529]);
 
@@ -20,6 +21,7 @@ export const CLAUDE_DEFERRABLE_CODES: ReadonlySet<string> = new Set([
   'claude_credential_rejected',
   'claude_organization_mismatch',
   'claude_workspace_mismatch',
+  'claude_batch_unavailable',
 ]);
 
 // A call that timed out may have spent tokens that never came back metered.

@@ -4,6 +4,9 @@ import { createPinnedOriginTransport, type PinnedOriginPolicy } from './pinned-o
 
 export const ANTHROPIC_ORIGIN = 'https://api.anthropic.com';
 const ANTHROPIC_MESSAGES_PATH = '/v1/messages';
+const BATCHES_PATH = '/v1/messages/batches';
+const BATCH_PATH_PATTERN =
+  /^\/v1\/messages\/batches\/(msgbatch_[A-Za-z0-9]{1,64})(\/results|\/cancel)?$/;
 export const ANTHROPIC_MODELS_PATH_PREFIX = '/v1/models/';
 export const ANTHROPIC_TRANSPORT_CLOSED = 'anthropic_transport_closed';
 export const ANTHROPIC_REQUEST_REFUSED = 'anthropic_request_refused';
@@ -22,7 +25,10 @@ export interface AnthropicTransport {
   close(): Promise<void>;
 }
 
+export type AnthropicIdentity = 'synchronous' | 'batch';
+
 export interface AnthropicTransportOptions {
+  readonly identity?: AnthropicIdentity;
   readonly allowedModels?: readonly string[];
   readonly caPems?: readonly string[];
   readonly proxyPort?: number;
@@ -35,7 +41,8 @@ export function createAnthropicTransport(
   const allowedModels = new Set<string>(options.allowedModels ?? CLAUDE_ROUTE_MODEL_IDS);
   const policy: PinnedOriginPolicy = {
     origin: ANTHROPIC_ORIGIN,
-    permitted: (method, path) => isPermittedPath(path, method, allowedModels),
+    permitted: (method, path) =>
+      isPermittedPath(path, method, allowedModels, options.identity ?? 'synchronous'),
     headerAllowlist: ALLOWED_HEADERS,
     headerPrefixAllowlist: ALLOWED_HEADER_PREFIXES,
     refusedCode: ANTHROPIC_REQUEST_REFUSED,
@@ -53,8 +60,24 @@ function isPermittedPath(
   path: string,
   method: string,
   allowedModels: ReadonlySet<string>,
+  identity: AnthropicIdentity,
 ): boolean {
-  if (path === ANTHROPIC_MESSAGES_PATH) return method === 'POST';
-  if (!path.startsWith(ANTHROPIC_MODELS_PATH_PREFIX)) return false;
-  return method === 'GET' && allowedModels.has(path.slice(ANTHROPIC_MODELS_PATH_PREFIX.length));
+  if (path.startsWith(ANTHROPIC_MODELS_PATH_PREFIX)) {
+    return method === 'GET' && allowedModels.has(path.slice(ANTHROPIC_MODELS_PATH_PREFIX.length));
+  }
+  return identity === 'batch' ? isBatchPath(path, method) : isSynchronousPath(path, method);
+}
+
+function isSynchronousPath(path: string, method: string): boolean {
+  return path === ANTHROPIC_MESSAGES_PATH && method === 'POST';
+}
+
+function isBatchPath(path: string, method: string): boolean {
+  if (path === BATCHES_PATH) return method === 'POST';
+  const match = BATCH_PATH_PATTERN.exec(path);
+  if (match === null) return false;
+  const [, , action] = match;
+  if (action === '/results') return method === 'GET';
+  if (action === '/cancel') return method === 'POST';
+  return method === 'GET' || method === 'DELETE';
 }
