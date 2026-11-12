@@ -60,6 +60,7 @@ export const CLAUDE_PURPOSE_LIMITS: Readonly<Record<InferencePurpose, ClaudePurp
   wiki_article_check: limit(8_192),
   wiki_article_long: limit(8_192),
   team_onboarding_long: limit(8_192),
+  page_rewrite: limit(8_192),
 };
 
 export function claudeMaxTokens(purpose: InferencePurpose, effort: InferenceEffort): number {

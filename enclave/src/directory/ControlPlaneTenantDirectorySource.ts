@@ -5,6 +5,10 @@ import { assertControlPlaneOrigin } from '../pull/control-plane-url.js';
 const REQUEST_TIMEOUT_MS = 10_000;
 const HTTP_NOT_FOUND = 404;
 
+export const DIRECTORY_RESPONSE_INVALID = 'directory_response_invalid';
+export const DIRECTORY_ORG_MISMATCH = 'directory_org_mismatch';
+const DIRECTORY_FETCH_FAILED = 'directory_fetch_failed';
+
 export interface ControlPlaneTenantDirectorySourceDeps {
   readonly controlPlaneUrl: string;
   readonly runtimeDeploymentId: string;
@@ -31,16 +35,18 @@ export class ControlPlaneTenantDirectorySource implements DirectorySourcePort {
     });
     if (response.status === HTTP_NOT_FOUND) return null;
     // The status and body stay out of the message: an error body can quote roster entries.
-    if (!response.ok) throw new Error('directory_fetch_failed');
+    if (!response.ok) throw new Error(DIRECTORY_FETCH_FAILED);
     return this.parse(await this.readBody(response));
   }
 
-  // A JSON SyntaxError quotes the body it choked on, so it is replaced with a fixed code.
+  // Both errors can quote the body, so they become fixed codes; only unparseable JSON is a refusal.
   private async readBody(response: Response): Promise<unknown> {
     try {
       return await response.json();
-    } catch {
-      throw new Error('directory_response_invalid');
+    } catch (error) {
+      throw new Error(
+        error instanceof SyntaxError ? DIRECTORY_RESPONSE_INVALID : DIRECTORY_FETCH_FAILED,
+      );
     }
   }
 
@@ -55,8 +61,8 @@ export class ControlPlaneTenantDirectorySource implements DirectorySourcePort {
 
   private parse(body: unknown): DirectorySync {
     const parsed = directorySyncSchema.safeParse(body);
-    if (!parsed.success) throw new Error('directory_response_invalid');
-    if (parsed.data.orgId !== this.deps.orgId) throw new Error('directory_org_mismatch');
+    if (!parsed.success) throw new Error(DIRECTORY_RESPONSE_INVALID);
+    if (parsed.data.orgId !== this.deps.orgId) throw new Error(DIRECTORY_ORG_MISMATCH);
     return parsed.data;
   }
 }

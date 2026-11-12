@@ -9,6 +9,7 @@ import {
   type EntitlementSyncOutcome,
 } from '@folklore/wiki';
 import type { TelemetryClient } from '@folklore/telemetry';
+import { DirectoryRejectionReporter } from './DirectoryRejectionReporter.js';
 import { TeamProjectionFailureReporter } from './TeamProjectionFailureReporter.js';
 import type { TenantBatchConsent } from './TenantBatchConsent.js';
 import type { TenantProjectionOutcome } from './TenantEntitlementProjectionRunner.js';
@@ -40,9 +41,15 @@ export class EntitlementProjectionApplier {
 
   private readonly teamFailures: TeamProjectionFailureReporter | null;
 
+  private readonly directoryRejections: DirectoryRejectionReporter | null;
+
   constructor(private readonly deps: EntitlementProjectionApplierDeps) {
+    const now = deps.now ?? (() => performance.now());
     this.teamFailures = deps.opsTelemetry
-      ? new TeamProjectionFailureReporter(deps.opsTelemetry, deps.now ?? (() => performance.now()))
+      ? new TeamProjectionFailureReporter(deps.opsTelemetry, now)
+      : null;
+    this.directoryRejections = deps.opsTelemetry
+      ? new DirectoryRejectionReporter(deps.opsTelemetry, now)
       : null;
     this.createService =
       deps.createService ?? ((source, database) => this.service(source, database));
@@ -97,6 +104,7 @@ export class EntitlementProjectionApplier {
           return directory;
         } catch (err) {
           this.logSourceFailure(orgId, err);
+          this.directoryRejections?.observe(err);
           throw err;
         }
       },

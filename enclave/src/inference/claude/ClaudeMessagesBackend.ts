@@ -9,6 +9,7 @@ import {
   BATCH_CACHE_TTL,
   CHARS_PER_TOKEN_FLOOR,
   buildClaudeRequest,
+  claudeThinkingEnabled,
   type ClaudeRequestBody,
   type ClaudeRequestInput,
 } from './claude-request.js';
@@ -33,6 +34,8 @@ interface StreamTally extends UsageCounts {
   stopped: boolean;
   stopReason: string | null;
   emittedChars: number;
+  // An aborted stream ends with no message_delta but its thinking is billed, so a thinking-on call is metered at its max_tokens.
+  interruptedOutputFloor: number;
   metered: boolean;
 }
 
@@ -102,6 +105,7 @@ export class ClaudeMessagesBackend {
         systemPrompt,
         cachedSystemPrefix: this.deps.cachedSystemPrefix,
       });
+      tally.interruptedOutputFloor = claudeThinkingEnabled(request) ? request.max_tokens : 0;
       for await (const event of await this.openStream(request, signal)) {
         const text = this.absorb(event, tally);
         if (text === undefined) continue;
@@ -185,6 +189,7 @@ export class ClaudeMessagesBackend {
       stopped: false,
       stopReason: null,
       emittedChars: 0,
+      interruptedOutputFloor: 0,
       metered: false,
       inputTokens: 0,
       outputTokens: 0,
@@ -255,7 +260,11 @@ export class ClaudeMessagesBackend {
       this.reportUsage(
         {
           ...tally,
-          outputTokens: Math.ceil(tally.emittedChars / CHARS_PER_TOKEN_FLOOR),
+          outputTokens: Math.max(
+            tally.outputTokens,
+            Math.ceil(tally.emittedChars / CHARS_PER_TOKEN_FLOOR),
+            tally.interruptedOutputFloor,
+          ),
         },
         'generate',
       );

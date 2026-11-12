@@ -71,6 +71,7 @@ import { HaltGate, poolHaltKey, tenantHaltKey } from './control/HaltGate.js';
 import { ActivityMonitor } from './control/ActivityMonitor.js';
 import { EnclaveFactRetriever } from './retrieval/EnclaveFactRetriever.js';
 import { EnclaveFactAnswerer } from './workers/EnclaveFactAnswerer.js';
+import { EnclavePageRewriter } from './workers/rewrite/EnclavePageRewriter.js';
 import { EnclaveAgentLoop } from './workers/agent/EnclaveAgentLoop.js';
 import { agentRetrieverDeps } from './workers/agent/agent-retriever-deps.js';
 import { EnclaveWikiContentDecryptor } from './wiki/EnclaveWikiContentDecryptor.js';
@@ -558,7 +559,7 @@ function openLocalThemeDatabase(): ReturnType<typeof createRuntimeDatabaseConnec
 }
 let activateRuntimeDatabase: ((config: RuntimeDatabaseConfig) => Promise<void>) | undefined;
 let runtimeDatabaseActivation: Promise<void> | undefined;
-let evictAnswerInference: ((tenantId: string) => Promise<void>) | undefined;
+let evictTenantInference: ((tenantId: string) => Promise<void>) | undefined;
 function exitOnTenantQuiescenceFailure(tenantId: string, phase: 'generation' | 'teardown'): void {
   logger.fatal('tenant_quiescence_failed', { tenant_id: tenantId, phase });
   process.exit(1);
@@ -584,7 +585,7 @@ const assignmentApplier = new TenantAssignmentApplier(
       drainerRef.current?.evictTenant(tenantId),
       synthesisConsumer?.evictTenant(tenantId),
       // Answers admitted before the fence can memoize again; evict after the drain.
-      requestDrain.then(() => evictAnswerInference?.(tenantId)),
+      requestDrain.then(() => evictTenantInference?.(tenantId)),
       apiContainer?.evictCollabTenant(tenantId),
       apiContainer?.evictAskStreams(tenantId),
     ].filter((result): result is Promise<void> => result !== undefined);
@@ -614,7 +615,7 @@ const assignmentApplier = new TenantAssignmentApplier(
           drainerRef.current?.evictTenant(tenantId),
           synthesisConsumer?.evictTenant(tenantId),
           // Answers admitted before the fence can memoize again; evict after the drain.
-          requestDrain.then(() => evictAnswerInference?.(tenantId)),
+          requestDrain.then(() => evictTenantInference?.(tenantId)),
           apiContainer?.evictCollabTenant(tenantId),
           apiContainer?.evictAskStreams(tenantId),
         ].filter((result): result is Promise<void> => result !== undefined),
@@ -699,7 +700,7 @@ const generationQuiescence = createTenantGenerationQuiescence({
     (tenantId) => apiContainer?.evictCollabTenant(tenantId),
     (tenantId) => apiContainer?.evictAskStreams(tenantId),
   ],
-  evictAfterDrain: (tenantId) => evictAnswerInference?.(tenantId),
+  evictAfterDrain: (tenantId) => evictTenantInference?.(tenantId),
 });
 const policyAssignmentApplier = new TenantAssignmentApplier({
   registry,
@@ -1071,7 +1072,7 @@ const tenantRequestQuiescence = new TenantRequestQuiescenceMonitor({
   onFence: evictTenantSubsystems,
   // An admitted answer can rebuild this cache, so it is evicted only once requests have drained.
   onDrained: async (tenantId) => {
-    await evictAnswerInference?.(tenantId);
+    await evictTenantInference?.(tenantId);
   },
   onActivate: (tenantId) => {
     for (const finish of finishWorkEviction) finish(tenantId);
@@ -1447,26 +1448,32 @@ try {
     });
   // Resolved per request from the answer's orgId, so each cache is sealed under that tenant's key
   // and rebuilt when the org resolves to a new context.
-  const answerInference = new TenantInferenceMemo<InferenceModel & Partial<StreamingInference>>({
-    s3,
-    resolveTenant,
-    fenceEpoch: (orgId) => tenantRequests.currentFenceEpoch(orgId),
-    bucketFor: (_orgId, tenant) => tenant.processedOutputsBucket || PROCESSED_OUTPUTS_BUCKET,
-    build: policyWiring.answerInferenceBuilder(
-      poolPolicyPortsFrom({
-        activePolicyFreshnessFor: (id) => activePolicyFreshnessFor(id),
-        activePolicyRuntimeEvidenceFor: (id) => activePolicyRuntimeEvidenceFor(id),
-        activePolicyBindingForwarderFor: (id) => activePolicyBindingForwarderFor(id),
-        // A user is waiting on the answer, so it keeps the short bound batch synthesis outgrew.
-        activePolicyBackendFor: (id) => activePolicyBackendFor(id, 'interactive'),
-        claudeRoutes,
-        ...(embeddingProvider === undefined ? {} : { embeddingProvider }),
-      }),
-      recordTokenUsage,
-      upstreamGate?.passThrough(),
-    ),
-  });
-  evictAnswerInference = (tenantId) => answerInference.evict(tenantId);
+  const tenantInferenceMemo = (profile: InferenceLatencyProfile) =>
+    new TenantInferenceMemo<InferenceModel & Partial<StreamingInference>>({
+      s3,
+      resolveTenant,
+      fenceEpoch: (orgId) => tenantRequests.currentFenceEpoch(orgId),
+      bucketFor: (_orgId, tenant) => tenant.processedOutputsBucket || PROCESSED_OUTPUTS_BUCKET,
+      build: policyWiring.answerInferenceBuilder(
+        poolPolicyPortsFrom({
+          activePolicyFreshnessFor: (id) => activePolicyFreshnessFor(id),
+          activePolicyRuntimeEvidenceFor: (id) => activePolicyRuntimeEvidenceFor(id),
+          activePolicyBindingForwarderFor: (id) => activePolicyBindingForwarderFor(id),
+          activePolicyBackendFor: (id) => activePolicyBackendFor(id, profile),
+          claudeRoutes,
+          ...(embeddingProvider === undefined ? {} : { embeddingProvider }),
+        }),
+        recordTokenUsage,
+        upstreamGate?.passThrough(),
+        profile,
+      ),
+    });
+  // A user waits on an answer, so it keeps the short bound; a whole page outgrows it.
+  const answerInference = tenantInferenceMemo('interactive');
+  const rewriteInference = tenantInferenceMemo('batch');
+  evictTenantInference = async (tenantId) => {
+    await Promise.all([answerInference.evict(tenantId), rewriteInference.evict(tenantId)]);
+  };
   const askUsageLogger = logger.child({ component: 'ask_usage' });
   const askUsageMeter = (sink: AskUsageSinkPort) =>
     new AskUsageMeter({ sink, logger: askUsageLogger });
@@ -1531,6 +1538,12 @@ try {
           ),
         (orgId, request) =>
           meter.stream(orgId, () => streamOrBuffer(answerInference.get(orgId), request)),
+      );
+    },
+    pageRewriterFactory: (usage) => {
+      const meter = askUsageMeter(usage);
+      return new EnclavePageRewriter((orgId, request) =>
+        meter.stream(orgId, () => streamOrBuffer(rewriteInference.get(orgId), request)),
       );
     },
     // synthesized wiki text is ciphertext at rest; the read path decrypts audience-visible

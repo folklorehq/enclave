@@ -72,6 +72,10 @@ export function operationOf(request: ClaudeRequestBody): ClaudeRequestOperation 
   return request.output_config.format === undefined ? 'generate' : 'structured';
 }
 
+export function claudeThinkingEnabled(request: ClaudeRequestBody): boolean {
+  return request.thinking === undefined;
+}
+
 function formatFor(tool: ToolSpec): NonNullable<ClaudeRequestBody['output_config']['format']> {
   assertRegisteredSchema(tool);
   return {

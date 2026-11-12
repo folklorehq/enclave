@@ -1,17 +1,19 @@
 import { TelemetryEvent, type TelemetryClient } from '@folklore/telemetry';
 import type { TeamProjectionRepositoryPort } from '@folklore/wiki';
-import { TENANT_RUNNER_REFRESH_MS } from '../tenant/TenantPeriodicRunner.js';
+import { ReportThrottle } from './ReportThrottle.js';
 
 const OPS_DISTINCT_ID = 'system';
 
 // The enclave's logs have no production reader, so a failed team pass must leave on the check-in.
 export class TeamProjectionFailureReporter {
-  private lastReportedAtMs: number | null = null;
+  private readonly throttle: ReportThrottle;
 
   constructor(
     private readonly telemetry: TelemetryClient,
-    private readonly now: () => number,
-  ) {}
+    now: () => number,
+  ) {
+    this.throttle = new ReportThrottle(now);
+  }
 
   reporting(inner: TeamProjectionRepositoryPort): TeamProjectionRepositoryPort {
     return {
@@ -27,10 +29,7 @@ export class TeamProjectionFailureReporter {
   }
 
   private report(): void {
-    const nowMs = this.now();
-    if (this.lastReportedAtMs !== null && nowMs - this.lastReportedAtMs < TENANT_RUNNER_REFRESH_MS)
-      return;
-    this.lastReportedAtMs = nowMs;
+    if (!this.throttle.admit()) return;
     this.telemetry.track(TelemetryEvent.DirectoryTeamProjectionFailed, OPS_DISTINCT_ID, {});
   }
 }
