@@ -16,6 +16,7 @@ import { assertRecoveryConfigured, sealRecoveryMnemonic } from '../sealing/recov
 import { ACTIVE_EMBEDDING_SPACE } from '../inference/embedding-space.js';
 import { hnswNamespaceFor } from '../hnsw/embedding-namespace.js';
 import { HnswStore } from '../hnsw/index.js';
+import type { FactEmbedDayCounts } from '../pipeline/accounting/FactEmbedDayCounts.js';
 import type { IngestDecisionOptions } from '../pipeline/ingest-decisions/IngestDecider.js';
 import { Pipeline } from '../pipeline/index.js';
 import {
@@ -107,6 +108,7 @@ export interface TenantContextFactoryDeps {
   embeddingProvider?: EmbeddingProvider;
   decisionModel?: SealedDecisionModel;
   ingestDecisions?: IngestDecisionOptions;
+  factEmbedUsage?: FactEmbedDayCounts;
   onIndexUnreadable?: () => void;
 }
 
@@ -179,6 +181,9 @@ export class TenantContextFactory {
           ...(this.deps.ingestDecisions === undefined
             ? {}
             : { ingestDecisions: this.deps.ingestDecisions }),
+          ...(this.deps.factEmbedUsage === undefined
+            ? {}
+            : { embedUsage: this.deps.factEmbedUsage }),
         },
       );
       const tenantContext = new TenantContext(

@@ -129,6 +129,7 @@ import {
 import { jevSiteMode } from './inference/typesafe/jev-site-modes.js';
 import type { IngestDecisionOptions } from './pipeline/ingest-decisions/IngestDecider.js';
 import { IngestCallCeiling } from './pipeline/ingest-decisions/accounting/IngestCallCeiling.js';
+import { FactEmbedDayCounts } from './pipeline/accounting/FactEmbedDayCounts.js';
 import { IngestDecisionCounts } from './pipeline/ingest-decisions/accounting/IngestDecisionCounts.js';
 import { IngestOrgBudgetBreaker } from './pipeline/ingest-decisions/accounting/IngestOrgBudgetBreaker.js';
 import { IngestTransportBreaker } from './pipeline/ingest-decisions/accounting/IngestTransportBreaker.js';
@@ -486,6 +487,7 @@ const ingestDecisions: IngestDecisionOptions = {
   },
   modeOf: jevSiteMode,
 };
+const factEmbedUsage = new FactEmbedDayCounts({ logger });
 
 function activePolicyBackendFor(
   tenantId: string,
@@ -565,6 +567,7 @@ const tenantFactory = new TenantContextFactory({
   claudeRoutes,
   ...(embeddingProvider === undefined ? {} : { embeddingProvider }),
   ...(decisionModel === undefined ? {} : { decisionModel, ingestDecisions }),
+  factEmbedUsage,
   onIndexUnreadable: () => bootStatus.recordAlarm(HNSW_INDEX_UNREADABLE_CODE),
   ...(devKmsStub
     ? devMasterKeySealers(process.env['NODE_ENV'] ?? '', process.env['DATA_KEK'])
