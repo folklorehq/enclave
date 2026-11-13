@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type { KmsKeyringNode } from '@aws-crypto/client-node';
-import type { ShadowArm, WikiCommentField } from '@folklore/contracts';
+import {
+  SEALED_TITLE_KINDS,
+  type SealedTitleKind,
+  type ShadowArm,
+  type WikiCommentField,
+} from '@folklore/contracts';
 import { isLowercaseRfcUuid } from '@folklore/utils';
 import {
   sealedContentEnvelopeV1Schema,
@@ -20,6 +25,7 @@ const COLLAB_SNAPSHOT_PURPOSE = 'collab-snapshot';
 const WIKI_COMMENT_PURPOSE = 'wiki-comment';
 const WIKI_FEEDBACK_PURPOSE = 'wiki-feedback';
 const ASK_TURN_PURPOSE = 'ask-turn';
+const SEALED_TITLE_PURPOSE = 'sealed-title';
 const AGENT_RUN_AUDIT_PURPOSE = 'agent-run-audit';
 const LLM_CACHE_PURPOSE = 'llm-cache';
 const BATCH_MANIFEST_PURPOSE = 'batch-manifest';
@@ -65,6 +71,14 @@ export interface AskTurnRef {
   chatId: string;
   ownerUserId: string;
   subject: string;
+}
+
+// A typed title is sealed to (org, kind, subject, row), so a ciphertext copied to another row or subject fails to decrypt.
+export interface SealedTitleRef {
+  orgId: string;
+  kind: SealedTitleKind;
+  subjectId: string;
+  rowId: string;
 }
 
 // An agent run's evidence ids are sealed to (org, run, user), so a row moved to another run or person fails to decrypt.
@@ -511,6 +525,17 @@ export class EnclaveCrypto {
     return this.open(ciphertext, ASK_TURN_PURPOSE, this.askTurnIdentity(expected));
   }
 
+  async encryptSealedTitle(plaintext: Buffer, ref: SealedTitleRef): Promise<Buffer> {
+    return this.seal(plaintext, {
+      ...this.sealedTitleIdentity(ref),
+      purpose: SEALED_TITLE_PURPOSE,
+    });
+  }
+
+  async decryptSealedTitle(ciphertext: Buffer, expected: SealedTitleRef): Promise<Buffer> {
+    return this.open(ciphertext, SEALED_TITLE_PURPOSE, this.sealedTitleIdentity(expected));
+  }
+
   async encryptAgentRunAudit(plaintext: Buffer, ref: AgentRunAuditRef): Promise<Buffer> {
     return this.seal(plaintext, {
       ...this.agentRunAuditIdentity(ref),
@@ -777,6 +802,13 @@ export class EnclaveCrypto {
       ownerUserId: ref.ownerUserId,
       subject: ref.subject,
     };
+  }
+
+  private sealedTitleIdentity(ref: SealedTitleRef): Record<string, string> {
+    const idsValid = [ref.orgId, ref.subjectId, ref.rowId].every(isLowercaseRfcUuid);
+    if (!idsValid || !SEALED_TITLE_KINDS.includes(ref.kind))
+      throw new Error('sealed_title_ref_invalid');
+    return { orgId: ref.orgId, kind: ref.kind, subjectId: ref.subjectId, rowId: ref.rowId };
   }
 
   private agentRunAuditIdentity(ref: AgentRunAuditRef): Record<string, string> {
