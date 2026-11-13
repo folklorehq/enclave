@@ -21,6 +21,7 @@ import {
 import { InternalError, isAppError } from '@folklore/errors';
 import { isSensitivityWithin } from '@folklore/wiki';
 import { feedLineOf } from './feed-line.js';
+import { sealedFactContent, type SealedFactContent } from './sealed-fact-content.js';
 import type { EnclaveCrypto } from '../crypto/esdk.js';
 import { embedText } from '../inference/phala.js';
 import type { TenantContext } from '../tenant/tenant-context.js';
@@ -47,6 +48,8 @@ export interface GatedFact {
   meta: FactMetadata;
   distance: number;
   body: string;
+  /** The record's structured title (sealedFactContent); gated again by the caller. */
+  title: string | null;
 }
 
 export interface LensRetrieval {
@@ -303,9 +306,9 @@ export class EnclaveFactRetriever implements FactRetriever, FactExcerptReader {
       const meta = metaById.get(hit.factId);
       if (!meta) continue;
       if (!this.isVisible(meta, access)) continue;
-      const body = await this.decryptBody(tenant.crypto, orgId, meta, bodyLimit);
-      if (body === null) continue;
-      results.push({ meta, distance: hit.distance, body });
+      const content = await this.decryptContent(tenant.crypto, orgId, meta, bodyLimit);
+      if (content === null) continue;
+      results.push({ meta, distance: hit.distance, ...content });
     }
     return results;
   }
@@ -354,12 +357,19 @@ export class EnclaveFactRetriever implements FactRetriever, FactExcerptReader {
     meta: FactMetadata,
     bodyLimit: number,
   ): Promise<string | null> {
-    if (!meta.bodyS3Key) return '';
-    const fact = await this.decryptRecord(crypto, orgId, meta);
-    if (fact === null) return null;
-    const content = fact['content'] as Record<string, unknown> | undefined;
-    const body = (content?.['body'] as string | undefined) ?? '';
-    return body.slice(0, bodyLimit);
+    const content = await this.decryptContent(crypto, orgId, meta, bodyLimit);
+    return content === null ? null : content.body;
+  }
+
+  private async decryptContent(
+    crypto: EnclaveCrypto,
+    orgId: string,
+    meta: FactMetadata,
+    bodyLimit: number,
+  ): Promise<SealedFactContent | null> {
+    if (!meta.bodyS3Key) return { body: '', title: null };
+    const content = sealedFactContent(await this.decryptRecord(crypto, orgId, meta));
+    return content === null ? null : { ...content, body: content.body.slice(0, bodyLimit) };
   }
 
   // The sealed record, opened under the fact's own context; any failure (or an owner-bound envelope) yields null.
