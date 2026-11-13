@@ -1547,9 +1547,13 @@ try {
         retriever: buildRetriever(agentRetrieverDeps(deps.loadFactMetadata)),
         listThemes: deps.listThemes,
         readPage: deps.readPage,
-        generate: (orgId, prompt, systemPrompt) =>
-          meter.generate(orgId, () =>
-            answerInference.get(orgId).generate(prompt, systemPrompt, undefined, () => false),
+        generate: (principal, prompt, systemPrompt) =>
+          meter.generate(
+            { orgId: principal.orgId, userId: principal.userId, surface: 'agent' },
+            () =>
+              answerInference
+                .get(principal.orgId)
+                .generate(prompt, systemPrompt, undefined, () => false),
           ),
       });
     },
@@ -1565,9 +1569,11 @@ try {
       const meter = askUsageMeter(usage);
       return new EnclaveFactAnswerer(
         buildRetriever(retrieverDeps),
-        (orgId, prompt, systemPrompt, shouldCache) =>
-          meter.generate(orgId, () =>
-            answerInference.get(orgId).generate(prompt, systemPrompt, undefined, shouldCache),
+        (caller, prompt, systemPrompt, shouldCache) =>
+          meter.generate({ orgId: caller.orgId, userId: caller.userId, surface: 'ask' }, () =>
+            answerInference
+              .get(caller.orgId)
+              .generate(prompt, systemPrompt, undefined, shouldCache),
           ),
       );
     },
@@ -1575,18 +1581,24 @@ try {
       const meter = askUsageMeter(usage);
       return new EnclaveFactAnswerer(
         buildRetriever(retrieverDeps),
-        (orgId, prompt, systemPrompt, shouldCache) =>
-          meter.generate(orgId, () =>
-            answerInference.get(orgId).generate(prompt, systemPrompt, undefined, shouldCache),
+        (caller, prompt, systemPrompt, shouldCache) =>
+          meter.generate({ orgId: caller.orgId, userId: caller.userId, surface: 'ask' }, () =>
+            answerInference
+              .get(caller.orgId)
+              .generate(prompt, systemPrompt, undefined, shouldCache),
           ),
-        (orgId, request) =>
-          meter.stream(orgId, () => streamOrBuffer(answerInference.get(orgId), request)),
+        (caller, request) =>
+          meter.stream({ orgId: caller.orgId, userId: caller.userId, surface: 'ask' }, () =>
+            streamOrBuffer(answerInference.get(caller.orgId), request),
+          ),
       );
     },
     pageRewriterFactory: (usage) => {
       const meter = askUsageMeter(usage);
       return new EnclavePageRewriter((orgId, request) =>
-        meter.stream(orgId, () => streamOrBuffer(rewriteInference.get(orgId), request)),
+        meter.stream({ orgId, scope: 'org_only' }, () =>
+          streamOrBuffer(rewriteInference.get(orgId), request),
+        ),
       );
     },
     // synthesized wiki text is ciphertext at rest; the read path decrypts audience-visible

@@ -1,5 +1,5 @@
 import type { TokenUsage } from '@folklore/contracts/enclave';
-import type { AskUsageSinkPort } from '@folklore/api';
+import type { AskUsageAttribution, AskUsageSinkPort } from '@folklore/api';
 import { contentFreeErrorType, type Logger } from '@folklore/core';
 import { tokenUsageScope, type MeasuredRun } from './TokenUsageScope.js';
 
@@ -25,7 +25,7 @@ interface OpenedStream {
 export class AskUsageMeter {
   constructor(private readonly deps: AskUsageMeterDeps) {}
 
-  async generate(orgId: string, run: () => Promise<string>): Promise<string> {
+  async generate(subject: AskUsageAttribution, run: () => Promise<string>): Promise<string> {
     let partial: TokenUsage[] = [];
     let measured: MeasuredRun<string>;
     try {
@@ -33,17 +33,17 @@ export class AskUsageMeter {
         partial = usage;
       });
     } catch (error) {
-      await this.record(orgId, partial);
+      await this.record(subject, partial);
       throw error;
     }
-    await this.record(orgId, measured.usage);
+    await this.record(subject, measured.usage);
     return measured.result;
   }
 
   // The provider call's usage events fire in the async context where `open` runs, so the scope must be open there, not per read.
-  stream(orgId: string, open: () => AsyncIterable<string>): AsyncIterable<string> {
+  stream(subject: AskUsageAttribution, open: () => AsyncIterable<string>): AsyncIterable<string> {
     const opened = this.openMetered(open);
-    return this.relay(orgId, opened);
+    return this.relay(subject, opened);
   }
 
   private openMetered(open: () => AsyncIterable<string>): OpenedStream {
@@ -62,14 +62,14 @@ export class AskUsageMeter {
     return { source, peek: () => peek() };
   }
 
-  private async *relay(orgId: string, opened: OpenedStream): AsyncGenerator<string> {
+  private async *relay(subject: AskUsageAttribution, opened: OpenedStream): AsyncGenerator<string> {
     let source: SettlingStream | undefined;
     try {
       source = await opened.source;
       yield* source;
     } finally {
       await this.awaitSettled(source);
-      await this.record(orgId, opened.peek());
+      await this.record(subject, opened.peek());
     }
   }
 
@@ -87,13 +87,13 @@ export class AskUsageMeter {
     }
   }
 
-  private async record(orgId: string, usage: readonly TokenUsage[]): Promise<void> {
+  private async record(subject: AskUsageAttribution, usage: readonly TokenUsage[]): Promise<void> {
     if (usage.length === 0) return;
     try {
-      await this.deps.sink.record(orgId, (this.deps.now ?? (() => new Date()))(), usage);
+      await this.deps.sink.record(subject, (this.deps.now ?? (() => new Date()))(), usage);
     } catch (error) {
       this.deps.logger.warn('ask_usage_record_failed', {
-        orgId,
+        orgId: subject.orgId,
         error_type: contentFreeErrorType(error),
       });
     }
