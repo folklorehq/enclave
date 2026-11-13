@@ -29,7 +29,7 @@ export class TitleIndex implements ResidentIndex {
     return new TitleIndex(onDispose);
   }
 
-  /** The highest seq read from Postgres, skipped rows included. */
+  /** The highest seq read from Postgres; skipped and unseen rows advance it too. */
   get watermark(): string {
     return this.highestSeq;
   }

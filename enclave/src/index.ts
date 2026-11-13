@@ -77,6 +77,11 @@ import { agentRetrieverDeps } from './workers/agent/agent-retriever-deps.js';
 import { EnclaveWikiContentDecryptor } from './wiki/EnclaveWikiContentDecryptor.js';
 import { EnclaveWikiEditSealer } from './wiki/EnclaveWikiEditSealer.js';
 import { EnclaveWikiPublicationSealer } from './wiki/EnclaveWikiPublicationSealer.js';
+import { IndexResidencyManager } from './hnsw/IndexResidencyManager.js';
+import { EnclaveTitleCatalog, TITLE_INDEX_RESIDENCY } from './titles/EnclaveTitleCatalog.js';
+import { EnclaveTitleDigester } from './titles/EnclaveTitleDigester.js';
+import { TitleEviction } from './titles/TitleEviction.js';
+import type { TitleIndex } from './titles/TitleIndex.js';
 import {
   EnclaveAgentRunAuditSealer,
   EnclaveAskTurnSealer,
@@ -581,7 +586,18 @@ const tenantRequests = new TenantRequestQuiescer();
 // the moment it drops it (§2.2 pt 5) - zeroize() only wipes the TenantContext's OWN handles, not a
 // separately-held S3LlmCache/EnclaveCrypto reference this map captured earlier.
 let synthesisConsumer: SynthesisConsumer | undefined;
+// One residency for every container this process builds, so a tenant's decrypted titles are held once and evicted once.
+const titleResidency = new IndexResidencyManager<TitleIndex>({
+  maxResident: TITLE_INDEX_RESIDENCY,
+  log: (event, fields) => logger.info(event, fields),
+});
+let titleCatalog: EnclaveTitleCatalog | undefined;
 let apiContainer: ApiContainer | undefined;
+const titleEviction = new TitleEviction({
+  catalog: () => titleCatalog,
+  residency: titleResidency,
+  graphCache: () => apiContainer,
+});
 const drainerRef: { current?: QueueSetDrainer } = {};
 let verifiedPoolManifest: VerifiedAssignmentManifest | undefined;
 let verifiedBootGenerationContext: BootBoundGenerationContext | undefined;
@@ -1518,7 +1534,11 @@ try {
   const answerInference = tenantInferenceMemo('interactive');
   const rewriteInference = tenantInferenceMemo('batch');
   evictTenantInference = async (tenantId) => {
-    await Promise.all([answerInference.evict(tenantId), rewriteInference.evict(tenantId)]);
+    await Promise.all([
+      answerInference.evict(tenantId),
+      rewriteInference.evict(tenantId),
+      titleEviction.evict(tenantId),
+    ]);
   };
   const askUsageLogger = logger.child({ component: 'ask_usage' });
   const askUsageMeter = (sink: AskUsageSinkPort) =>
@@ -1617,6 +1637,17 @@ try {
     wikiCommentSealer: new EnclaveWikiCommentSealer(resolveTenant),
     wikiFeedbackSealer: new EnclaveWikiFeedbackSealer(resolveTenant),
     askTurnSealer: new EnclaveAskTurnSealer(resolveTenant),
+    titleDigester: new EnclaveTitleDigester(resolveTenant),
+    titleCatalogFactory: (rows) => {
+      const catalog = new EnclaveTitleCatalog({
+        resolveTenant,
+        rows,
+        residency: titleResidency,
+        log: (event, fields) => logger.info(event, { ...fields }),
+      });
+      titleCatalog = catalog;
+      return catalog;
+    },
     agentRunAuditSealer: new EnclaveAgentRunAuditSealer(resolveTenant),
   };
   const signedRuntimeDatabase: RuntimeDatabaseConfig | undefined =
@@ -1999,6 +2030,11 @@ async function shutdown(): Promise<void> {
         reason: err instanceof Error ? err.message : String(err),
       }),
     );
+  await titleResidency.disposeAll().catch((err) =>
+    logger.error('shutdown: non-fatal', {
+      reason: err instanceof Error ? err.message : String(err),
+    }),
+  );
   await runtimeAttestation?.close().catch((err) =>
     logger.error('shutdown: non-fatal', {
       reason: err instanceof Error ? err.message : String(err),

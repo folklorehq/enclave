@@ -31,6 +31,19 @@ export interface TitleCatalogLogFields {
   errorCode?: string;
 }
 
+// Slots sized so every resident 10,000-title tenant fits in about 1% of the smallest enclave memory tier.
+export const TITLE_INDEX_RESIDENCY = 23;
+
+interface ReloadShape {
+  rowCount: number;
+  total: number;
+}
+
+interface ReloadBackoff {
+  windowMs: number;
+  replaced?: ReloadShape;
+}
+
 export interface EnclaveTitleCatalogDeps {
   resolveTenant: ResolveTenant;
   rows: SealedTitleRepositoryPort;
@@ -51,6 +64,7 @@ type Opened = TitleEntry | typeof SKIPPED | typeof UNSEEN;
 
 const FRESHNESS_MS = 5_000;
 const RELOAD_MIN_INTERVAL_MS = 60_000;
+const RELOAD_MAX_INTERVAL_MS = 15 * 60_000;
 const LOAD_BACKOFF_MS = 30_000;
 const LOAD_BACKOFF_CODE = 'title_index_load_backoff';
 const TITLE_UNSEAL_CONCURRENCY = 8;
@@ -65,7 +79,6 @@ const REPEATING_MESSAGE_CODES: ReadonlySet<string> = new Set([
 const ESDK_MALFORMED_MESSAGE =
   /^(Not a supported message format version|Incomplete Header|Invalid Signature|Malformed)/;
 
-// UNWIRED: no caller constructs it yet
 export class EnclaveTitleCatalog implements TitleCatalogPort {
   private readonly resolveTenant: ResolveTenant;
   private readonly rows: SealedTitleRepositoryPort;
@@ -75,6 +88,7 @@ export class EnclaveTitleCatalog implements TitleCatalogPort {
   private readonly installed = new Map<string, TitleIndex>();
   private readonly notes = new Map<string, TitleEntry[]>();
   private readonly reloadCarry = new Map<string, number>();
+  private readonly backoff = new Map<string, ReloadBackoff>();
   private readonly loadFailedAt = new Map<string, number>();
   private readonly retired = new WeakSet<TitleIndex>();
 
@@ -127,6 +141,15 @@ export class EnclaveTitleCatalog implements TitleCatalogPort {
     else this.notes.get(orgId)?.push(entry);
   }
 
+  // The residency evict defers disposing a pinned index, so the catalog drops its own state for the org at once.
+  forgetTenant(orgId: string): void {
+    this.installed.delete(orgId);
+    this.notes.delete(orgId);
+    this.reloadCarry.delete(orgId);
+    this.backoff.delete(orgId);
+    this.loadFailedAt.delete(orgId);
+  }
+
   private async read<R>(orgId: string, use: (index: TitleIndex) => R): Promise<R | undefined> {
     try {
       return await this.readWithReload(orgId, use, true);
@@ -160,13 +183,14 @@ export class EnclaveTitleCatalog implements TitleCatalogPort {
     const started = this.now();
     this.notes.set(orgId, this.notes.get(orgId) ?? []);
     try {
-      const { rows } = await this.rows.rowsAfter(orgId, ALL_ROWS_AFTER);
+      const { rows, total } = await this.rows.rowsAfter(orgId, ALL_ROWS_AFTER);
       const index: TitleIndex = TitleIndex.empty(() => this.forget(orgId, index));
       const unsealed = await this.unsealAll(orgId, rows);
       index.apply(unsealed.entries, unsealed.skippedSeqs, unsealed.unseenSeqs);
       index.checkedAt = this.now();
-      index.reloadedAt = this.reloadCarry.get(orgId) ?? Number.NEGATIVE_INFINITY;
+      index.reloadedAt = this.reloadCarry.get(orgId) ?? this.reloadFloor(orgId);
       this.reloadCarry.delete(orgId);
+      this.adjustBackoff(orgId, { rowCount: index.rowCount, total });
       this.loadFailedAt.delete(orgId);
       this.log('title_index_loaded', { rows: rows.length, ms: this.now() - started });
       return index;
@@ -175,6 +199,11 @@ export class EnclaveTitleCatalog implements TitleCatalogPort {
       this.loadFailedAt.set(orgId, this.now());
       throw error;
     }
+  }
+
+  // After an eviction a back-off entry still stands, so the fresh index must not reload at once.
+  private reloadFloor(orgId: string): number {
+    return this.backoff.has(orgId) ? this.now() : Number.NEGATIVE_INFINITY;
   }
 
   private refuseDuringBackoff(orgId: string): void {
@@ -229,11 +258,25 @@ export class EnclaveTitleCatalog implements TitleCatalogPort {
 
   private takeReloadSlot(orgId: string, index: TitleIndex, total: number): boolean {
     const at = this.now();
-    if (at - index.reloadedAt < RELOAD_MIN_INTERVAL_MS) return false;
+    const windowMs = this.backoff.get(orgId)?.windowMs ?? RELOAD_MIN_INTERVAL_MS;
+    if (at - index.reloadedAt < windowMs) return false;
     index.reloadedAt = at;
     this.reloadCarry.set(orgId, at);
+    this.backoff.set(orgId, { windowMs, replaced: { rowCount: index.rowCount, total } });
     this.log('title_index_reloaded_on_count_mismatch', { rows: total });
     return true;
+  }
+
+  // A reload that ends where the one it replaced did is stuck on a row that never opens, so the next one waits longer.
+  private adjustBackoff(orgId: string, loaded: ReloadShape): void {
+    const state = this.backoff.get(orgId);
+    if (!state?.replaced) return;
+    const stuck =
+      state.replaced.rowCount === loaded.rowCount && state.replaced.total === loaded.total;
+    const windowMs = stuck
+      ? Math.min(state.windowMs * 2, RELOAD_MAX_INTERVAL_MS)
+      : RELOAD_MIN_INTERVAL_MS;
+    this.backoff.set(orgId, { windowMs });
   }
 
   private async unsealAll(orgId: string, rows: readonly SealedTitleRow[]): Promise<Unsealed> {
