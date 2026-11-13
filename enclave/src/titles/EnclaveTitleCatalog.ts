@@ -91,6 +91,7 @@ export class EnclaveTitleCatalog implements TitleCatalogPort {
   private readonly backoff = new Map<string, ReloadBackoff>();
   private readonly loadFailedAt = new Map<string, number>();
   private readonly retired = new WeakSet<TitleIndex>();
+  private readonly catchUps = new Map<string, Promise<void>>();
 
   constructor(deps: EnclaveTitleCatalogDeps) {
     this.resolveTenant = deps.resolveTenant;
@@ -125,11 +126,13 @@ export class EnclaveTitleCatalog implements TitleCatalogPort {
     const tenant = this.resolveTenant(orgId);
     const hasher = this.macHasher(tenant);
     const binding = { ...ref, orgId };
+    let padded: Buffer | undefined;
     try {
-      const padded = padTitle(title, sealedTitleMac(hasher, binding));
+      padded = padTitle(title, sealedTitleMac(hasher, binding));
       const sealed = await tenant.crypto.encryptSealedTitle(padded, binding);
       return { id: ref.rowId, kind: ref.kind, subjectId: ref.subjectId, sealed };
     } finally {
+      padded?.fill(0);
       hasher.zeroize();
     }
   }
@@ -141,6 +144,15 @@ export class EnclaveTitleCatalog implements TitleCatalogPort {
     else this.notes.get(orgId)?.push(entry);
   }
 
+  // Concurrent misses share one read; it fetches only rows above the watermark, so it decrypts nothing a refresh would not, and a load in backoff stays refused.
+  catchUp(orgId: string): Promise<void> {
+    const inFlight = this.catchUps.get(orgId);
+    if (inFlight) return inFlight;
+    const run = this.refreshNow(orgId).finally(() => this.catchUps.delete(orgId));
+    this.catchUps.set(orgId, run);
+    return run;
+  }
+
   // The residency evict defers disposing a pinned index, so the catalog drops its own state for the org at once.
   forgetTenant(orgId: string): void {
     this.installed.delete(orgId);
@@ -148,6 +160,21 @@ export class EnclaveTitleCatalog implements TitleCatalogPort {
     this.reloadCarry.delete(orgId);
     this.backoff.delete(orgId);
     this.loadFailedAt.delete(orgId);
+  }
+
+  private async refreshNow(orgId: string): Promise<void> {
+    try {
+      await this.residency.withIndex(
+        orgId,
+        () => this.loadAll(orgId),
+        async (index) => {
+          this.install(orgId, index);
+          await this.refresh(orgId, index, true);
+        },
+      );
+    } catch (error) {
+      if (errorCodeOf(error) !== LOAD_BACKOFF_CODE) this.logLoadFailure(error);
+    }
   }
 
   private async read<R>(orgId: string, use: (index: TitleIndex) => R): Promise<R | undefined> {
@@ -238,10 +265,11 @@ export class EnclaveTitleCatalog implements TitleCatalogPort {
     this.loadFailedAt.delete(orgId);
   }
 
-  private async refresh(orgId: string, index: TitleIndex): Promise<boolean> {
+  // A forced refresh skips the freshness window, takes no reload slot and leaves checkedAt alone, so frequent catch-ups cannot starve the count-check reload that recovers unseen rows.
+  private async refresh(orgId: string, index: TitleIndex, force = false): Promise<boolean> {
     const started = this.now();
-    if (started - index.checkedAt < FRESHNESS_MS) return false;
-    index.checkedAt = started;
+    if (!force && started - index.checkedAt < FRESHNESS_MS) return false;
+    if (!force) index.checkedAt = started;
     try {
       const { rows, total } = await this.rows.rowsAfter(orgId, index.watermark);
       const unsealed = await this.unsealAll(orgId, rows);
@@ -249,7 +277,7 @@ export class EnclaveTitleCatalog implements TitleCatalogPort {
       if (rows.length > 0) {
         this.log('title_index_refreshed', { rows: rows.length, ms: this.now() - started });
       }
-      return index.rowCount !== total && this.takeReloadSlot(orgId, index, total);
+      return !force && index.rowCount !== total && this.takeReloadSlot(orgId, index, total);
     } catch (error) {
       this.logLoadFailure(error);
       return false;
