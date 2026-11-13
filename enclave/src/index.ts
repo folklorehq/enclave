@@ -127,6 +127,11 @@ import {
   TYPESAFE_DECISION_ROUTE_STATE,
 } from './inference/typesafe/typesafe-decision-route-state.js';
 import { jevSiteMode } from './inference/typesafe/jev-site-modes.js';
+import type { IngestDecisionOptions } from './pipeline/ingest-decisions/IngestDecider.js';
+import { IngestCallCeiling } from './pipeline/ingest-decisions/accounting/IngestCallCeiling.js';
+import { IngestDecisionCounts } from './pipeline/ingest-decisions/accounting/IngestDecisionCounts.js';
+import { IngestOrgBudgetBreaker } from './pipeline/ingest-decisions/accounting/IngestOrgBudgetBreaker.js';
+import { IngestTransportBreaker } from './pipeline/ingest-decisions/accounting/IngestTransportBreaker.js';
 import { JEV_QUESTION_SETS } from './workers/decisions/jev-question-sets.js';
 import { InferenceRouteResolver } from './inference/routing/InferenceRouteResolver.js';
 import { AwsRoutingParameterReader } from './inference/routing/AwsRoutingParameterReader.js';
@@ -472,6 +477,15 @@ if (TYPESAFE_DECISION_ROUTE_STATE.kind === 'invalid') {
   );
 }
 const decisionModel = sealDecisionModel(typesafeDecisionComposition.model());
+const ingestDecisions: IngestDecisionOptions = {
+  deps: {
+    transport: new IngestTransportBreaker({ logger }),
+    orgBudget: new IngestOrgBudgetBreaker({ logger }),
+    ceiling: new IngestCallCeiling({ logger }),
+    counts: new IngestDecisionCounts({ logger }),
+  },
+  modeOf: jevSiteMode,
+};
 
 function activePolicyBackendFor(
   tenantId: string,
@@ -550,7 +564,7 @@ const tenantFactory = new TenantContextFactory({
   activePolicyBackendFor,
   claudeRoutes,
   ...(embeddingProvider === undefined ? {} : { embeddingProvider }),
-  ...(decisionModel === undefined ? {} : { decisionModel }),
+  ...(decisionModel === undefined ? {} : { decisionModel, ingestDecisions }),
   onIndexUnreadable: () => bootStatus.recordAlarm(HNSW_INDEX_UNREADABLE_CODE),
   ...(devKmsStub
     ? devMasterKeySealers(process.env['NODE_ENV'] ?? '', process.env['DATA_KEK'])

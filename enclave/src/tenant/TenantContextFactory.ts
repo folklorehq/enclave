@@ -16,6 +16,7 @@ import { assertRecoveryConfigured, sealRecoveryMnemonic } from '../sealing/recov
 import { ACTIVE_EMBEDDING_SPACE } from '../inference/embedding-space.js';
 import { hnswNamespaceFor } from '../hnsw/embedding-namespace.js';
 import { HnswStore } from '../hnsw/index.js';
+import type { IngestDecisionOptions } from '../pipeline/ingest-decisions/IngestDecider.js';
 import { Pipeline } from '../pipeline/index.js';
 import {
   EnclaveCrypto,
@@ -105,6 +106,7 @@ export interface TenantContextFactoryDeps {
   claudeRoutes?: InferenceRouteResolver;
   embeddingProvider?: EmbeddingProvider;
   decisionModel?: SealedDecisionModel;
+  ingestDecisions?: IngestDecisionOptions;
   onIndexUnreadable?: () => void;
 }
 
@@ -174,6 +176,9 @@ export class TenantContextFactory {
           entityKey: () => context.current?.entityKey() ?? null,
           emitAuthors: this.deps.emitAuthors === true,
           resourceScope,
+          ...(this.deps.ingestDecisions === undefined
+            ? {}
+            : { ingestDecisions: this.deps.ingestDecisions }),
         },
       );
       const tenantContext = new TenantContext(
