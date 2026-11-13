@@ -7,11 +7,8 @@ import {
   openaiTransportFailureOf,
 } from '../../egress/openai-transport-failure.js';
 import { OpenAIEmbedRouteError } from './openai-embed-errors.js';
-import {
-  OPENAI_ERROR_BODY_MAX_BYTES,
-  discardBody,
-  readBoundedText,
-} from './openai-response-body.js';
+import { discardBody, readBoundedText } from '../bounded-response-body.js';
+import { OPENAI_ERROR_BODY_MAX_BYTES } from './openai-response-body.js';
 
 const HTTP_BAD_REQUEST = 400;
 const HTTP_UNAUTHORIZED = 401;

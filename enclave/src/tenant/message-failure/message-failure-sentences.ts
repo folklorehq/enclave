@@ -36,6 +36,7 @@ export const MESSAGE_SENTENCE_REASONS: ReadonlyMap<string, string> = new Map([
   ['f89ab71a13a2c5d1', 'current_authority_pointer_invalid'],
   ['dd19d19fc9162c09', 'current_authority_pointer_version_unsupported'],
   ['56aa0b1e1b9ecc4a', 'cypher_limit_must_be_materialized'],
+  ['b62964f9101dad68', 'decision_context_tenant_mismatch'],
   ['7735e4f9ba928c7d', 'dstack_public_executable_invalid'],
   ['b8b1adf26f73c97b', 'dstack_public_pins_invalid'],
   ['a4cd9c7ae29242b2', 'dstack_public_timeout_invalid'],

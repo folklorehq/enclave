@@ -7,7 +7,8 @@ import type { OpenAIEmbedRouteIdentity } from './openai-embed-route-config.js';
 import { OPENAI_EMBED_DIMENSIONS, OPENAI_EMBED_MODEL } from './openai-embed-route-state.js';
 import { mapOpenAIStatus, mapOpenAITransportError } from './openai-error-map.js';
 import { OPENAI_EMBED_MAX_INPUT_BYTES, clipUtf8 } from './openai-input-clip.js';
-import { OPENAI_SUCCESS_BODY_MAX_BYTES, readBoundedText } from './openai-response-body.js';
+import { readBoundedText } from '../bounded-response-body.js';
+import { OPENAI_SUCCESS_BODY_MAX_BYTES } from './openai-response-body.js';
 import { openaiIdentityMismatch, type OpenAICredentialSource } from './OpenAICredentialSource.js';
 
 export const OPENAI_EMBED_REQUEST_TIMEOUT_MS = SHORT_OPERATION_LIMITS.requestTimeoutMs;

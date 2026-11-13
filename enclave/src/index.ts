@@ -120,6 +120,14 @@ import {
   OPENAI_EMBED_ROUTE_STATE,
 } from './inference/openai/openai-embed-route-state.js';
 import { openaiCredentialLoadErrors } from './inference/openai/OpenAICredentialSource.js';
+import { typesafeCredentialLoadErrors } from './inference/typesafe/TypeSafeCredentialSource.js';
+import { TypeSafeDecisionComposition } from './inference/typesafe/TypeSafeDecisionComposition.js';
+import {
+  TYPESAFE_DECISION_ROUTE_INVALID_ALARM,
+  TYPESAFE_DECISION_ROUTE_STATE,
+} from './inference/typesafe/typesafe-decision-route-state.js';
+import { jevSiteMode } from './inference/typesafe/jev-site-modes.js';
+import { JEV_QUESTION_SETS } from './workers/decisions/jev-question-sets.js';
 import { InferenceRouteResolver } from './inference/routing/InferenceRouteResolver.js';
 import { AwsRoutingParameterReader } from './inference/routing/AwsRoutingParameterReader.js';
 import { RoutingTableRefresher } from './inference/routing/RoutingTableRefresher.js';
@@ -127,7 +135,7 @@ import { RoutingTableVerifier } from './inference/routing/RoutingTableVerifier.j
 import { routingParameterArn } from './inference/routing/routing-parameter-arn.js';
 import { ProviderRouteRegistry } from './inference/routing/ProviderRouteRegistry.js';
 import { claudeCredentialLoadErrors } from './inference/claude/ClaudeCredentialSource.js';
-import { poolPolicyPortsFrom } from './inference/tenant-inference-builders.js';
+import { poolPolicyPortsFrom, sealDecisionModel } from './inference/tenant-inference-builders.js';
 import { TenantPolicyWiring } from './tenant/TenantPolicyWiring.js';
 import { createTenantAdmission } from './tenant/admission/tenant-admission.js';
 import { createOperationTrustedTime } from './inference/OperationTrustedTime.js';
@@ -445,6 +453,26 @@ if (OPENAI_EMBED_ROUTE_STATE.kind === 'invalid') {
 assertEmbeddingSpaceDeployable({ sharedPool: isSharedPool, space: ACTIVE_EMBEDDING_SPACE });
 const embeddingProvider = openaiEmbedComposition.provider();
 
+const typesafeDecisionComposition = new TypeSafeDecisionComposition({
+  state: TYPESAFE_DECISION_ROUTE_STATE,
+  questionSets: JEV_QUESTION_SETS,
+  reader: () =>
+    new AttestedSsmParameterReader(
+      new AwsBootManifestSsmParameters(ssm),
+      attestedRecipientDecryptor,
+      typesafeCredentialLoadErrors,
+    ),
+  manifest: () => verifiedBootManifest,
+  onAlarm: (code: string) => bootStatus.recordAlarm(code),
+  usageSink: recordTokenUsage,
+});
+if (TYPESAFE_DECISION_ROUTE_STATE.kind === 'invalid') {
+  bootStatus.recordAlarm(
+    `${TYPESAFE_DECISION_ROUTE_INVALID_ALARM}_${TYPESAFE_DECISION_ROUTE_STATE.reason}`,
+  );
+}
+const decisionModel = sealDecisionModel(typesafeDecisionComposition.model());
+
 function activePolicyBackendFor(
   tenantId: string,
   latencyProfile: InferenceLatencyProfile = 'batch',
@@ -522,6 +550,7 @@ const tenantFactory = new TenantContextFactory({
   activePolicyBackendFor,
   claudeRoutes,
   ...(embeddingProvider === undefined ? {} : { embeddingProvider }),
+  ...(decisionModel === undefined ? {} : { decisionModel }),
   onIndexUnreadable: () => bootStatus.recordAlarm(HNSW_INDEX_UNREADABLE_CODE),
   ...(devKmsStub
     ? devMasterKeySealers(process.env['NODE_ENV'] ?? '', process.env['DATA_KEK'])
@@ -1791,6 +1820,8 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
     claudeRoutes,
     ...batchSynthesisDeps(),
     ...(embeddingProvider === undefined ? {} : { embeddingProvider }),
+    ...(decisionModel === undefined ? {} : { decisionModel }),
+    decisionModes: jevSiteMode,
     providerRoutes,
     upstreamPaused: (upstream) => (upstreamGate?.pauseRemainingMs(upstream) ?? 0) > 0,
     enforceTenantPolicy: isSharedPool,

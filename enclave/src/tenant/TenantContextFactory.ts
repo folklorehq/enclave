@@ -37,6 +37,7 @@ import {
   dedicatedCachedInference,
   poolPolicyBoundInference,
   poolPolicyPortsFrom,
+  type SealedDecisionModel,
 } from '../inference/tenant-inference-builders.js';
 import type { InferenceRouteResolver } from '../inference/routing/InferenceRouteResolver.js';
 import type { EmbeddingProvider } from '../inference/openai/OpenAIEmbedRouteComposition.js';
@@ -103,6 +104,7 @@ export interface TenantContextFactoryDeps {
   ) => TenantPolicyVerifiedBindingBackendFactory | undefined;
   claudeRoutes?: InferenceRouteResolver;
   embeddingProvider?: EmbeddingProvider;
+  decisionModel?: SealedDecisionModel;
   onIndexUnreadable?: () => void;
 }
 

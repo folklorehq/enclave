@@ -69,6 +69,7 @@ export interface MeasuredRun<T> {
 /** Per-run token and timing accounting for a process-wide inference backend: the sink resolves the caller's run through async context, so concurrent runs never pool their spend. */
 export class TokenUsageScope {
   private readonly runs = new AsyncLocalStorage<UsageRun>();
+  private readonly shadowUsage = new AsyncLocalStorage<true>();
 
   constructor(private readonly now: () => number = () => performance.now()) {}
 
@@ -122,7 +123,7 @@ export class TokenUsageScope {
     const current = this.runs.getStore();
     if (!current) return;
     const label = this.usageLabel();
-    const total = this.totalFor(current, this.safeModel(event.model), event.operation, {
+    const total = this.totalFor(current, safeUsageModel(event.model), event.operation, {
       purpose: event.purpose ?? label.purpose,
       outcome: event.outcome ?? label.outcome,
     });
@@ -146,8 +147,13 @@ export class TokenUsageScope {
     const context = inferencePurposeScope.current();
     return {
       purpose: context?.purpose ?? UNTAGGED,
-      outcome: this.inShadowArm() ? SHADOW : OK,
+      outcome: this.inShadow() ? SHADOW : OK,
     };
+  }
+
+  /** Runs today's path as a measurement: its usage reads `shadow` and it adds no timeline spans, with its route unchanged. */
+  asShadowUsage<T>(work: () => Promise<T>): Promise<T> {
+    return this.shadowUsage.run(true, work);
   }
 
   /** Times one step of a provider call into the active run; outside a run the step runs untimed. */
@@ -157,7 +163,7 @@ export class TokenUsageScope {
     step: () => Promise<T>,
   ): Promise<T> {
     const current = this.runs.getStore();
-    if (!current) return step();
+    if (!current || this.inShadowUsage()) return step();
     const startedAtMs = this.now();
     try {
       const value = await step();
@@ -171,8 +177,16 @@ export class TokenUsageScope {
 
   // A shadow arm's stages would read as the message's own on the timeline the worker alarms from.
   async stage<T>(phase: InferenceSpanPhase, step: () => Promise<T>): Promise<T> {
-    if (this.inShadowArm()) return step();
+    if (this.inShadow()) return step();
     return this.time(phase, {}, step);
+  }
+
+  private inShadow(): boolean {
+    return this.inShadowUsage() || this.inShadowArm();
+  }
+
+  private inShadowUsage(): boolean {
+    return this.shadowUsage.getStore() === true;
   }
 
   private inShadowArm(): boolean {
@@ -190,7 +204,7 @@ export class TokenUsageScope {
   ): void {
     try {
       const endedAtMs = this.now();
-      const model = label.model === undefined ? undefined : this.safeModel(label.model);
+      const model = label.model === undefined ? undefined : safeUsageModel(label.model);
       const durationMs = current.timeline.add({
         phase,
         ...(model !== undefined ? { model } : {}),
@@ -277,14 +291,15 @@ export class TokenUsageScope {
       total.timing ? { ...total, timing: { ...total.timing } } : { ...total },
     );
   }
+}
 
-  private safeModel(model: string): string {
-    const conforms =
-      model.length > 0 &&
-      model.length <= TOKEN_USAGE_MODEL_MAX_LENGTH &&
-      TOKEN_USAGE_MODEL_PATTERN.test(model);
-    return conforms ? model : UNKNOWN_MODEL;
-  }
+/** A model id the wire accepts, or the fixed `unknown` label. */
+export function safeUsageModel(model: string): string {
+  const conforms =
+    model.length > 0 &&
+    model.length <= TOKEN_USAGE_MODEL_MAX_LENGTH &&
+    TOKEN_USAGE_MODEL_PATTERN.test(model);
+  return conforms ? model : UNKNOWN_MODEL;
 }
 
 // One scope per process: the phala backend is a module singleton, so its sink cannot be handed a

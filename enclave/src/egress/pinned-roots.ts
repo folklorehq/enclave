@@ -1,6 +1,8 @@
 import { X509Certificate, createHash } from 'node:crypto';
 import { rootCertificates } from 'node:tls';
 
+export const MAX_PINNED_ROOTS = 40;
+
 export function spkiSha256Of(pem: string): string {
   const certificate = new X509Certificate(pem);
   return createHash('sha256')
@@ -21,7 +23,12 @@ export function selectPinnedRootPems(
     if (selected.has(spki)) throw new Error(mismatchCode);
     selected.set(spki, pem);
   }
-  if (spkis.length === 0 || selected.size !== wanted.size || wanted.size !== spkis.length) {
+  if (
+    spkis.length === 0 ||
+    spkis.length > MAX_PINNED_ROOTS ||
+    selected.size !== wanted.size ||
+    wanted.size !== spkis.length
+  ) {
     throw new Error(mismatchCode);
   }
   return [...selected.values()];

@@ -36,6 +36,7 @@ import {
   inferencePurposeScope,
   type InferencePurposeContext,
 } from '../InferencePurposeScope.js';
+import { TYPESAFE_PROVIDER } from '../typesafe/typesafe-decision-route-config.js';
 import { PROVIDER_ROUTE_POLICY } from './provider-route-policy.js';
 import { routingSnapshotScope, type RoutingSnapshot } from './routing-snapshot-scope.js';
 import type { RoutingTableSource } from './RoutingTableRefresher.js';
@@ -61,6 +62,7 @@ const ARM_IDS: readonly string[] = ['B', 'R'];
 const PHALA_PROVIDER = 'phala';
 const OPENAI_PROVIDER = 'openai';
 const OPENAI_NOT_ROUTABLE_RULE = 'openai_not_routable';
+const TYPESAFE_NOT_ROUTABLE_RULE = 'typesafe_not_routable';
 const ROUTE_FALLBACK_ALARM = 'inference_route_fallback';
 const VALIDATION_ISSUED_AT_MS = 1_000_000;
 const MS_PER_SECOND = 1000;
@@ -319,6 +321,9 @@ export class InferenceRouteResolver {
     if (target.provider === PHALA_PROVIDER) return ACI_ROUTE;
     if (target.provider === OPENAI_PROVIDER)
       throw new ClaudeRouteConfigError(OPENAI_NOT_ROUTABLE_RULE);
+    if (target.provider === TYPESAFE_PROVIDER) {
+      throw new ClaudeRouteConfigError(TYPESAFE_NOT_ROUTABLE_RULE);
+    }
     return {
       kind: 'provider',
       provider: target.provider,

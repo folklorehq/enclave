@@ -1,6 +1,11 @@
 import type { GenerationContextV1 } from '@folklore/contracts';
 import type {
+  DecideOptions,
+  DecisionModel,
+  DecisionRequest,
+  DecisionResult,
   InferenceModelRole,
+  TenantDecisionPort,
   TrustedTimeAuthorityPort,
   TrustedTimeReadContext,
   TrustedTimeSample,
@@ -43,6 +48,7 @@ import {
 import { OPENAI_TRANSIENT_STATUSES, OpenAIEmbedRouteError } from './openai/openai-embed-errors.js';
 import { OPENAI_EMBED_DIMENSIONS, OPENAI_EMBED_MODEL } from './openai/openai-embed-route-state.js';
 import { ACTIVE_EMBEDDING_SPACE_IS_LEGACY } from './embedding-space.js';
+import { UNSCOPED_MESSAGE, upstreamCallScope } from './UpstreamCallScope.js';
 import type { SynthesisInference } from './CachedInference.js';
 import { ChunkQueue, ChunkQueueError } from './ChunkQueue.js';
 import {
@@ -92,6 +98,7 @@ const HIGH_WATER_TRANSPORT_UNAVAILABLE = 'high_water_transport_unavailable';
 const STREAM_EMPTY_CODE = 'stream_empty';
 const STREAM_FAILED_CODE = 'stream_failed';
 export const RUNTIME_EVIDENCE_BACKEND_UNAVAILABLE = 'runtime_evidence_backend_unavailable';
+export const TYPESAFE_DECISION_UPSTREAM = 'typesafe/jev';
 
 export type TenantPolicySnapshotProvider = () => VerifiedActivePolicySnapshotV1 | undefined;
 
@@ -165,6 +172,7 @@ export interface TenantPolicyBoundInferenceOptions {
   readonly logger?: Logger;
   readonly routeResolver?: InferenceRouteResolver;
   readonly embeddingProvider?: EmbeddingProvider;
+  readonly decisionModel?: DecisionModel;
   readonly structured?: (prompt: string, tool: ToolSpec, systemPrompt?: string) => Promise<unknown>;
   readonly onVerifiedBinding?: (
     binding: VerifiedActivePolicyRoleBindingV1,
@@ -217,6 +225,43 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
   async embed(text: string): Promise<number[]> {
     batchRunScope.assertMaySpend();
     return this.underRole('embed', () => this.embedUnderPolicy(text));
+  }
+
+  decisionPort(): TenantDecisionPort | undefined {
+    const model = this.options.decisionModel;
+    if (model === undefined) return undefined;
+    return Object.freeze({
+      orgId: this.tenantId,
+      model: model.model,
+      decide: (request: DecisionRequest, options?: DecideOptions) =>
+        this.decideAdmitted(model, request, options),
+    });
+  }
+
+  private async decideAdmitted(
+    model: DecisionModel,
+    request: DecisionRequest,
+    options?: DecideOptions,
+  ): Promise<DecisionResult> {
+    options?.signal?.throwIfAborted();
+    const admit = () =>
+      this.admittedDecision(model, async () => {
+        options?.signal?.throwIfAborted();
+        await this.timedDecision('bind', model, () => this.bindUnderPolicy('judge'));
+        options?.signal?.throwIfAborted();
+        return model.decide(this.tenantId, request, options);
+      });
+    return options?.signal === undefined ? admit() : this.underSignal(options.signal, admit);
+  }
+
+  // The host gate drops a queued waiter only on its scope's signal, so the call's own signal joins that scope.
+  private underSignal<T>(signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
+    const parent = upstreamCallScope.current();
+    const joined = parent?.signal === undefined ? signal : AbortSignal.any([parent.signal, signal]);
+    return upstreamCallScope.run(
+      { ...(parent ?? { message: UNSCOPED_MESSAGE }), signal: joined },
+      operation,
+    );
   }
 
   async generate(
@@ -291,6 +336,35 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
       upstream: this.upstreamOf(role, route),
       onWait: (wait) => this.timed('gate_wait', role, wait, route),
     });
+  }
+
+  // The decision route has its own upstream window, and a refusal names the judge role like any judge call.
+  private async admittedDecision<T>(model: DecisionModel, operation: () => Promise<T>): Promise<T> {
+    const gate = this.options.upstreamGate;
+    try {
+      if (!gate) return await operation();
+      return await gate.run(this.tenantId, operation, {
+        upstream: TYPESAFE_DECISION_UPSTREAM,
+        onWait: (wait) => this.timedDecision('gate_wait', model, wait),
+      });
+    } catch (error: unknown) {
+      tagInferenceRole(error, 'judge');
+      throw error;
+    }
+  }
+
+  // A decision's spans carry the decision model's label, so shadow volume never skews the Claude judge's timings.
+  private timedDecision<T>(
+    phase: InferenceCallPhase,
+    model: DecisionModel,
+    step: () => Promise<T>,
+  ): Promise<T> {
+    const label: InferenceCallLabel = {
+      model: model.model,
+      role: 'judge',
+      operation: INFERENCE_OPERATION_BY_ROLE.judge,
+    };
+    return this.options.timer ? this.options.timer(phase, label, step) : step();
   }
 
   // An unconfigured role has no model to key a window by; its refusal is the binding's to raise.

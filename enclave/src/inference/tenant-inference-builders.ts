@@ -11,11 +11,28 @@ import {
   type UpstreamCallGate,
 } from './TenantPolicyBoundInference.js';
 import { UnboundPoolInference } from './UnboundPoolInference.js';
+import type { DecisionModel } from '@folklore/inference';
 import type { EmbeddingProvider } from './openai/OpenAIEmbedRouteComposition.js';
 import type { InferenceRoute, InferenceRouteResolver } from './routing/InferenceRouteResolver.js';
 import { logger } from '../logger.js';
 import type { LlmOperationCache } from './vector-cache.js';
 import type { InferenceLatencyProfile } from './public-aci-operation-limits.js';
+
+/** A decision model no site can call: only poolPolicyBoundInference below can open it, so every call is admitted per tenant. */
+export interface SealedDecisionModel {
+  readonly kind: 'sealed_decision_model';
+}
+
+const sealedDecisionModels = new WeakMap<SealedDecisionModel, DecisionModel>();
+
+export function sealDecisionModel(
+  model: DecisionModel | undefined,
+): SealedDecisionModel | undefined {
+  if (model === undefined) return undefined;
+  const sealed: SealedDecisionModel = Object.freeze({ kind: 'sealed_decision_model' });
+  sealedDecisionModels.set(sealed, model);
+  return sealed;
+}
 
 export interface PoolPolicyPorts {
   freshnessFor(orgId: string): TenantPolicyFreshnessPort | undefined;
@@ -24,6 +41,7 @@ export interface PoolPolicyPorts {
   backendFor(orgId: string): TenantPolicyVerifiedBindingBackendFactory | undefined;
   readonly routeResolver?: InferenceRouteResolver;
   readonly embeddingProvider?: EmbeddingProvider;
+  readonly decisionModel?: SealedDecisionModel;
 }
 
 export interface ActivePolicyPortDeps {
@@ -39,6 +57,7 @@ export interface ActivePolicyPortDeps {
   ) => TenantPolicyVerifiedBindingBackendFactory | undefined;
   readonly claudeRoutes?: InferenceRouteResolver;
   readonly embeddingProvider?: EmbeddingProvider;
+  readonly decisionModel?: SealedDecisionModel;
 }
 
 /** Each port reads its dependency when asked; poolPolicyBoundInference asks once, at construction. */
@@ -50,7 +69,15 @@ export function poolPolicyPortsFrom(deps: ActivePolicyPortDeps): PoolPolicyPorts
     backendFor: (orgId) => deps.activePolicyBackendFor?.(orgId),
     ...(deps.claudeRoutes === undefined ? {} : { routeResolver: deps.claudeRoutes }),
     ...(deps.embeddingProvider === undefined ? {} : { embeddingProvider: deps.embeddingProvider }),
+    ...(deps.decisionModel === undefined ? {} : { decisionModel: deps.decisionModel }),
   };
+}
+
+function openedDecisionModel(
+  sealed: SealedDecisionModel | undefined,
+): { readonly decisionModel: DecisionModel } | Record<string, never> {
+  const model = sealed === undefined ? undefined : sealedDecisionModels.get(sealed);
+  return model === undefined ? {} : { decisionModel: model };
 }
 
 /** The one construction of a pool tenant's inference: every policy guard required, no live fallback. */
@@ -78,6 +105,7 @@ export function poolPolicyBoundInference(input: {
     ...(policy.embeddingProvider === undefined
       ? {}
       : { embeddingProvider: policy.embeddingProvider }),
+    ...openedDecisionModel(policy.decisionModel),
     ...(input.usageSink ? { usageSink: input.usageSink } : {}),
     ...(input.timer ? { timer: input.timer } : {}),
     ...(input.latencyProfile ? { latencyProfile: input.latencyProfile } : {}),
