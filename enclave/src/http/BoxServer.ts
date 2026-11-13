@@ -2,7 +2,7 @@ import { once } from 'node:events';
 import { Server, type IncomingMessage } from 'node:http';
 import { createConnection, Socket, type AddressInfo } from 'node:net';
 import type { Duplex } from 'node:stream';
-import { Hono, type MiddlewareHandler } from 'hono';
+import { Hono, type Context, type MiddlewareHandler } from 'hono';
 import { etag } from 'hono/etag';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
@@ -12,6 +12,7 @@ import {
   MAX_TCP_PORT,
   ROLL_SW_PATH,
 } from '@folklore/contracts';
+import { MCP_PROTECTED_RESOURCE_METADATA_PATH, MCP_RESOURCE_PATH } from '@folklore/utils';
 
 type FetchHandler = (req: Request) => Response | Promise<Response>;
 
@@ -41,6 +42,11 @@ const SHELL_CACHE = 'private, no-cache';
 const NO_STORE = 'no-store';
 const IMMUTABLE_CACHE = 'public, max-age=31536000, immutable';
 const HASHED_ASSET_PATH = '/assets/*';
+const API_FORWARD_PATHS = [
+  '/api/*',
+  MCP_RESOURCE_PATH,
+  MCP_PROTECTED_RESOURCE_METADATA_PATH,
+] as const;
 const BOX_DIST_ROOT = './dist/box';
 const ROLL_SW_FILE = `${BOX_DIST_ROOT}${ROLL_SW_PATH}`;
 const BOX_INDEX_FILE = `${BOX_DIST_ROOT}/index.html`;
@@ -108,14 +114,13 @@ export class BoxServer {
       this.app.all('/oauth-submission/*', (c) => c.json({ error: 'oauth_unavailable' }, 503));
     }
 
-    // every /api/* request runs in-process over content decrypted only inside this enclave. The
-    // handler is resolved per request so a shared pool can attach its first verified database after
-    // the static shell has already started.
-    this.app.use('/api/*', this.uncachedUnlessDeclared);
-    this.app.all('/api/*', (c) => {
-      const api = this.api;
-      return api ? api(c.req.raw) : c.json({ error: 'api_unavailable' }, 503);
-    });
+    // every forwarded request (/api/*, /mcp and its metadata) runs in-process over content decrypted
+    // only inside this enclave. The handler is resolved per request so a shared pool can attach its
+    // first verified database after the static shell has already started.
+    for (const path of API_FORWARD_PATHS) {
+      this.app.use(path, this.uncachedUnlessDeclared);
+      this.app.all(path, (c) => this.forwardToApi(c));
+    }
 
     // Revalidated on every load so a fixed or disabled worker reaches browsers on their next visit.
     this.app.get(
@@ -141,6 +146,11 @@ export class BoxServer {
     this.api = api;
     this.apiReady = true;
     this.collabPort = this.usableCollabPort(collabPort ?? COLLAB_DEFAULT_PORT);
+  }
+
+  private forwardToApi(c: Context): Response | Promise<Response> {
+    const api = this.api;
+    return api ? api(c.req.raw) : c.json({ error: 'api_unavailable' }, 503);
   }
 
   // Rebuilt rather than mutated: a handler may return a Response whose headers are immutable.

@@ -26,6 +26,7 @@ export interface TenantPeriodicRunnerDeps<TTenant extends PeriodicTenant, TOutco
   readonly events: TenantRunnerEvents;
   // Absent: every failed pass retries after the retry interval.
   readonly backoff?: { readonly maxMs: number };
+  readonly intervals?: { readonly refreshMs: number; readonly retryMs: number };
   readonly logger: Logger;
   readonly now?: () => number;
 }
@@ -156,15 +157,17 @@ export class TenantPeriodicRunner<TTenant extends PeriodicTenant, TOutcome exten
 
   // Only a thrown pass advances the exponential counter: a skip or an unsettled outcome is not a fault.
   private delayAfter(tenantId: string, result: PassResult): number {
+    const refreshMs = this.deps.intervals?.refreshMs ?? TENANT_RUNNER_REFRESH_MS;
+    const retryMs = this.deps.intervals?.retryMs ?? TENANT_RUNNER_RETRY_MS;
     if (result === 'settled') {
       this.failedPasses.delete(tenantId);
-      return TENANT_RUNNER_REFRESH_MS;
+      return refreshMs;
     }
-    if (result === 'retry') return TENANT_RUNNER_RETRY_MS;
+    if (result === 'retry') return retryMs;
     const passes = (this.failedPasses.get(tenantId) ?? 0) + 1;
     this.failedPasses.set(tenantId, passes);
     const { backoff } = this.deps;
-    if (!backoff) return TENANT_RUNNER_RETRY_MS;
-    return Math.min(TENANT_RUNNER_RETRY_MS * 2 ** (passes - 1), backoff.maxMs);
+    if (!backoff) return retryMs;
+    return Math.min(retryMs * 2 ** (passes - 1), backoff.maxMs);
   }
 }

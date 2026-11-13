@@ -75,6 +75,9 @@ import { EnclaveFactAnswerer } from './workers/EnclaveFactAnswerer.js';
 import { EnclavePageRewriter } from './workers/rewrite/EnclavePageRewriter.js';
 import { EnclaveAgentLoop } from './workers/agent/EnclaveAgentLoop.js';
 import { agentRetrieverDeps } from './workers/agent/agent-retriever-deps.js';
+import { AGENT_ACCESS_PROJECTION_TICK_MS } from './workers/agent/access/AgentAccessProjectionPass.js';
+import { buildAgentAccessProjectionRunner } from './workers/agent/access/build-agent-access-projection-runner.js';
+import { buildMcpCallTelemetry } from './workers/agent/access/build-mcp-call-telemetry.js';
 import { EnclaveWikiContentDecryptor } from './wiki/EnclaveWikiContentDecryptor.js';
 import { EnclaveWikiEditSealer } from './wiki/EnclaveWikiEditSealer.js';
 import { EnclaveWikiPublicationSealer } from './wiki/EnclaveWikiPublicationSealer.js';
@@ -1397,6 +1400,7 @@ assignmentWakeSubscriber?.start();
 const opsEventChannel = new RedisOpsEventChannel(haltCache.redis, DEPLOYMENT_ID);
 const opsTelemetry = new BufferedOpsTelemetryClient(opsEventChannel);
 setInferenceTelemetry(opsTelemetry);
+const mcpCalls = buildMcpCallTelemetry({ telemetry: opsTelemetry, logger });
 setVerifiedInferenceReceiptSink(async (sessionId) => {
   const context = currentInferenceReceiptContext();
   if (!context) return;
@@ -1562,6 +1566,7 @@ try {
     // traffic from anywhere, and a scanner hitting it must not be able to hold this host awake.
     onAuthenticatedRequest: () => activityMonitor.touch(),
     beginTenantRequest,
+    mcpCallRecorder: mcpCalls.recorder,
     isTenantAdmitted: createTenantAdmission({
       isHaltedNow: isTenantHaltedNow,
       isFenced: (tenantId) => tenantRequests.isFenced(tenantId),
@@ -1847,6 +1852,20 @@ const memberIdentityLinkRunner =
       })
     : undefined;
 memberIdentityLinkRunner?.start();
+const agentAccessProjectionRunner = buildAgentAccessProjectionRunner({
+  tenants: projectionTenants,
+  beginTenant: beginTenantRequest,
+  controlPlane:
+    isSharedPool && controlPlaneIdentity && controlPlaneFetch
+      ? { origin: controlPlaneIdentity.origin, fetch: controlPlaneFetch }
+      : undefined,
+  deploymentId: DEPLOYMENT_ID,
+  agentToken: () => process.env['AGENT_TOKEN'] ?? '',
+  applier: () => apiContainer?.mcpAccess,
+  recorder: mcpCalls.recorder,
+  logger,
+});
+agentAccessProjectionRunner?.start(AGENT_ACCESS_PROJECTION_TICK_MS);
 bootStatus.begin('workers_start');
 
 // UNWIRED: no brake-level source reaches the enclave yet, so a batch can be collected but never submitted.
@@ -2023,6 +2042,8 @@ async function shutdown(): Promise<void> {
     logger.warn('entitlement_projection_stop_timeout');
   if ((await memberIdentityLinkRunner?.stop(SHUTDOWN_QUIESCE_TIMEOUT_MS)) === false)
     logger.warn('member_identity_link_stop_timeout');
+  if ((await agentAccessProjectionRunner?.stop(SHUTDOWN_QUIESCE_TIMEOUT_MS)) === false)
+    logger.warn('agent_access_projection_stop_timeout');
   tenantRequestQuiescence.stop();
   // Quiesce synthesis (await the in-flight op) and shred its theme indices + LLM-cache RAM fronts
   // before the final save, so no synth runs concurrently with it (§2.2 pt 5).
@@ -2052,6 +2073,10 @@ async function shutdown(): Promise<void> {
       reason: err instanceof Error ? err.message : String(err),
     }),
   );
+  mcpCalls.reporter.stop();
+  await mcpCalls.reporter
+    .flush()
+    .catch(() => logger.error('shutdown: non-fatal', { errorCode: 'mcp_calls_flush_failed' }));
   if ((await drainerRef.current?.stop(SHUTDOWN_QUIESCE_TIMEOUT_MS)) === false)
     logger.warn('drainer_stop_timeout');
   await saveAllTenantIndices(registry.all(), s3, PROCESSED_OUTPUTS_BUCKET, logger);
