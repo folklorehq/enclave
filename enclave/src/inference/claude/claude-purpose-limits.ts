@@ -39,7 +39,8 @@ export const CLAUDE_PURPOSE_LIMITS: Readonly<Record<InferencePurpose, ClaudePurp
   team_onboarding: limit(8_192),
   wiki_review: limit(4_096),
   wiki_critique: limit(4_096),
-  citation_check: limit(1_024),
+  // The reply is small; the rest is thinking headroom for a batch of sentence and citation pairs.
+  citation_check: limit(2_048),
   theme_merge: limit(1_024),
   wiki_relevance: limit(512),
   wiki_recovery: limit(2_048),

@@ -1,4 +1,4 @@
-import type { InferenceEffort } from '@folklore/contracts';
+import { isInferenceReasoningJudgePurpose, type InferenceEffort } from '@folklore/contracts';
 import type { ToolSpec } from '@folklore/inference';
 import type { CachedSystemPrefix } from '../InferencePurposeScope.js';
 import { CLAUDE_CHECK_PURPOSES } from './claude-checker-rules.js';
@@ -88,7 +88,8 @@ function offThinking(route: AnthropicRoute): boolean {
   return (
     route.model === SONNET_MODEL &&
     !CLAUDE_WRITING_PURPOSES.has(route.purpose) &&
-    !CLAUDE_CHECK_PURPOSES.has(route.purpose)
+    !CLAUDE_CHECK_PURPOSES.has(route.purpose) &&
+    !isInferenceReasoningJudgePurpose(route.purpose)
   );
 }
 
