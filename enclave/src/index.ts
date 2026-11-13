@@ -64,6 +64,7 @@ import { BoxServer } from './http/BoxServer.js';
 import { HostHeadroomGauge } from './workers/HostHeadroomGauge.js';
 import { SynthesisConsumer, type SynthesisConsumerDeps } from './workers/SynthesisConsumer.js';
 import { ThemeSnapshotFactSource } from './workers/ThemeSnapshotFactSource.js';
+import { AnswerUsageDayCounts } from './inference/AnswerUsageDayCounts.js';
 import { AskUsageMeter } from './inference/AskUsageMeter.js';
 import { recordTokenUsage } from './inference/TokenUsageScope.js';
 import { fetchLinkPreview } from './preview/preview-client.js';
@@ -1541,8 +1542,9 @@ try {
     ]);
   };
   const askUsageLogger = logger.child({ component: 'ask_usage' });
+  const askUsageDays = new AnswerUsageDayCounts({ logger: askUsageLogger });
   const askUsageMeter = (sink: AskUsageSinkPort) =>
-    new AskUsageMeter({ sink, logger: askUsageLogger });
+    new AskUsageMeter({ sink, logger: askUsageLogger, days: askUsageDays });
   const codebaseSettingsPort = createCodebaseSettingsPort();
   const apiOptions: CreateContainerOptions = {
     // content-touching enclave opens no data-carrying egress — box-API telemetry inert by composition, not by omitting POSTHOG_API_KEY.

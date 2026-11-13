@@ -1,10 +1,13 @@
 import type { TokenUsage } from '@folklore/contracts/enclave';
 import type { AskUsageAttribution, AskUsageSinkPort } from '@folklore/api';
 import { contentFreeErrorType, type Logger } from '@folklore/core';
+import type { AnswerUsageDayCounts } from './AnswerUsageDayCounts.js';
 import { tokenUsageScope, type MeasuredRun } from './TokenUsageScope.js';
 
 // Same bound the Ask stream service gives a dropped stream to settle; past it the usage seen so far is recorded.
 export const ABANDONED_STREAM_SETTLE_MS = 2_000;
+
+const COUNT_FAILED_EVENT = 'answer_usage_count_failed';
 
 interface SettlingStream extends AsyncIterable<string> {
   readonly settled?: Promise<void>;
@@ -13,6 +16,7 @@ interface SettlingStream extends AsyncIterable<string> {
 export interface AskUsageMeterDeps {
   readonly sink: AskUsageSinkPort;
   readonly logger: Logger;
+  readonly days?: Pick<AnswerUsageDayCounts, 'add' | 'flushDue'>;
   readonly now?: () => Date;
 }
 
@@ -21,7 +25,7 @@ interface OpenedStream {
   readonly peek: () => TokenUsage[];
 }
 
-/** Records the token counts of an answer or agent run into the org's day usage; a sink fault never fails the run. */
+/** Records the token counts of an answer, agent or page-rewrite run into the org's day usage and its daily totals; a fault in either never fails the run. */
 export class AskUsageMeter {
   constructor(private readonly deps: AskUsageMeterDeps) {}
 
@@ -89,13 +93,31 @@ export class AskUsageMeter {
 
   private async record(subject: AskUsageAttribution, usage: readonly TokenUsage[]): Promise<void> {
     if (usage.length === 0) return;
+    this.count(subject, usage);
     try {
-      await this.deps.sink.record(subject, (this.deps.now ?? (() => new Date()))(), usage);
+      await this.deps.sink.record(subject, this.now(), usage);
     } catch (error) {
       this.deps.logger.warn('ask_usage_record_failed', {
         orgId: subject.orgId,
         error_type: contentFreeErrorType(error),
       });
     }
+  }
+
+  private count(subject: AskUsageAttribution, usage: readonly TokenUsage[]): void {
+    if (this.deps.days === undefined) return;
+    try {
+      this.deps.days.flushDue(this.now().getTime());
+      this.deps.days.add(subject, usage);
+    } catch (error) {
+      this.deps.logger.warn(COUNT_FAILED_EVENT, {
+        orgId: subject.orgId,
+        error_type: contentFreeErrorType(error),
+      });
+    }
+  }
+
+  private now(): Date {
+    return (this.deps.now ?? (() => new Date()))();
   }
 }
