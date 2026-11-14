@@ -18,6 +18,7 @@ export const MESSAGE_SENTENCE_REASONS: ReadonlyMap<string, string> = new Map([
   ['bb24815b127bbbd1', 'assignment_policy_verification_duplicate_tenant'],
   ['00c9005ae2b1d31c', 'assignment_policy_verification_evidence_invalid'],
   ['c9b9febfb52c38b5', 'assignment_storage_proof_tenant_id_invalid'],
+  ['50acf78189dc183e', 'authored_page_sealed_title_insert_failed'],
   ['f1fc24919fdd1f36', 'boot_manifest_root_invalid'],
   ['fa91ae9b6c9b14f1', 'boot_manifest_root_unapproved'],
   ['1c6549cd428f1664', 'boot_manifest_wire_invalid'],
