@@ -9,9 +9,15 @@ export const BATCH_RESULT_ERASED = '{}';
 const CUSTOM_ID_LABEL = 'pg1';
 const CUSTOM_ID_MAX_LENGTH = 64;
 
-/** A keyed digest of the request under the org's name key, so the id carries no request text. */
-export function customIdFor(nameKey: Buffer, request: ClaudeRequestBody): string {
-  const canonical = canonicalJson(JSON.parse(JSON.stringify(request)));
+/** A keyed digest of the request under the org's name key, taken with the instance salt removed so every instance derives the same id. */
+export function customIdFor(
+  nameKey: Buffer,
+  request: ClaudeRequestBody,
+  instanceSalt?: string,
+): string {
+  const text = canonicalJson(JSON.parse(JSON.stringify(request)));
+  const canonical =
+    instanceSalt === undefined || instanceSalt === '' ? text : text.split(instanceSalt).join('');
   const digest = createHmac('sha256', nameKey).update(canonical).digest('hex');
   return `${CUSTOM_ID_LABEL}${digest}`.slice(0, CUSTOM_ID_MAX_LENGTH);
 }

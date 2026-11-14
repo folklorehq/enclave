@@ -41,6 +41,16 @@ interface StoredObject {
   readonly etag: string | undefined;
 }
 
+export interface BatchManifestListing {
+  readonly unclosed: readonly BatchManifest[];
+  readonly complete: boolean;
+}
+
+interface ListedKey {
+  readonly key: string;
+  readonly etag: string | undefined;
+}
+
 export interface BatchStorageScope {
   readonly crypto: Pick<EnclaveCrypto, 'encryptBatchManifest' | 'decryptBatchManifest'>;
   readonly bucket: string;
@@ -57,8 +67,8 @@ export interface BatchManifestStoreDeps {
 /** One org's sealed batch manifests, named by a keyed digest of the request id under their own listable prefix. */
 export class BatchManifestStore {
   private readonly highestSeen = new Map<string, number>();
-  // Closed manifests are never deleted, so a listing skips the ones this process has already seen closed.
-  private readonly closedKeys = new Set<string>();
+  // Closed manifests are never deleted, so a listing skips a key only while its listed ETag is the one it was seen closed under.
+  private readonly closedEtags = new Map<string, string>();
 
   constructor(private readonly deps: BatchManifestStoreDeps) {}
 
@@ -107,13 +117,20 @@ export class BatchManifestStore {
   }
 
   async listOpen(): Promise<BatchManifest[]> {
-    const manifests: BatchManifest[] = [];
-    for (const key of await this.listKeys()) {
-      if (this.closedKeys.has(key)) continue;
+    return [...(await this.listing()).unclosed];
+  }
+
+  async listing(): Promise<BatchManifestListing> {
+    const unclosed: BatchManifest[] = [];
+    let complete = true;
+    for (const { key, etag } of await this.listKeys()) {
+      if (etag !== undefined && this.closedEtags.get(key) === etag) continue;
       const manifest = await this.openListed(key);
-      if (manifest !== undefined && !manifest.closed) manifests.push(manifest);
+      if (manifest === undefined) complete = false;
+      else if (manifest.closed) this.noteClosedAt(key, etag);
+      else unclosed.push(manifest);
     }
-    return manifests;
+    return { unclosed, complete };
   }
 
   private preconditionOf(basis: GuardedManifest | undefined): {
@@ -156,9 +173,12 @@ export class BatchManifestStore {
   }
 
   private noteState(manifest: BatchManifest): void {
-    const key = this.keyFor(manifest.wikiRequestId);
-    if (manifest.closed) this.closedKeys.add(key);
-    else this.closedKeys.delete(key);
+    if (!manifest.closed) this.closedEtags.delete(this.keyFor(manifest.wikiRequestId));
+  }
+
+  private noteClosedAt(key: string, etag: string | undefined): void {
+    if (etag === undefined) this.closedEtags.delete(key);
+    else this.closedEtags.set(key, etag);
   }
 
   private assertNotRolledBack(wikiRequestId: string, version: number): void {
@@ -185,8 +205,8 @@ export class BatchManifestStore {
     }
   }
 
-  private async listKeys(): Promise<string[]> {
-    const keys: string[] = [];
+  private async listKeys(): Promise<ListedKey[]> {
+    const keys: ListedKey[] = [];
     let token: string | undefined;
     do {
       const page = await this.deps.s3.send(
@@ -196,7 +216,9 @@ export class BatchManifestStore {
           ...(token === undefined ? {} : { ContinuationToken: token }),
         }),
       );
-      for (const object of page.Contents ?? []) if (object.Key) keys.push(object.Key);
+      for (const object of page.Contents ?? []) {
+        if (object.Key) keys.push({ key: object.Key, etag: object.ETag });
+      }
       token = page.IsTruncated ? page.NextContinuationToken : undefined;
     } while (token !== undefined);
     return keys;

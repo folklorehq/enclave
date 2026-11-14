@@ -3,7 +3,10 @@ import { parseRetryAfterMs } from '@folklore/utils';
 import { ANTHROPIC_ORIGIN } from '../../egress/anthropic-transport.js';
 import { ANTHROPIC_API_VERSION, claudeIdentityMismatch } from './ClaudeCredentialSource.js';
 import type { ClaudeRequestBody } from './claude-request.js';
-import { BATCH_RESULTS_MAX_BYTES } from './batch-limits.js';
+import { BATCH_RESULT_LINE_MAX_BYTES } from './batch-limits.js';
+import { BatchResultLineSplitter } from './BatchResultLineSplitter.js';
+import { BatchResultsGuard } from './BatchResultsGuard.js';
+import type { BatchResultRefusal } from './batch-log.js';
 import { ClaudeRouteError } from './claude-route-errors.js';
 
 const BATCHES_PATH = '/v1/messages/batches';
@@ -45,7 +48,16 @@ export interface BatchApiDeps {
   };
   readonly onIdentityMismatch: () => void;
   readonly onCredentialRejected: () => void;
-  readonly maxResultsBytes?: number;
+}
+
+export interface BatchResultsRead {
+  readonly maxBytes: number;
+  readonly budgetMs: number;
+  readonly signal?: AbortSignal;
+  readonly onRefused: (
+    reason: Extract<BatchResultRefusal, 'malformed' | 'oversize_line' | 'oversize_body'>,
+  ) => void;
+  readonly onCut?: () => void;
 }
 
 const createdSchema = z.object({ id: z.string().regex(BATCH_ID) });
@@ -78,14 +90,17 @@ export class BatchApiClient {
     return parsed.data.processing_status;
   }
 
-  async results(batchId: string): Promise<readonly BatchResultLine[]> {
-    const path = `${this.pathOf(batchId)}/results`;
-    const response = await this.call('GET', path, { tolerate: [HTTP_NOT_FOUND] });
-    if (response.status === HTTP_NOT_FOUND) return [];
-    return (await this.boundedText(response))
-      .split('\n')
-      .filter((line) => line.trim() !== '')
-      .map((line) => this.lineOf(line));
+  async *results(batchId: string, read: BatchResultsRead): AsyncGenerator<BatchResultLine> {
+    read.signal?.throwIfAborted();
+    const guard = new BatchResultsGuard(read, REQUEST_TIMEOUT_MS);
+    try {
+      const response = await this.openResults(batchId, guard, read.signal);
+      if (response === undefined) return;
+      guard.bodyStarted();
+      yield* this.linesOf(response, read, guard);
+    } finally {
+      guard.dispose();
+    }
   }
 
   async cancel(batchId: string): Promise<void> {
@@ -110,15 +125,21 @@ export class BatchApiClient {
   private async call(
     method: string,
     path: string,
-    options: { body?: unknown; tolerate?: readonly number[] } = {},
+    options: { body?: unknown; tolerate?: readonly number[]; signal?: AbortSignal } = {},
   ): Promise<Response> {
     const key = await this.deps.apiKey();
-    const response = await this.send(method, path, key, options.body);
+    const response = await this.send(method, path, key, options.body, options.signal);
     this.assertStatus(response, new Set(options.tolerate ?? NO_STATUS));
     return response;
   }
 
-  private async send(method: string, path: string, key: string, body: unknown): Promise<Response> {
+  private async send(
+    method: string,
+    path: string,
+    key: string,
+    body: unknown,
+    signal: AbortSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  ): Promise<Response> {
     try {
       return await this.deps.fetch(`${ANTHROPIC_ORIGIN}${path}`, {
         method,
@@ -128,7 +149,7 @@ export class BatchApiClient {
           ...(body === undefined ? {} : { 'content-type': 'application/json' }),
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        signal,
       });
     } catch {
       throw new ClaudeRouteError('claude_batch_unavailable');
@@ -164,31 +185,6 @@ export class BatchApiClient {
     return new ClaudeRouteError('claude_rate_limited', HTTP_TOO_MANY_REQUESTS, retryAfterMs);
   }
 
-  private async boundedText(response: Response): Promise<string> {
-    const limit = this.deps.maxResultsBytes ?? BATCH_RESULTS_MAX_BYTES;
-    if (Number(response.headers.get('content-length')) > limit) await this.tooLarge(response);
-    const reader = response.body?.getReader();
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    while (reader !== undefined) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > limit) await this.tooLarge(response, reader);
-      chunks.push(value);
-    }
-    return Buffer.concat(chunks).toString('utf8');
-  }
-
-  // A locked stream cannot be cancelled through the response, so the reader that holds it does it.
-  private async tooLarge(
-    response: Response,
-    reader?: ReadableStreamDefaultReader<Uint8Array>,
-  ): Promise<never> {
-    await (reader ?? response.body)?.cancel().catch(() => undefined);
-    throw new ClaudeRouteError('claude_batch_response_invalid');
-  }
-
   private async json(response: Response): Promise<unknown> {
     try {
       return await response.json();
@@ -197,15 +193,78 @@ export class BatchApiClient {
     }
   }
 
-  private lineOf(line: string): BatchResultLine {
+  private async openResults(
+    batchId: string,
+    guard: BatchResultsGuard,
+    signal: AbortSignal | undefined,
+  ): Promise<Response | undefined> {
+    guard.awaitingHeaders();
+    try {
+      const path = `${this.pathOf(batchId)}/results`;
+      const response = await this.call('GET', path, {
+        tolerate: [HTTP_NOT_FOUND],
+        signal: guard.signal,
+      });
+      return response.status === HTTP_NOT_FOUND ? undefined : response;
+    } catch (error) {
+      if (signal?.aborted === true) throw signal.reason;
+      throw error;
+    }
+  }
+
+  private async *linesOf(
+    response: Response,
+    read: BatchResultsRead,
+    guard: BatchResultsGuard,
+  ): AsyncGenerator<BatchResultLine> {
+    if (Number(response.headers.get('content-length')) > read.maxBytes) {
+      await response.body?.cancel().catch(() => undefined);
+      read.onRefused('oversize_body');
+      return;
+    }
+    const reader = response.body?.getReader();
+    if (reader === undefined) return;
+    const splitter = new BatchResultLineSplitter(BATCH_RESULT_LINE_MAX_BYTES, () =>
+      read.onRefused('oversize_line'),
+    );
+    let total = 0;
+    try {
+      for (;;) {
+        const next = await guard.next(reader);
+        if (next.done) break;
+        const usable = next.value.subarray(0, read.maxBytes - total);
+        total += usable.byteLength;
+        yield* this.parsed(splitter.feed(usable), read);
+        if (usable.byteLength < next.value.byteLength) {
+          read.onRefused('oversize_body');
+          return;
+        }
+      }
+      yield* this.parsed(splitter.last(), read);
+    } finally {
+      await reader.cancel().catch(() => undefined);
+    }
+  }
+
+  private *parsed(lines: Iterable<Buffer>, read: BatchResultsRead): Generator<BatchResultLine> {
+    for (const bytes of lines) {
+      const text = bytes.toString('utf8');
+      if (text.trim() === '') continue;
+      const line = this.lineOf(text);
+      if (line === undefined) read.onRefused('malformed');
+      else yield line;
+    }
+  }
+
+  private lineOf(line: string): BatchResultLine | undefined {
     let value: unknown;
     try {
       value = JSON.parse(line);
     } catch {
-      throw new ClaudeRouteError('claude_batch_response_invalid');
+      return undefined;
     }
     const parsed = lineSchema.safeParse(value);
-    if (!parsed.success) throw new ClaudeRouteError('claude_batch_response_invalid');
+    if (!parsed.success) return undefined;
     const { custom_id: customId, result } = parsed.data;
     if (result.type === 'succeeded')
       return { customId, outcome: 'succeeded', message: result['message'] };

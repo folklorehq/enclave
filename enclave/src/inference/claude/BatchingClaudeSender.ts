@@ -44,7 +44,7 @@ export class BatchingClaudeSender {
   /** Undefined only for a miss in a drained run, whose caller then sends it itself. */
   async send(request: ClaudeRequestBody): Promise<CreatedMessage | undefined> {
     const { state } = this.deps;
-    const customId = customIdFor(state.nameKey, request);
+    const customId = customIdFor(state.nameKey, request, state.cacheSalt);
     const sealed = sealedResultOf(await state.store.get<string>(resultKeyFor(customId)));
     if (sealed?.kind === 'message') return sealed.message;
     if (sealed?.kind === 'failure') throw new ClaudeRouteError(sealed.code);

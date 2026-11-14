@@ -15,6 +15,7 @@ export interface BatchRunState {
   readonly pending: Map<string, PendingBatchRequest>;
   readonly store: LlmOperationCache;
   readonly nameKey: Buffer;
+  readonly cacheSalt?: string;
   readonly drain?: boolean;
   /** A run that only collects: it may replay sealed results but never send a request of its own. */
   readonly collect?: boolean;

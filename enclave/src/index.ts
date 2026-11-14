@@ -1870,7 +1870,6 @@ const agentAccessProjectionRunner = buildAgentAccessProjectionRunner({
 agentAccessProjectionRunner?.start(AGENT_ACCESS_PROJECTION_TICK_MS);
 bootStatus.begin('workers_start');
 
-// UNWIRED: no brake-level source reaches the enclave yet, so a batch can be collected but never submitted.
 function batchSynthesisDeps(): { batch?: NonNullable<SynthesisConsumerDeps['batch']> } {
   const route = claudeComposition.batchRoute();
   if (route === undefined) return {};

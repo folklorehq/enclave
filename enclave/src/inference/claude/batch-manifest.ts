@@ -36,6 +36,7 @@ export const batchManifestSchema = z
       .strict()
       .optional(),
     resultIds: z.array(z.string()),
+    refusedResults: z.number().int().positive().optional(),
     snapshot: z.array(snapshotSchema),
   })
   .strict();
