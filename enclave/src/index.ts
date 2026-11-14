@@ -1507,7 +1507,7 @@ try {
   const buildRetriever = (retrieverDeps: RetrieverDeps) =>
     new EnclaveFactRetriever({
       ...retrieverDeps,
-      embedQuery: (orgId, query) => answerInference.get(orgId).embed(query),
+      embedQuery: (orgId, query, signal) => answerInference.get(orgId).embed(query, signal),
       resolveTenant,
       s3,
       processedBucket: PROCESSED_OUTPUTS_BUCKET,
@@ -1585,6 +1585,7 @@ try {
                 .get(principal.orgId)
                 .generate(prompt, systemPrompt, undefined, () => false, signal),
           ),
+        fenceSignal: (orgId) => tenantRequests.fenceSignal(orgId),
       });
     },
     ...(codebaseSettingsPort ? { codebaseSettings: codebaseSettingsPort } : {}),

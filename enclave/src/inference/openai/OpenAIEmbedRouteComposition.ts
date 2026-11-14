@@ -14,7 +14,7 @@ import {
 export const OPENAI_EMBED_CACHE_LABEL = `openai/${OPENAI_EMBED_MODEL}@${OPENAI_EMBED_DIMENSIONS}`;
 
 export interface EmbeddingProvider {
-  embed(text: string): Promise<number[]>;
+  embed(text: string, signal?: AbortSignal): Promise<number[]>;
   readonly cacheLabel: string;
 }
 
@@ -39,7 +39,7 @@ export class OpenAIEmbedRouteComposition {
     if (state.kind === 'invalid') return this.refusing();
     return {
       cacheLabel: OPENAI_EMBED_CACHE_LABEL,
-      embed: async (text) => this.backendFor(state).embed(text),
+      embed: async (text, signal) => this.backendFor(state).embed(text, signal),
     };
   }
 

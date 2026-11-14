@@ -38,11 +38,11 @@ export interface OpenAIEmbeddingsBackendDeps {
 export class OpenAIEmbeddingsBackend {
   constructor(private readonly deps: OpenAIEmbeddingsBackendDeps) {}
 
-  async embed(text: string): Promise<number[]> {
+  async embed(text: string, signal?: AbortSignal): Promise<number[]> {
     const input = this.clippedInput(text);
     try {
       const key = await this.deps.credentials.key();
-      return await this.vectorFrom(await this.post(input, key));
+      return await this.vectorFrom(await this.post(input, key, signal));
     } catch (error) {
       throw mapOpenAITransportError(error, this.alarm());
     }
@@ -55,7 +55,7 @@ export class OpenAIEmbeddingsBackend {
     return input;
   }
 
-  private post(input: string, key: string): Promise<Response> {
+  private post(input: string, key: string, signal?: AbortSignal): Promise<Response> {
     return this.deps.fetch(`${OPENAI_ORIGIN}${OPENAI_EMBEDDINGS_PATH}`, {
       method: 'POST',
       headers: {
@@ -70,7 +70,9 @@ export class OpenAIEmbeddingsBackend {
         dimensions: OPENAI_EMBED_DIMENSIONS,
         encoding_format: 'float',
       }),
-      signal: AbortSignal.timeout(OPENAI_EMBED_REQUEST_TIMEOUT_MS),
+      signal: signal
+        ? AbortSignal.any([AbortSignal.timeout(OPENAI_EMBED_REQUEST_TIMEOUT_MS), signal])
+        : AbortSignal.timeout(OPENAI_EMBED_REQUEST_TIMEOUT_MS),
     });
   }
 

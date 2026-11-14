@@ -5,7 +5,7 @@ import { float32Vector, type LlmOperationCache } from './vector-cache.js';
 // The embed/generate surface the enclave pipeline + synthesis workers depend on — the port the
 // cache layers over, kept separate from the raw phala module so it can be injected and stubbed.
 export interface InferenceModel {
-  embed(text: string): Promise<number[]>;
+  embed(text: string, signal?: AbortSignal): Promise<number[]>;
   generate(
     prompt: string,
     systemPrompt?: string,
@@ -65,14 +65,15 @@ export class CachedInference implements SynthesisInference {
     private readonly usageSink?: InferenceUsageSink,
   ) {}
 
-  async embed(text: string): Promise<number[]> {
+  async embed(text: string, signal?: AbortSignal): Promise<number[]> {
     const key = llmCacheKey(this.models.embedModel, EMBED_CACHE_VERSION, text);
     const hit = await this.cache.getVector(key);
     if (hit !== null) {
       this.recordCacheHit(this.models.embedModel, 'embed');
       return hit;
     }
-    const vector = float32Vector(await this.backend.embed(text));
+    const vector = float32Vector(await this.backend.embed(text, signal));
+    signal?.throwIfAborted();
     await this.cache.setVector(key, vector);
     return vector;
   }

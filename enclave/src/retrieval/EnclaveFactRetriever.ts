@@ -40,7 +40,7 @@ export interface FactRetrieverDeps extends RetrieverDeps {
   s3: S3Client;
   processedBucket: string;
   processedBucketFor?: (orgId: string) => string;
-  embedQuery?: (orgId: string, query: string) => Promise<number[]>;
+  embedQuery?: (orgId: string, query: string, signal?: AbortSignal) => Promise<number[]>;
 }
 
 /** An audience-visible hit with its decrypted body, for callers (e.g. answer synthesis) that need more than a snippet. */
@@ -165,14 +165,16 @@ export class EnclaveFactRetriever implements FactRetriever, FactExcerptReader {
     params: FactSearchParams,
     access: AudienceAccess,
     bodyLimit: number,
+    signal?: AbortSignal,
   ): Promise<GatedFact[]> {
-    return this.retrieveGatedWith(params, bodyLimit, async () => access);
+    return this.retrieveGatedWith(params, bodyLimit, async () => access, signal);
   }
 
   private async retrieveGatedWith(
     params: FactSearchParams,
     bodyLimit: number,
     accessFor: () => Promise<AudienceAccess>,
+    signal?: AbortSignal,
   ): Promise<GatedFact[]> {
     const { orgId, query, limit } = params;
     if (!query.trim() || limit <= 0) return [];
@@ -181,10 +183,22 @@ export class EnclaveFactRetriever implements FactRetriever, FactExcerptReader {
     // (§4.2). The tenant's own HNSW self-guards on orgId too, so retrieval only ever answers for it.
     const tenant = this.deps.resolveTenant(orgId);
 
-    const queryVec = await this.embed(orgId, query);
-    await tenant.hnsw.whenReady();
+    const queryVec = await this.embed(orgId, query, signal);
+    await this.indexReady(tenant, signal);
     const hits = tenant.hnsw.query(orgId, queryVec, limit);
-    return this.gateAndDecrypt(tenant, params, hits, bodyLimit, accessFor);
+    return this.gateAndDecrypt(tenant, params, hits, bodyLimit, accessFor, signal);
+  }
+
+  // An abort drops this caller's wait only; the shared restore keeps running for the next caller.
+  private indexReady(tenant: TenantContext, signal?: AbortSignal): Promise<void> {
+    if (signal === undefined) return tenant.hnsw.whenReady();
+    signal.throwIfAborted();
+    const ready = tenant.hnsw.whenReady();
+    return new Promise<void>((resolve, reject) => {
+      const onAbort = () => reject(signal.reason);
+      signal.addEventListener('abort', onAbort, { once: true });
+      ready.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+    });
   }
 
   // Ranks only the facts the caller's lens allows; the per-fact audience gate still runs on every hit.
@@ -278,8 +292,10 @@ export class EnclaveFactRetriever implements FactRetriever, FactExcerptReader {
     });
   }
 
-  private embed(orgId: string, query: string): Promise<number[]> {
-    return this.deps.embedQuery ? this.deps.embedQuery(orgId, query) : embedText(query);
+  private embed(orgId: string, query: string, signal?: AbortSignal): Promise<number[]> {
+    const { embedQuery } = this.deps;
+    if (!embedQuery) return embedText(query);
+    return embedQuery(orgId, query, signal);
   }
 
   private async gateAndDecrypt(
@@ -288,6 +304,7 @@ export class EnclaveFactRetriever implements FactRetriever, FactExcerptReader {
     hits: { factId: string; distance: number }[],
     bodyLimit: number,
     accessFor: () => Promise<AudienceAccess>,
+    signal?: AbortSignal,
   ): Promise<GatedFact[]> {
     if (hits.length === 0) return [];
     const { orgId } = params;
@@ -306,7 +323,8 @@ export class EnclaveFactRetriever implements FactRetriever, FactExcerptReader {
       const meta = metaById.get(hit.factId);
       if (!meta) continue;
       if (!this.isVisible(meta, access)) continue;
-      const content = await this.decryptContent(tenant.crypto, orgId, meta, bodyLimit);
+      signal?.throwIfAborted();
+      const content = await this.decryptContent(tenant.crypto, orgId, meta, bodyLimit, signal);
       if (content === null) continue;
       results.push({ meta, distance: hit.distance, ...content });
     }
@@ -366,9 +384,10 @@ export class EnclaveFactRetriever implements FactRetriever, FactExcerptReader {
     orgId: string,
     meta: FactMetadata,
     bodyLimit: number,
+    signal?: AbortSignal,
   ): Promise<SealedFactContent | null> {
     if (!meta.bodyS3Key) return { body: '', title: null };
-    const content = sealedFactContent(await this.decryptRecord(crypto, orgId, meta));
+    const content = sealedFactContent(await this.decryptRecord(crypto, orgId, meta, signal));
     return content === null ? null : { ...content, body: content.body.slice(0, bodyLimit) };
   }
 
@@ -377,6 +396,7 @@ export class EnclaveFactRetriever implements FactRetriever, FactExcerptReader {
     crypto: EnclaveCrypto,
     orgId: string,
     meta: FactMetadata,
+    signal?: AbortSignal,
   ): Promise<Record<string, unknown> | null> {
     if (!meta.bodyS3Key) return null;
     try {
@@ -385,12 +405,15 @@ export class EnclaveFactRetriever implements FactRetriever, FactExcerptReader {
           Bucket: this.deps.processedBucketFor?.(orgId) ?? this.deps.processedBucket,
           Key: meta.bodyS3Key,
         }),
+        { abortSignal: signal },
       );
       const raw = await obj.Body!.transformToByteArray();
       const enc = Buffer.from(Buffer.from(raw).toString('utf8'), 'base64');
       const plaintext = await crypto.decryptFactBody(enc, { factId: meta.id, orgId });
       return JSON.parse(plaintext.toString('utf8')) as Record<string, unknown>;
     } catch {
+      // An abort is never read as "no body"; its reason, unlike a parse error, holds no decrypted text.
+      if (signal?.aborted) throw signal.reason;
       return null;
     }
   }

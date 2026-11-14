@@ -1,9 +1,12 @@
+import { ServiceUnavailableError } from '@folklore/errors';
+
 export type TenantRequestRelease = () => void;
 // A tenant stays fenced, or its queue work evicted, until every holder that closed it releases it.
 export type TenantQuiescenceHolder = 'assignment' | 'halt';
 
 // Calls that name no holder are the assignment applier's; every other caller names its own.
 const ASSIGNMENT_FENCE_HOLDER: TenantQuiescenceHolder = 'assignment';
+const TENANT_FENCED_CODE = 'tenant_unavailable';
 
 interface TenantRequestState {
   active: number;
@@ -11,6 +14,7 @@ interface TenantRequestState {
   holders: Set<TenantQuiescenceHolder>;
   workHolders: Set<TenantQuiescenceHolder>;
   fenceEpoch: number;
+  fenceAbort: AbortController;
   idleWaiters: Set<() => void>;
 }
 
@@ -37,9 +41,14 @@ export class TenantRequestQuiescer {
     holder: TenantQuiescenceHolder = ASSIGNMENT_FENCE_HOLDER,
   ): Promise<void> {
     const state = this.stateFor(tenantId);
-    if (!state.fenced) state.fenceEpoch = ++this.nextFenceEpoch;
+    const wasFenced = state.fenced;
     state.holders.add(holder);
     state.fenced = true;
+    // The abort fires last, so a synchronous listener already sees the tenant fenced at its new epoch.
+    if (!wasFenced) {
+      state.fenceEpoch = ++this.nextFenceEpoch;
+      state.fenceAbort.abort(new ServiceUnavailableError('tenant fenced', TENANT_FENCED_CODE));
+    }
     if (state.active === 0) return;
     await new Promise<void>((resolve) => state.idleWaiters.add(resolve));
   }
@@ -53,8 +62,16 @@ export class TenantRequestQuiescer {
   activate(tenantId: string, holder: TenantQuiescenceHolder = ASSIGNMENT_FENCE_HOLDER): void {
     const state = this.states.get(tenantId);
     if (!state) return;
+    const wasFenced = state.fenced;
     state.holders.delete(holder);
     state.fenced = state.holders.size > 0;
+    // Only a real unfence renews it: the halt monitor activates every unhalted tenant on every poll.
+    if (wasFenced && !state.fenced) state.fenceAbort = new AbortController();
+  }
+
+  // Aborts when the tenant is next fenced, and stays aborted while it is.
+  fenceSignal(tenantId: string): AbortSignal {
+    return this.stateFor(tenantId).fenceAbort.signal;
   }
 
   // Queue-work eviction is held separately because it starts before the request fence is raised.
@@ -92,6 +109,7 @@ export class TenantRequestQuiescer {
         holders: new Set(),
         workHolders: new Set(),
         fenceEpoch: 0,
+        fenceAbort: new AbortController(),
         idleWaiters: new Set(),
       };
       this.states.set(tenantId, state);

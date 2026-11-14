@@ -222,9 +222,11 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
     this.transientRetry = this.options.transientRetry ?? new TransientInferenceRetry();
   }
 
-  async embed(text: string): Promise<number[]> {
+  async embed(text: string, signal?: AbortSignal): Promise<number[]> {
     batchRunScope.assertMaySpend();
-    return this.underRole('embed', () => this.embedUnderPolicy(text));
+    signal?.throwIfAborted();
+    const embed = () => this.underRole('embed', () => this.embedUnderPolicy(text, signal));
+    return signal === undefined ? embed() : this.underSignal(signal, embed);
   }
 
   decisionPort(): TenantDecisionPort | undefined {
@@ -385,14 +387,19 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
     }
   }
 
-  private async embedUnderPolicy(text: string): Promise<number[]> {
-    if (!this.isLegacyEmbeddingSpace()) return this.embedOnProvider(text);
+  private async embedUnderPolicy(text: string, signal?: AbortSignal): Promise<number[]> {
+    if (!this.isLegacyEmbeddingSpace()) return this.embedOnProvider(text, signal);
+    signal?.throwIfAborted();
     const { binding, snapshot } = await this.bindingFor('embed');
+    signal?.throwIfAborted();
     const cache = this.operationCache;
-    const embedOnce = () =>
-      this.runTransient('embed', ACI_ROUTE, async () =>
+    const embedOnce = async () => {
+      const vector = await this.runTransient('embed', ACI_ROUTE, async () =>
         (await this.backendFor(binding, snapshot, ACI_ROUTE)).embed(text),
       );
+      signal?.throwIfAborted();
+      return vector;
+    };
     if (!cache) return embedOnce();
     const key = this.cacheKey(binding, snapshot, 'embed', text, ACI_ROUTE);
     const hit = await this.replayVectorFrom(cache, key, binding.modelId);
@@ -407,13 +414,17 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
     return ACTIVE_EMBEDDING_SPACE_IS_LEGACY;
   }
 
-  private async embedOnProvider(text: string): Promise<number[]> {
+  private async embedOnProvider(text: string, signal?: AbortSignal): Promise<number[]> {
     const provider = this.options.embeddingProvider;
     if (provider === undefined) throw new OpenAIEmbedRouteError('embedding_provider_absent');
     const embedOnce = () =>
-      this.runTransient('embed', ACI_ROUTE, () => provider.embed(text), {
-        statuses: OPENAI_TRANSIENT_STATUSES,
-      });
+      this.abortedBy(
+        signal,
+        this.runTransient('embed', ACI_ROUTE, () => provider.embed(text, signal), {
+          statuses: OPENAI_TRANSIENT_STATUSES,
+          signal,
+        }),
+      );
     const cache = this.options.operationCache;
     if (!cache) return embedOnce();
     const key = this.providerEmbedCacheKey(provider, text);
@@ -425,8 +436,19 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
     );
     if (hit !== null) return hit;
     const output = float32Vector(await embedOnce());
+    signal?.throwIfAborted();
     await cache.setVector(key, output);
     return output;
+  }
+
+  // A failure after the abort is the abort's, whatever error the call mapped it to.
+  private async abortedBy<T>(signal: AbortSignal | undefined, call: Promise<T>): Promise<T> {
+    try {
+      return await call;
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason;
+      throw error;
+    }
   }
 
   private static isCachedVector(hit: readonly number[]): boolean {
