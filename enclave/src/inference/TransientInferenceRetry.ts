@@ -1,4 +1,5 @@
 import { ProviderHttpError } from '@folklore/inference';
+import { sleep } from '@folklore/utils';
 import { BatchPendingError } from './claude/batch-errors.js';
 
 export const TRANSIENT_INFERENCE_ATTEMPTS = 3;
@@ -40,19 +41,19 @@ export type BackoffObserver = (backoff: () => Promise<void>) => Promise<void>;
 const UNOBSERVED: BackoffObserver = (backoff) => backoff();
 
 export interface TransientInferenceRetryDeps {
-  sleep?: (ms: number) => Promise<void>;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   random?: () => number;
   now?: () => number;
 }
 
 /** Re-runs one inference operation through a provider gateway blip or rate limit; every other refusal fails on its first throw. */
 export class TransientInferenceRetry {
-  private readonly sleep: (ms: number) => Promise<void>;
+  private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   private readonly random: () => number;
   private readonly now: () => number;
 
   constructor(deps: TransientInferenceRetryDeps = {}) {
-    this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.sleep = deps.sleep ?? sleep;
     this.random = deps.random ?? Math.random;
     this.now = deps.now ?? (() => performance.now());
   }
@@ -63,6 +64,7 @@ export class TransientInferenceRetry {
     windows: TransientRetryWindows = UNBOUNDED_WINDOWS,
     observeBackoff: BackoffObserver = UNOBSERVED,
     transientStatuses: ReadonlySet<number> = TRANSIENT_PROVIDER_STATUSES,
+    signal?: AbortSignal,
   ): Promise<T> {
     const startedAt = this.now();
     for (let attempt = 1; ; attempt += 1) {
@@ -77,7 +79,7 @@ export class TransientInferenceRetry {
           transientStatuses,
         );
         if (delayMs === undefined) throw error;
-        await observeBackoff(() => this.sleep(delayMs));
+        await observeBackoff(() => this.sleep(delayMs, signal));
       }
     }
   }

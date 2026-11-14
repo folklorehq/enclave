@@ -1,5 +1,6 @@
-import Anthropic from '@anthropic-ai/sdk';
+import Anthropic, { APIUserAbortError } from '@anthropic-ai/sdk';
 import type { InferenceUsageSink, ToolSpec } from '@folklore/inference';
+import { isAbortOf } from '@folklore/utils';
 import type { CachedSystemPrefix } from '../InferencePurposeScope.js';
 import { ANTHROPIC_ORIGIN } from '../../egress/anthropic-transport.js';
 import { ClaudeRouteError } from './claude-route-errors.js';
@@ -7,15 +8,16 @@ import { claudeIdentityMismatch } from './ClaudeCredentialSource.js';
 import { mapClaudeError, type ClaudeErrorContext } from './claude-error-map.js';
 import {
   BATCH_CACHE_TTL,
-  CHARS_PER_TOKEN_FLOOR,
   buildClaudeRequest,
   claudeThinkingEnabled,
+  inputCharsOf,
   type ClaudeRequestBody,
   type ClaudeRequestInput,
 } from './claude-request.js';
 import type { AnthropicRoute } from './anthropic-route.js';
 import type { BatchSendRoute, BatchingClaudeSender } from './BatchingClaudeSender.js';
 import { batchRunScope } from './BatchRunScope.js';
+import { CHARS_PER_TOKEN_FLOOR, promptTokenFloor } from '../token-floor.js';
 
 export type CreatedMessage = Anthropic.Message;
 type MessageEvents = AsyncIterable<Anthropic.RawMessageStreamEvent> & {
@@ -69,6 +71,7 @@ export interface ClaudeMessagesBackendDeps {
 /** One Messages call per operation, with the response bound to the compiled identity before it is used. */
 export class ClaudeMessagesBackend {
   private readonly client: Anthropic;
+  private dispatched = false;
 
   constructor(private readonly deps: ClaudeMessagesBackendDeps) {
     this.client = new Anthropic({
@@ -76,15 +79,18 @@ export class ClaudeMessagesBackend {
       authToken: null,
       webhookKey: null,
       baseURL: ANTHROPIC_ORIGIN,
-      fetch: deps.fetch,
+      fetch: (input, init) => {
+        this.dispatched = true;
+        return deps.fetch(input, init);
+      },
       maxRetries: NO_RETRIES,
       logLevel: SDK_LOG_LEVEL,
       timeout: deps.timeoutMs,
     });
   }
 
-  generate(prompt: string, systemPrompt?: string): Promise<string> {
-    return this.text({ route: this.deps.route, prompt, systemPrompt }, 'generate');
+  generate(prompt: string, systemPrompt?: string, signal?: AbortSignal): Promise<string> {
+    return this.text({ route: this.deps.route, prompt, systemPrompt }, 'generate', signal);
   }
 
   critique(prompt: string, systemPrompt?: string): Promise<string> {
@@ -117,7 +123,7 @@ export class ClaudeMessagesBackend {
     } catch (error) {
       throw mapClaudeError(error, this.deps.errorContext);
     } finally {
-      this.recordInterruptedStreamUsage(tally);
+      this.recordInterruptedUsage(tally, 'generate');
     }
   }
 
@@ -136,14 +142,22 @@ export class ClaudeMessagesBackend {
   private async text(
     input: Omit<ClaudeRequestInput, 'cachedSystemPrefix'>,
     operation: 'generate' | 'structured',
+    signal?: AbortSignal,
   ): Promise<string> {
     try {
       const full = { ...input, cachedSystemPrefix: this.deps.cachedSystemPrefix };
-      const message = (await this.replayed(full, operation)) ?? (await this.sent(full, operation));
+      const message =
+        (await this.replayed(full, operation)) ?? (await this.sent(full, operation, signal));
       return this.completedText(message);
     } catch (error) {
+      // A caller's abort is not an upstream failure, so it is never mapped, alarmed or recorded as an outage.
+      if (signal !== undefined && this.isCallerAbort(error, signal)) throw signal.reason;
       throw mapClaudeError(error, this.deps.errorContext);
     }
+  }
+
+  private isCallerAbort(error: unknown, signal: AbortSignal): boolean {
+    return isAbortOf(error, signal) || (signal.aborted && error instanceof APIUserAbortError);
   }
 
   private senderOf(): BatchingClaudeSender | undefined {
@@ -167,16 +181,36 @@ export class ClaudeMessagesBackend {
   private async sent(
     input: ClaudeRequestInput,
     operation: 'generate' | 'structured',
+    signal?: AbortSignal,
   ): Promise<CreatedMessage> {
     batchRunScope.assertMaySpend();
-    const message = await this.send(buildClaudeRequest(input));
+    const request = buildClaudeRequest(input);
+    let message: CreatedMessage;
+    try {
+      message = await this.send(request, signal);
+    } catch (error) {
+      if (this.dispatched && signal !== undefined && this.isCallerAbort(error, signal)) {
+        this.recordInterruptedUsage(this.dispatchedTally(input, request), operation);
+      }
+      throw error;
+    }
     this.recordUsage(message, operation);
     return message;
   }
 
-  private async send(request: ClaudeRequestBody): Promise<CreatedMessage> {
+  // The response never arrived, so the input is sized from the request and the output is billed at max_tokens, the most the provider may already have generated.
+  private dispatchedTally(input: ClaudeRequestInput, request: ClaudeRequestBody): StreamTally {
+    return {
+      ...this.freshTally(),
+      started: true,
+      inputTokens: promptTokenFloor(inputCharsOf(input)),
+      interruptedOutputFloor: request.max_tokens,
+    };
+  }
+
+  private async send(request: ClaudeRequestBody, signal?: AbortSignal): Promise<CreatedMessage> {
     const { data, response } = await this.client.messages
-      .create(request as Anthropic.MessageCreateParamsNonStreaming)
+      .create(request as Anthropic.MessageCreateParamsNonStreaming, signal ? { signal } : undefined)
       .withResponse();
     this.assertBound(response.headers);
     if (data.model !== this.deps.route.model) throw new ClaudeRouteError('claude_model_mismatch');
@@ -253,7 +287,7 @@ export class ClaudeMessagesBackend {
     tally.metered = true;
   }
 
-  private recordInterruptedStreamUsage(tally: StreamTally): void {
+  private recordInterruptedUsage(tally: StreamTally, operation: 'generate' | 'structured'): void {
     if (tally.metered || !tally.started) return;
     tally.metered = true;
     try {
@@ -266,7 +300,7 @@ export class ClaudeMessagesBackend {
             tally.interruptedOutputFloor,
           ),
         },
-        'generate',
+        operation,
       );
     } catch {
       /* usage reporting must not mask the stream's own failure */

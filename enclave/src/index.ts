@@ -1577,13 +1577,13 @@ try {
         retriever: buildRetriever(agentRetrieverDeps(deps.loadFactMetadata)),
         listThemes: deps.listThemes,
         readPage: deps.readPage,
-        generate: (principal, prompt, systemPrompt) =>
+        generate: (principal, prompt, systemPrompt, signal) =>
           meter.generate(
             { orgId: principal.orgId, userId: principal.userId, surface: 'agent' },
             () =>
               answerInference
                 .get(principal.orgId)
-                .generate(prompt, systemPrompt, undefined, () => false),
+                .generate(prompt, systemPrompt, undefined, () => false, signal),
           ),
       });
     },
@@ -1855,6 +1855,7 @@ memberIdentityLinkRunner?.start();
 const agentAccessProjectionRunner = buildAgentAccessProjectionRunner({
   tenants: projectionTenants,
   beginTenant: beginTenantRequest,
+  // UNWIRED: dedicated runtimes have no agent-access projection writer, so /mcp answers mcp_access_off there.
   controlPlane:
     isSharedPool && controlPlaneIdentity && controlPlaneFetch
       ? { origin: controlPlaneIdentity.origin, fetch: controlPlaneFetch }

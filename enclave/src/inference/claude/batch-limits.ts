@@ -1,6 +1,6 @@
 import { INFERENCE_PURPOSES } from '@folklore/contracts';
 import { claudeMaxTokens } from './claude-purpose-limits.js';
-import { CHARS_PER_TOKEN_FLOOR } from './claude-request.js';
+import { CHARS_PER_TOKEN_FLOOR } from '../token-floor.js';
 
 const HOUR_MS = 60 * 60_000;
 

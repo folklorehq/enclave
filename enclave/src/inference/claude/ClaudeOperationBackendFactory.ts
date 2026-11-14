@@ -4,6 +4,7 @@ import {
   type InferenceUsageSink,
   type VerifiedActivePolicyRoleBindingV1,
 } from '@folklore/inference';
+import { isAbortOf } from '@folklore/utils';
 import type { AnthropicTransport } from '../../egress/anthropic-transport.js';
 import { inferencePurposeScope } from '../InferencePurposeScope.js';
 import type { OperationAdmission, OperationAuthority } from '../OperationAuthority.js';
@@ -86,8 +87,12 @@ class ClaudeOperation {
   backend(): TenantPolicyOperationBackend {
     return {
       embed: () => Promise.reject(new ClaudeRouteError('claude_embed_unsupported')),
-      generate: (prompt, systemPrompt) =>
-        this.invoke('generate', (backend) => backend.generate(prompt, systemPrompt)),
+      generate: (prompt, systemPrompt, _temperature, _shouldCache, signal) =>
+        this.invoke(
+          'generate',
+          (backend) => backend.generate(prompt, systemPrompt, signal),
+          signal,
+        ),
       generateStream: (prompt, systemPrompt, signal) =>
         this.invokeStream('generate', (backend) => backend.stream(prompt, systemPrompt, signal)),
       critique: (prompt, systemPrompt) =>
@@ -100,6 +105,7 @@ class ClaudeOperation {
   private async invoke<T>(
     role: InferenceModelRole,
     call: (backend: ClaudeMessagesBackend) => Promise<T>,
+    signal?: AbortSignal,
   ): Promise<T> {
     if (this.consumed) throw new ClaudeRouteError('claude_operation_consumed');
     this.consumed = true;
@@ -113,6 +119,8 @@ class ClaudeOperation {
       this.remainingBudget();
       return result;
     } catch (error) {
+      // The backend passes a caller's abort through unmapped; any other failure, even one that raced the abort, is mapped.
+      if (isAbortOf(error, signal)) throw error;
       throw mapClaudeError(error, this.errorContext);
     }
   }

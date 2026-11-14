@@ -269,12 +269,15 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
     systemPrompt?: string,
     temperature?: number,
     shouldCache?: (output: string) => boolean,
+    signal?: AbortSignal,
   ): Promise<string> {
-    return this.underRole(
-      'generate',
-      () => this.generateUnderPolicy(prompt, systemPrompt, temperature, shouldCache),
-      false,
-    );
+    const generate = () =>
+      this.underRole(
+        'generate',
+        () => this.generateUnderPolicy(prompt, systemPrompt, temperature, shouldCache, signal),
+        false,
+      );
+    return signal === undefined ? generate() : this.underSignal(signal, generate);
   }
 
   generateStream(request: GenerateStreamRequest): AsyncIterable<string> {
@@ -408,7 +411,9 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
     const provider = this.options.embeddingProvider;
     if (provider === undefined) throw new OpenAIEmbedRouteError('embedding_provider_absent');
     const embedOnce = () =>
-      this.runTransient('embed', ACI_ROUTE, () => provider.embed(text), OPENAI_TRANSIENT_STATUSES);
+      this.runTransient('embed', ACI_ROUTE, () => provider.embed(text), {
+        statuses: OPENAI_TRANSIENT_STATUSES,
+      });
     const cache = this.options.operationCache;
     if (!cache) return embedOnce();
     const key = this.providerEmbedCacheKey(provider, text);
@@ -442,6 +447,7 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
     systemPrompt?: string,
     temperature?: number,
     shouldCache?: (output: string) => boolean,
+    signal?: AbortSignal,
   ): Promise<string> {
     return this.withFallback(this.routeChainFor('generate'), (route) =>
       this.admitted('generate', route, async () => {
@@ -454,6 +460,7 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
           systemPrompt,
           temperature,
           shouldCache,
+          signal,
         );
       }),
     );
@@ -467,16 +474,24 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
     systemPrompt?: string,
     temperature?: number,
     shouldCache?: (output: string) => boolean,
+    signal?: AbortSignal,
   ): Promise<string> {
     const cache = this.operationCache;
     const generateOnce = (resolvedTemperature: number | undefined) =>
-      this.runTransient('generate', route, async () =>
-        (await this.backendFor(binding, snapshot, route)).generate(
-          prompt,
-          systemPrompt,
-          resolvedTemperature,
-          shouldCache,
-        ),
+      this.runTransient(
+        'generate',
+        route,
+        async () => {
+          signal?.throwIfAborted();
+          return (await this.backendFor(binding, snapshot, route)).generate(
+            prompt,
+            systemPrompt,
+            resolvedTemperature,
+            shouldCache,
+            signal,
+          );
+        },
+        { signal },
       );
     if (!cache) return generateOnce(temperature);
     const resolvedTemperature =
@@ -494,6 +509,7 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
     const hit = await this.operationCacheGet(key, this.modelOf(binding, route), 'generate');
     if (hit !== null) return hit;
     const output = await generateOnce(resolvedTemperature);
+    signal?.throwIfAborted();
     if ((shouldCache ?? (() => true))(output)) await this.options.operationCache?.set(key, output);
     return output;
   }
@@ -779,16 +795,17 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
     role: InferenceModelRole,
     route: InferenceRoute,
     operation: () => Promise<T>,
-    statusesOverride?: ReadonlySet<number>,
+    options: { readonly statuses?: ReadonlySet<number>; readonly signal?: AbortSignal } = {},
   ): Promise<T> {
     return this.transientRetry.run(
       operation,
       this.retryWindows(role),
       this.backoffTimer(role, route),
-      statusesOverride ??
+      options.statuses ??
         (route.kind === 'provider'
           ? PROVIDER_ROUTE_POLICY[route.provider].transientStatuses
           : undefined),
+      options.signal,
     );
   }
 

@@ -1,6 +1,7 @@
 import { isInferenceReasoningJudgePurpose, type InferenceEffort } from '@folklore/contracts';
 import type { ToolSpec } from '@folklore/inference';
 import type { CachedSystemPrefix } from '../InferencePurposeScope.js';
+import { promptTokenFloor } from '../token-floor.js';
 import { CLAUDE_CHECK_PURPOSES } from './claude-checker-rules.js';
 import { ClaudeRouteError } from './claude-route-errors.js';
 import {
@@ -15,7 +16,6 @@ import type { AnthropicRoute } from './anthropic-route.js';
 const CLAUDE_INFERENCE_GEO = 'us';
 const HAIKU_MODEL = 'claude-haiku-5-5';
 const SONNET_MODEL = 'claude-sonnet-5-5';
-export const CHARS_PER_TOKEN_FLOOR = 3;
 export const BATCH_CACHE_TTL = '1h';
 
 export const CLAUDE_REQUEST_TOO_LARGE = 'claude_request_too_large_for_model';
@@ -120,9 +120,11 @@ function text(value: string): TextBlock {
   return { type: 'text', text: value };
 }
 
+export function inputCharsOf(input: ClaudeRequestInput): number {
+  return input.prompt.length + JSON.stringify(systemFor(input) ?? '').length;
+}
+
 export function fitsModel(input: ClaudeRequestInput): boolean {
   if (input.route.model !== HAIKU_MODEL) return true;
-  const parts = [input.prompt, JSON.stringify(systemFor(input) ?? '')];
-  const chars = parts.reduce((sum, part) => sum + part.length, 0);
-  return Math.ceil(chars / CHARS_PER_TOKEN_FLOOR) <= HAIKU_MAX_INPUT_TOKENS;
+  return promptTokenFloor(inputCharsOf(input)) <= HAIKU_MAX_INPUT_TOKENS;
 }

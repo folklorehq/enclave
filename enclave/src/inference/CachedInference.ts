@@ -11,6 +11,7 @@ export interface InferenceModel {
     systemPrompt?: string,
     temperature?: number,
     shouldCache?: (output: string) => boolean,
+    signal?: AbortSignal,
   ): Promise<string>;
 }
 
@@ -82,10 +83,16 @@ export class CachedInference implements SynthesisInference {
     systemPrompt?: string,
     temperature?: number,
     shouldCache: (output: string) => boolean = () => true,
+    signal?: AbortSignal,
   ): Promise<string> {
     const key = this.generationKey(this.models.generateModel, prompt, systemPrompt, temperature);
-    return this.replayed(this.models.generateModel, 'generate', key, shouldCache, () =>
-      this.backend.generate(prompt, systemPrompt, temperature),
+    return this.replayed(
+      this.models.generateModel,
+      'generate',
+      key,
+      shouldCache,
+      () => this.backend.generate(prompt, systemPrompt, temperature, undefined, signal),
+      signal,
     );
   }
 
@@ -130,13 +137,16 @@ export class CachedInference implements SynthesisInference {
     key: string,
     shouldCache: (output: string) => boolean,
     call: () => Promise<string>,
+    signal?: AbortSignal,
   ): Promise<string> {
+    signal?.throwIfAborted();
     const hit = await this.cache.get<string>(key);
     if (hit !== null) {
       this.recordCacheHit(model, operation);
       return hit;
     }
     const output = await call();
+    signal?.throwIfAborted();
     if (shouldCache(output)) await this.cache.set(key, output);
     return output;
   }

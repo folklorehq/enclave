@@ -1,5 +1,10 @@
 import { inferenceTrustPolicyV2Schema } from '@folklore/contracts';
-import type { InferenceBackend, VerifiedActivePolicyRoleBindingV1 } from '@folklore/inference';
+import type {
+  InferenceBackend,
+  InferenceUsageSink,
+  VerifiedActivePolicyRoleBindingV1,
+} from '@folklore/inference';
+import { isAbortOf } from '@folklore/utils';
 import type {
   TenantPolicyFreshnessPort,
   TenantPolicyOperationBackend,
@@ -8,6 +13,8 @@ import type {
 import { OperationAuthority } from './OperationAuthority.js';
 import { createPublicAciOperationBackend } from './PublicAciOperationBackend.js';
 import { createPinnedInferenceTransport } from '../egress/inference.js';
+import { promptTokenFloor } from './token-floor.js';
+import { recordTokenUsage } from './TokenUsageScope.js';
 import { assertPublicInferenceEmbeddingDimension } from './phala.js';
 import {
   publicAciOperationLimits,
@@ -21,12 +28,26 @@ export interface PublicAciRuntimeBackendFactoryOptions {
   readonly bootEpoch: string;
   readonly apiKey?: string;
   readonly latencyProfile?: InferenceLatencyProfile;
+  readonly usageSink?: InferenceUsageSink;
   readonly fetchFactory?: (policy: {
     origin: string;
     route: string;
     tlsSpkiSha256: readonly string[];
   }) => { fetch: typeof fetch; close: () => Promise<void> };
   readonly backendFactory?: typeof createPublicAciOperationBackend;
+}
+
+const CHAT_COMPLETIONS_PATH = '/chat/completions';
+
+// The path alone decides: a query string, a URL or a Request must not hide a dispatched request from metering.
+function isChatCompletions(input: Parameters<typeof fetch>[0], origin: string): boolean {
+  const raw = typeof input === 'object' && 'url' in input ? input.url : String(input);
+  return new URL(raw, origin).pathname.endsWith(CHAT_COMPLETIONS_PATH);
+}
+
+interface AbortableCall {
+  readonly signal: AbortSignal | undefined;
+  readonly inputChars: number;
 }
 
 export function createPublicAciRuntimeBackendFactory(
@@ -63,6 +84,9 @@ export function createPublicAciRuntimeBackendFactory(
       tlsSpkiSha256: snapshot.policy.channel.tlsSpkiSha256,
     });
     let backend: InferenceBackend;
+    // The operation is single-use, so the one caller's signal can ride on every fetch it makes.
+    let callerSignal: AbortSignal | undefined;
+    let dispatched = false;
     try {
       backend = makeBackend({
         providerPolicy: policy,
@@ -72,10 +96,12 @@ export function createPublicAciRuntimeBackendFactory(
         trustedTimeContext,
         keysetHighWater: admission.authority,
         fetchImpl: (input, init) => {
+          if (isChatCompletions(input, policy.origin)) dispatched = true;
           const deadlineSignal = AbortSignal.timeout(remainingBudget());
-          const signal = init?.signal
-            ? AbortSignal.any([init.signal, deadlineSignal])
-            : deadlineSignal;
+          const signals = [init?.signal, callerSignal, deadlineSignal].filter(
+            (signal): signal is AbortSignal => signal != null,
+          );
+          const signal = AbortSignal.any(signals);
           return transport.fetch(input, { ...init, signal });
         },
         apiKey: options.apiKey,
@@ -89,9 +115,11 @@ export function createPublicAciRuntimeBackendFactory(
     const invoke = async <T>(
       operationRole: VerifiedActivePolicyRoleBindingV1['role'],
       fn: () => Promise<T>,
+      abortable?: AbortableCall,
     ): Promise<T> => {
       if (consumed) throw new Error('public_aci_operation_consumed');
       consumed = true;
+      callerSignal = abortable?.signal;
       try {
         if (binding.role !== operationRole) throw new Error('public_aci_operation_role_mismatch');
         await trustedTime.read(trustedTimeContext);
@@ -99,8 +127,27 @@ export function createPublicAciRuntimeBackendFactory(
         const result = await fn();
         remainingBudget();
         return result;
+      } catch (error) {
+        // The response never arrived, so a call aborted after dispatch is metered at its prompt size and its max_tokens, the most the provider may already have generated and billed.
+        if (dispatched && abortable !== undefined && isAbortOf(error, abortable.signal)) {
+          meterAbortedCall(abortable.inputChars);
+        }
+        throw error;
       } finally {
         await Promise.all([backend.close(), transport.close()]);
+      }
+    };
+    const meterAbortedCall = (inputChars: number): void => {
+      try {
+        (options.usageSink ?? recordTokenUsage)({
+          model: binding.modelId,
+          operation: 'generate',
+          promptTokens: promptTokenFloor(inputChars),
+          completionTokens: role.capabilities.maxOutputTokens ?? 0,
+          cached: false,
+        });
+      } catch {
+        /* usage reporting must not mask the abort */
       }
     };
     const generationOptions = (
@@ -141,9 +188,14 @@ export function createPublicAciRuntimeBackendFactory(
             throw new Error('public_aci_embedding_dimension_mismatch');
           return vector;
         }),
-      generate: (prompt, systemPrompt, temperature) =>
-        invoke('generate', () =>
-          backend.generate(prompt, generationOptions(systemPrompt, temperature)),
+      generate: (prompt, systemPrompt, temperature, _shouldCache, signal) =>
+        invoke(
+          'generate',
+          () => backend.generate(prompt, generationOptions(systemPrompt, temperature)),
+          {
+            signal,
+            inputChars: prompt.length + (systemPrompt?.length ?? 0),
+          },
         ),
       critique: (prompt, systemPrompt) =>
         invoke('critique', () => backend.generate(prompt, generationOptions(systemPrompt))),
