@@ -41,6 +41,7 @@ import {
   type ProjectionDatabase,
 } from './directory/EntitlementProjectionApplier.js';
 import { TenantBatchConsent } from './directory/TenantBatchConsent.js';
+import { TenantHistoryWindow } from './directory/TenantHistoryWindow.js';
 import {
   TenantEntitlementProjectionRunner,
   type ProjectionTenant,
@@ -435,6 +436,7 @@ const routingTables = new RoutingTableRefresher({
 const claudeRoutes = new InferenceRouteResolver(routingTables);
 if (claudeRoutes.invalidReason !== undefined) bootStatus.recordAlarm(CLAUDE_ROUTE_CONFIG_INVALID);
 const tenantBatchConsent = new TenantBatchConsent();
+const tenantHistoryWindow = new TenantHistoryWindow();
 const claudeComposition = new ClaudeRouteComposition({
   resolver: claudeRoutes,
   reader: () =>
@@ -1784,6 +1786,7 @@ const projectionTenants = (): ProjectionTenant[] =>
 const entitlementProjectionApplier = new EntitlementProjectionApplier({
   database: () => runtimeDatabaseLease.database(),
   batchConsent: tenantBatchConsent,
+  historyWindow: tenantHistoryWindow,
   onBatchNotAllowed: (orgId) => synthesisConsumer?.cancelBatches(orgId) ?? Promise.resolve(0),
   opsTelemetry,
   logger: logger.child({ component: 'entitlement_projection' }),
@@ -1961,6 +1964,7 @@ const router = new TenantMessageRouter({
   registry,
   ssm,
   cursorStore: isSharedPool ? 'sealed' : 'legacy_ssm',
+  historyWindow: tenantHistoryWindow,
   s3,
   processedBucket: PROCESSED_OUTPUTS_BUCKET,
   controlPlaneUrl: controlPlaneIdentity?.origin ?? CONTROL_PLANE_URL,

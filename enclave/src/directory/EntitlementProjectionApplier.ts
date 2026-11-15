@@ -12,6 +12,7 @@ import type { TelemetryClient } from '@folklore/telemetry';
 import { DirectoryRejectionReporter } from './DirectoryRejectionReporter.js';
 import { TeamProjectionFailureReporter } from './TeamProjectionFailureReporter.js';
 import type { TenantBatchConsent } from './TenantBatchConsent.js';
+import type { TenantHistoryWindow } from './TenantHistoryWindow.js';
 import type { TenantProjectionOutcome } from './TenantEntitlementProjectionRunner.js';
 
 export interface ProjectionDatabase {
@@ -26,6 +27,7 @@ export interface EntitlementProjectionApplierDeps {
   readonly database: () => ProjectionDatabase | undefined;
   readonly logger: Logger;
   readonly batchConsent?: TenantBatchConsent;
+  readonly historyWindow: Pick<TenantHistoryWindow, 'record'>;
   readonly onBatchNotAllowed?: (orgId: string) => Promise<unknown>;
   readonly opsTelemetry?: TelemetryClient;
   readonly now?: () => number;
@@ -60,7 +62,10 @@ export class EntitlementProjectionApplier {
     if (!database) return 'database_unavailable';
     const seen: { directory?: DirectorySync } = {};
     const outcome = await this.createService(
-      this.observed(orgId, source, (directory) => (seen.directory = directory)),
+      this.observed(orgId, source, (directory) => {
+        seen.directory = directory;
+        this.recordHistoryWindow(orgId, directory);
+      }),
       database,
     ).sync();
     if (outcome === 'applied' && seen.directory) {
@@ -87,6 +92,12 @@ export class EntitlementProjectionApplier {
   private recordConsent(orgId: string, directory: DirectorySync): void {
     if (directory.orgId !== orgId) return;
     this.deps.batchConsent?.record(orgId, directory.revision, directory.entitlement.batchAllowed);
+  }
+
+  // Recorded before the write that can flag a backfill, so no backfill pull can run on the narrower window.
+  private recordHistoryWindow(orgId: string, directory: DirectorySync): void {
+    if (directory.orgId !== orgId) return;
+    this.deps.historyWindow.record(orgId, directory.revision, directory.entitlement.plan);
   }
 
   // The service folds every fetch failure into 'unavailable'; the fixed code is what tells an org

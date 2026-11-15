@@ -47,6 +47,8 @@ import {
   type DecryptedSourceConnection,
   type SourceConnectionResolution,
 } from './source-connections-client.js';
+import { ControlPlaneTenantDirectorySource } from '../directory/ControlPlaneTenantDirectorySource.js';
+import type { TenantHistoryWindow } from '../directory/TenantHistoryWindow.js';
 import type { JiraWebhookLifecycleService } from './JiraWebhookLifecycleService.js';
 import {
   BODY_GATED_KINDS,
@@ -129,9 +131,7 @@ export function buildPullFailedSignal(
   };
 }
 
-// the enclave (not the worker signal) owns the uniform 12-month backfill horizon,
-// so no wire message can widen how far back a pull reaches.
-const BACKFILL_WINDOW_MONTHS = 12;
+// The enclave (not the worker signal) owns the backfill horizon, so no wire message can widen how far back a pull reaches.
 // One pull-due message embeds at most this many facts, so a 12-month backfill lands chunk by chunk.
 export const PULL_FACT_BUDGET = 250;
 
@@ -140,14 +140,15 @@ export interface PullWindow {
   options: PullOptions;
 }
 
-/** Backfill resets the cursor to re-pull from the 12-month window start; otherwise resume from it. */
+/** Backfill resets the cursor to re-pull from the tenant's window start; otherwise resume from it. */
 export function resolvePullWindow(
   backfill: boolean,
   storedCursor: string | null,
+  history: Pick<TenantHistoryWindow, 'windowFor'>,
+  orgId: string,
   now: Date = new Date(),
 ): PullWindow {
-  const since = new Date(now);
-  since.setUTCMonth(since.getUTCMonth() - BACKFILL_WINDOW_MONTHS);
+  const since = history.windowFor(orgId, now);
   return { cursor: { value: backfill ? null : storedCursor }, options: { since, backfill } };
 }
 
@@ -161,6 +162,7 @@ export interface PullRunnerDeps {
   processedBucket?: string;
   crypto: EnclaveCrypto;
   orgId: string;
+  historyWindow: Pick<TenantHistoryWindow, 'windowFor' | 'confirmBeforeBackfill'>;
   controlPlaneUrl: string;
   controlPlaneFetch: typeof globalThis.fetch;
   runtimeDeploymentId?: string;
@@ -595,11 +597,15 @@ export async function runPull(
   }
 
   const backfill = message.backfill || scope?.backfill === 'owed';
+  if (backfill)
+    await deps.historyWindow.confirmBeforeBackfill(deps.orgId, () => directorySource(deps));
   const window = scopedWindow(
     budgetedWindow(
       resolvePullWindow(
         backfill,
         backfill ? null : await resumeCursor(deps, message, usesSealedCursor, sealedCursor),
+        deps.historyWindow,
+        deps.orgId,
       ),
     ),
     scope,
@@ -710,6 +716,17 @@ function scopedWindow(window: PullWindow, scope: ResourceScope | undefined): Pul
     cursor: window.cursor,
     options: { ...window.options, includesResource: (id) => selected.has(id) },
   };
+}
+
+function directorySource(deps: PullRunnerDeps): ControlPlaneTenantDirectorySource {
+  return new ControlPlaneTenantDirectorySource({
+    controlPlaneUrl: deps.controlPlaneUrl,
+    runtimeDeploymentId: deps.runtimeDeploymentId ?? deps.deploymentId,
+    tenantDeploymentId: deps.deploymentId,
+    orgId: deps.orgId,
+    agentToken: () => deps.agentToken,
+    fetchImpl: deps.controlPlaneFetch,
+  });
 }
 
 // Runs after the cursor is durable, so a state that moved always has a cursor that matches it.
