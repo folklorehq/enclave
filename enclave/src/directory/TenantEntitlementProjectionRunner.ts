@@ -1,6 +1,12 @@
+import { DIRECTORY_PROJECTION_REFRESH_MS } from '@folklore/contracts';
 import type { Logger } from '@folklore/core';
 import type { EntitlementSyncOutcome } from '@folklore/wiki';
-import { TenantPeriodicRunner, type TenantRunnerEvents } from '../tenant/TenantPeriodicRunner.js';
+import {
+  TENANT_RUNNER_RETRY_MS,
+  TenantPeriodicRunner,
+  type TenantExpediteSignal,
+  type TenantRunnerEvents,
+} from '../tenant/TenantPeriodicRunner.js';
 
 const SETTLED_OUTCOMES: ReadonlySet<TenantProjectionOutcome> = new Set([
   'applied',
@@ -24,6 +30,7 @@ export interface TenantEntitlementProjectionRunnerDeps {
   readonly tenants: () => readonly ProjectionTenant[];
   readonly beginTenant: (tenantId: string) => Promise<(() => void) | undefined>;
   readonly syncTenant: (tenant: ProjectionTenant) => Promise<TenantProjectionOutcome>;
+  readonly expediteSignal?: TenantExpediteSignal;
   readonly logger: Logger;
   readonly now?: () => number;
 }
@@ -40,6 +47,8 @@ export class TenantEntitlementProjectionRunner extends TenantPeriodicRunner<
       runTenant: deps.syncTenant,
       settledOutcomes: SETTLED_OUTCOMES,
       events: PROJECTION_EVENTS,
+      intervals: { refreshMs: DIRECTORY_PROJECTION_REFRESH_MS, retryMs: TENANT_RUNNER_RETRY_MS },
+      ...(deps.expediteSignal === undefined ? {} : { expediteSignal: deps.expediteSignal }),
       logger: deps.logger,
       ...(deps.now === undefined ? {} : { now: deps.now }),
     });

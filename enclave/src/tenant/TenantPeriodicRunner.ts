@@ -4,11 +4,27 @@ const MINUTE_MS = 60_000;
 export const TENANT_RUNNER_REFRESH_MS = 15 * MINUTE_MS;
 export const TENANT_RUNNER_RETRY_MS = 2 * MINUTE_MS;
 export const TENANT_RUNNER_TICK_MS = 30_000;
+export const TENANT_RUNNER_EXPEDITE_GAP_MS = MINUTE_MS;
+export const TENANT_RUNNER_SIGNAL_TIMEOUT_MS = 5_000;
+
+const NO_SIGNAL: ReadonlyMap<string, string> = new Map();
 
 type PassResult = 'settled' | 'retry' | 'failed';
 
+class SignalTimeoutError extends Error {
+  constructor() {
+    super('signal read timed out');
+    this.name = 'SignalTimeoutError';
+  }
+}
+
 export interface PeriodicTenant {
   readonly tenantId: string;
+}
+
+/** Per-tenant values that, when they change, make the tenant due sooner. */
+export interface TenantExpediteSignal {
+  read(): Promise<ReadonlyMap<string, string>>;
 }
 
 export interface TenantRunnerEvents {
@@ -27,6 +43,8 @@ export interface TenantPeriodicRunnerDeps<TTenant extends PeriodicTenant, TOutco
   // Absent: every failed pass retries after the retry interval.
   readonly backoff?: { readonly maxMs: number };
   readonly intervals?: { readonly refreshMs: number; readonly retryMs: number };
+  // Only ever brings an assigned tenant's next pass forward, at most once per expedite gap.
+  readonly expediteSignal?: TenantExpediteSignal;
   readonly logger: Logger;
   readonly now?: () => number;
 }
@@ -35,6 +53,9 @@ export interface TenantPeriodicRunnerDeps<TTenant extends PeriodicTenant, TOutco
 export class TenantPeriodicRunner<TTenant extends PeriodicTenant, TOutcome extends string> {
   private readonly nextDue = new Map<string, number>();
   private readonly failedPasses = new Map<string, number>();
+  private readonly signalAtPassStart = new Map<string, string>();
+  private readonly lastExpeditedAt = new Map<string, number>();
+  private signalFailing = false;
   private readonly now: () => number;
   private inFlight: Promise<void> | undefined;
   private timer: ReturnType<typeof setInterval> | undefined;
@@ -97,10 +118,46 @@ export class TenantPeriodicRunner<TTenant extends PeriodicTenant, TOutcome exten
   private async pass(): Promise<void> {
     const tenants = [...this.deps.tenants()].sort((a, b) => this.compareTenants(a, b));
     this.forgetRemoved(tenants);
+    const signal = await this.readSignal();
     for (const tenant of tenants) {
       if (this.stopped) return;
-      if (this.isDue(tenant.tenantId)) await this.passTenant(tenant);
+      const { tenantId } = tenant;
+      if (this.isDue(tenantId) || this.isExpedited(tenantId, signal)) {
+        await this.passTenant(tenant, signal);
+      }
     }
+  }
+
+  private async readSignal(): Promise<ReadonlyMap<string, string>> {
+    const { expediteSignal, logger } = this.deps;
+    if (!expediteSignal) return NO_SIGNAL;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new SignalTimeoutError()), TENANT_RUNNER_SIGNAL_TIMEOUT_MS);
+    });
+    try {
+      const values = await Promise.race([expediteSignal.read(), timedOut]);
+      this.signalFailing = false;
+      return values;
+    } catch (err) {
+      if (!this.signalFailing) {
+        logger.warn('tenant_runner_signal_unavailable', { error_type: contentFreeErrorType(err) });
+      }
+      this.signalFailing = true;
+      return NO_SIGNAL;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private isExpedited(tenantId: string, signal: ReadonlyMap<string, string>): boolean {
+    const value = signal.get(tenantId);
+    if (value === undefined || value === this.signalAtPassStart.get(tenantId)) return false;
+    const now = this.now();
+    const lastAt = this.lastExpeditedAt.get(tenantId);
+    if (lastAt !== undefined && now < lastAt + TENANT_RUNNER_EXPEDITE_GAP_MS) return false;
+    this.lastExpeditedAt.set(tenantId, now);
+    return true;
   }
 
   private compareTenants(a: TTenant, b: TTenant): number {
@@ -110,10 +167,11 @@ export class TenantPeriodicRunner<TTenant extends PeriodicTenant, TOutcome exten
 
   private forgetRemoved(tenants: readonly TTenant[]): void {
     const assigned = new Set(tenants.map((tenant) => tenant.tenantId));
-    for (const tenantId of this.nextDue.keys()) {
-      if (assigned.has(tenantId)) continue;
-      this.nextDue.delete(tenantId);
-      this.failedPasses.delete(tenantId);
+    const tracked = [this.nextDue, this.failedPasses, this.signalAtPassStart, this.lastExpeditedAt];
+    for (const book of tracked) {
+      for (const tenantId of book.keys()) {
+        if (!assigned.has(tenantId)) book.delete(tenantId);
+      }
     }
   }
 
@@ -122,9 +180,10 @@ export class TenantPeriodicRunner<TTenant extends PeriodicTenant, TOutcome exten
     return due === undefined || this.now() >= due;
   }
 
-  private async passTenant(tenant: TTenant): Promise<void> {
+  private async passTenant(tenant: TTenant, signal: ReadonlyMap<string, string>): Promise<void> {
     const { tenantId } = tenant;
     const { events } = this.deps;
+    this.recordSignal(tenantId, signal.get(tenantId));
     let outcome: TOutcome;
     try {
       const release = await this.deps.beginTenant(tenantId);
@@ -149,6 +208,11 @@ export class TenantPeriodicRunner<TTenant extends PeriodicTenant, TOutcome exten
     }
     this.schedule(tenantId, this.deps.settledOutcomes.has(outcome) ? 'settled' : 'retry');
     this.deps.logger.info(events.pass, { orgId: tenantId, outcome });
+  }
+
+  private recordSignal(tenantId: string, value: string | undefined): void {
+    if (value === undefined) this.signalAtPassStart.delete(tenantId);
+    else this.signalAtPassStart.set(tenantId, value);
   }
 
   private schedule(tenantId: string, result: PassResult): void {

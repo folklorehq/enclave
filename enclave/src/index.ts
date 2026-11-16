@@ -40,6 +40,7 @@ import {
   EntitlementProjectionApplier,
   type ProjectionDatabase,
 } from './directory/EntitlementProjectionApplier.js';
+import { RedisDirectoryNudgeSignal } from './directory/RedisDirectoryNudgeSignal.js';
 import { TenantBatchConsent } from './directory/TenantBatchConsent.js';
 import { TenantHistoryWindow } from './directory/TenantHistoryWindow.js';
 import {
@@ -1808,6 +1809,7 @@ const entitlementProjectionRunner =
               fetchImpl: controlPlaneFetch,
             }),
           ),
+        expediteSignal: new RedisDirectoryNudgeSignal(haltCache.redis, POOL_ID),
         logger,
       })
     : undefined;
