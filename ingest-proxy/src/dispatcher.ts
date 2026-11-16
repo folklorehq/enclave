@@ -22,6 +22,8 @@ import {
   findRoutingAllowlistEntry,
   normalizeRoutingAllowlist,
   oauthRouteHmacMessage,
+  routingHmacMessage,
+  type RoutingAllowlistEntry,
   timingSafeStringEqual,
   verifyRoutingHmac,
   verifyOAuthRouteHmac,
@@ -186,7 +188,28 @@ async function readRoutingAllowlist(orgId: string): Promise<RoutingAllowlistLook
   }
 }
 
-type RoutingDecision = 'allowed' | 'denied' | 'unavailable';
+type RoutingDecision =
+  | { readonly outcome: 'allowed'; readonly functionName: string }
+  | { readonly outcome: 'denied' | 'unavailable' };
+
+const ROUTING_DENIED: RoutingDecision = { outcome: 'denied' };
+const ROUTING_UNAVAILABLE: RoutingDecision = { outcome: 'unavailable' };
+
+function expectedRoutingHmac(
+  secret: string,
+  orgId: string,
+  source: string,
+  mode: RoutingMode,
+  entry: RoutingAllowlistEntry,
+): string {
+  return createHmac('sha256', secret)
+    .update(routingHmacMessage(orgId, source, mode, entry.ingestKey))
+    .digest('hex');
+}
+
+function allowedRouting(orgId: string, entry: RoutingAllowlistEntry): RoutingDecision {
+  return { outcome: 'allowed', functionName: ingestFunctionName(entry.ingestKey ?? orgId) };
+}
 
 async function isRoutingAllowed(
   orgId: string,
@@ -194,14 +217,16 @@ async function isRoutingAllowed(
   mode: RoutingMode,
 ): Promise<RoutingDecision> {
   const lookup = await fetchRoutingAllowlist(orgId);
-  if (lookup.status === 'unavailable') return 'unavailable';
-  if (lookup.status === 'missing') return 'denied';
+  if (lookup.status === 'unavailable') return ROUTING_UNAVAILABLE;
+  if (lookup.status === 'missing') return ROUTING_DENIED;
   const entry = findRoutingAllowlistEntry(lookup.entries, orgId, source, mode);
-  if (!entry?.hmac) return 'denied';
+  if (!entry?.hmac) return ROUTING_DENIED;
   const secret = await fetchPerTenantSecret(orgId, source);
-  if (!secret) return 'unavailable';
-  const expected = createHmac('sha256', secret).update(`${orgId}:${source}:${mode}`).digest('hex');
-  return verifyRoutingHmac(expected, entry.hmac, entry.previousHmac) ? 'allowed' : 'denied';
+  if (!secret) return ROUTING_UNAVAILABLE;
+  const expected = expectedRoutingHmac(secret, orgId, source, mode, entry);
+  return verifyRoutingHmac(expected, entry.hmac, entry.previousHmac)
+    ? allowedRouting(orgId, entry)
+    : ROUTING_DENIED;
 }
 
 async function fetchOAuthRouteCapability(routeId: string): Promise<OAuthRouteCapabilityLookup> {
@@ -245,53 +270,50 @@ async function isOAuthRoutingAllowed(
   routeId: string,
 ): Promise<RoutingDecision> {
   let lookup = await fetchRoutingAllowlist(orgId);
-  if (lookup.status === 'unavailable') return 'unavailable';
-  if (lookup.status === 'missing') return 'denied';
+  if (lookup.status === 'unavailable') return ROUTING_UNAVAILABLE;
+  if (lookup.status === 'missing') return ROUTING_DENIED;
   let entry = findRoutingAllowlistEntry(lookup.entries, orgId, source, 'url');
-  if (!entry?.hmac) return 'denied';
+  if (!entry?.hmac) return ROUTING_DENIED;
 
   const secret = await fetchPerTenantSecret(orgId, source);
-  if (!secret) return 'unavailable';
-  const expectedRoutingHmac = createHmac('sha256', secret)
-    .update(`${orgId}:${source}:url`)
-    .digest('hex');
-  if (!verifyRoutingHmac(expectedRoutingHmac, entry.hmac, entry.previousHmac)) return 'denied';
+  if (!secret) return ROUTING_UNAVAILABLE;
+  const expectedHmac = expectedRoutingHmac(secret, orgId, source, 'url', entry);
+  if (!verifyRoutingHmac(expectedHmac, entry.hmac, entry.previousHmac)) return ROUTING_DENIED;
 
   const cachedRouteMatches =
     entry.routeId !== undefined && timingSafeStringEqual(routeId, entry.routeId);
   if (!cachedRouteMatches) {
     allowlistCache.delete(orgId);
     lookup = await fetchRoutingAllowlist(orgId, true);
-    if (lookup.status === 'unavailable') return 'unavailable';
-    if (lookup.status === 'missing') return 'denied';
+    if (lookup.status === 'unavailable') return ROUTING_UNAVAILABLE;
+    if (lookup.status === 'missing') return ROUTING_DENIED;
     entry = findRoutingAllowlistEntry(lookup.entries, orgId, source, 'url');
-    if (!entry?.hmac) return 'denied';
+    if (!entry?.hmac) return ROUTING_DENIED;
   }
 
-  if (!entry.routeId || !timingSafeStringEqual(routeId, entry.routeId)) return 'denied';
+  if (!entry.routeId || !timingSafeStringEqual(routeId, entry.routeId)) return ROUTING_DENIED;
 
-  const refreshedRoutingHmac = createHmac('sha256', secret)
-    .update(`${orgId}:${source}:url`)
-    .digest('hex');
-  if (!verifyRoutingHmac(refreshedRoutingHmac, entry.hmac, entry.previousHmac)) return 'denied';
-  if (!entry.routeHmac || !entry.attestationGeneration) return 'denied';
+  const refreshedRoutingHmac = expectedRoutingHmac(secret, orgId, source, 'url', entry);
+  if (!verifyRoutingHmac(refreshedRoutingHmac, entry.hmac, entry.previousHmac))
+    return ROUTING_DENIED;
+  if (!entry.routeHmac || !entry.attestationGeneration) return ROUTING_DENIED;
 
   const expectedRouteHmac = createHmac('sha256', secret)
     .update(oauthRouteHmacMessage(orgId, source, routeId))
     .digest('hex');
-  if (!verifyOAuthRouteHmac(entry.routeHmac, expectedRouteHmac)) return 'denied';
+  if (!verifyOAuthRouteHmac(entry.routeHmac, expectedRouteHmac)) return ROUTING_DENIED;
 
   const capabilityLookup = await fetchOAuthRouteCapability(routeId);
-  if (capabilityLookup.status === 'unavailable') return 'unavailable';
-  if (capabilityLookup.status === 'missing') return 'denied';
+  if (capabilityLookup.status === 'unavailable') return ROUTING_UNAVAILABLE;
+  if (capabilityLookup.status === 'missing') return ROUTING_DENIED;
   const capabilityMatches =
     timingSafeStringEqual(capabilityLookup.capability.routeId, routeId) &&
     capabilityLookup.capability.orgId === orgId &&
     capabilityLookup.capability.source === source;
-  if (!capabilityMatches) return 'denied';
+  if (!capabilityMatches) return ROUTING_DENIED;
   return capabilityLookup.capability.attestationGeneration === entry.attestationGeneration
-    ? 'allowed'
-    : 'denied';
+    ? allowedRouting(orgId, entry)
+    : ROUTING_DENIED;
 }
 
 function consumeJiraAdmission(sourceIp: string): boolean {
@@ -652,17 +674,19 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
         }
 
         const routingDecision = await isOAuthRoutingAllowed(tenantId, source, routeId);
-        if (routingDecision === 'unavailable') {
+        if (routingDecision.outcome === 'unavailable') {
           return rejectWebhook(source, mode, 'routing_unavailable');
         }
-        if (routingDecision !== 'allowed') return rejectWebhook(source, mode, 'routing_denied');
+        if (routingDecision.outcome !== 'allowed') {
+          return rejectWebhook(source, mode, 'routing_denied');
+        }
 
         const invokePayload = await buildInvokePayload(
           tenantId,
           source,
           body,
           headers,
-          ingestFunctionName(tenantId),
+          routingDecision.functionName,
           'url',
           oauthContext,
         );
@@ -676,10 +700,12 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 
       if (source === JIRA_SOURCE) return rejectWebhook(source, mode, 'auth_unsupported');
       const routingDecision = await isRoutingAllowed(tenantId, source, 'url');
-      if (routingDecision === 'unavailable') {
+      if (routingDecision.outcome === 'unavailable') {
         return rejectWebhook(source, mode, 'routing_unavailable');
       }
-      if (routingDecision !== 'allowed') return rejectWebhook(source, mode, 'routing_denied');
+      if (routingDecision.outcome !== 'allowed') {
+        return rejectWebhook(source, mode, 'routing_denied');
+      }
       const secret = await fetchPerTenantSecret(tenantId, source);
       if (!secret) return rejectWebhook(source, mode, 'secret_unavailable');
       const signatureValid = verifySignature(source, headers, body, secret);
@@ -708,7 +734,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
         source,
         body,
         headers,
-        ingestFunctionName(tenantId),
+        routingDecision.functionName,
         'url',
       );
       if (!invokePayload) return rejectWebhook(source, mode, 'dispatcher_auth_unavailable');
@@ -744,10 +770,12 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     const tenant = await resolveTenant(ddb, source, parsed, headers as Record<string, string>);
     if (!tenant) return rejectWebhook(source, mode, 'tenant_unresolved');
     const routingDecision = await isRoutingAllowed(tenant.orgId, source, 'payload');
-    if (routingDecision === 'unavailable') {
+    if (routingDecision.outcome === 'unavailable') {
       return rejectWebhook(source, mode, 'routing_unavailable');
     }
-    if (routingDecision !== 'allowed') return rejectWebhook(source, mode, 'routing_denied');
+    if (routingDecision.outcome !== 'allowed') {
+      return rejectWebhook(source, mode, 'routing_denied');
+    }
 
     // Rate limiting (skip if RATE_LIMIT_TABLE env var is not configured)
     const rateLimitTable = process.env['RATE_LIMIT_TABLE'];
@@ -762,7 +790,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       source,
       body,
       headers,
-      ingestFunctionName(tenant.orgId),
+      routingDecision.functionName,
       'payload',
     );
     if (!invokePayload) return rejectWebhook(source, mode, 'dispatcher_auth_unavailable');

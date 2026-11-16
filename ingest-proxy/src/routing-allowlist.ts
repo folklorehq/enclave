@@ -1,6 +1,10 @@
 import { timingSafeEqual } from 'node:crypto';
+import { UUID_V4_LOWERCASE_PATTERN } from './uuid-pattern.js';
 
 export type RoutingMode = 'payload' | 'url';
+
+export const ROUTING_INGEST_KEY_FIELD = 'ingestKey';
+const ROUTING_INGEST_KEY_LABEL = 'ingest';
 
 export interface RoutingAllowlistEntry {
   tenantId: string;
@@ -12,10 +16,25 @@ export interface RoutingAllowlistEntry {
   routeHmac?: string;
   attestationGeneration?: string;
   expiresAt?: string;
+  ingestKey?: string;
 }
 
-export function routingHmacMessage(tenantId: string, source: string, mode: RoutingMode): string {
-  return `${tenantId}:${source}:${mode}`;
+export function routingHmacMessage(
+  tenantId: string,
+  source: string,
+  mode: RoutingMode,
+  ingestKey?: string,
+): string {
+  const base = `${tenantId}:${source}:${mode}`;
+  return ingestKey === undefined ? base : `${base}:${ROUTING_INGEST_KEY_LABEL}:${ingestKey}`;
+}
+
+function validIngestKey(candidate: unknown, tenantId: string): string | undefined {
+  return typeof candidate === 'string' &&
+    UUID_V4_LOWERCASE_PATTERN.test(candidate) &&
+    candidate !== tenantId.toLowerCase()
+    ? candidate
+    : undefined;
 }
 
 export function normalizeRoutingAllowlist(value: unknown): readonly RoutingAllowlistEntry[] {
@@ -31,6 +50,7 @@ export function normalizeRoutingAllowlist(value: unknown): readonly RoutingAllow
     ) {
       continue;
     }
+    const ingestKey = validIngestKey(item[ROUTING_INGEST_KEY_FIELD], item['tenantId']);
     entries.push({
       tenantId: item['tenantId'],
       source: item['source'],
@@ -43,6 +63,7 @@ export function normalizeRoutingAllowlist(value: unknown): readonly RoutingAllow
         ? { attestationGeneration: item['attestationGeneration'] }
         : {}),
       ...(typeof item['expiresAt'] === 'string' ? { expiresAt: item['expiresAt'] } : {}),
+      ...(ingestKey === undefined ? {} : { [ROUTING_INGEST_KEY_FIELD]: ingestKey }),
     });
   }
   return entries;
