@@ -1,4 +1,9 @@
-import { directorySyncSchema, type DirectorySync } from '@folklore/contracts';
+import {
+  DIRECTORY_ACCESS_MANAGE_ASKED,
+  DIRECTORY_ACCESS_MANAGE_PARAM,
+  directorySyncSchema,
+  type DirectorySync,
+} from '@folklore/contracts';
 import type { DirectorySourcePort } from '@folklore/wiki';
 import { assertControlPlaneOrigin } from '../pull/control-plane-url.js';
 
@@ -54,6 +59,7 @@ export class ControlPlaneTenantDirectorySource implements DirectorySourcePort {
     const query = new URLSearchParams({
       orgId: this.deps.orgId,
       tenantDeploymentId: this.deps.tenantDeploymentId,
+      [DIRECTORY_ACCESS_MANAGE_PARAM]: DIRECTORY_ACCESS_MANAGE_ASKED,
     });
     const deployment = encodeURIComponent(this.deps.runtimeDeploymentId);
     return `${this.deps.controlPlaneUrl}/v1/deployments/${deployment}/directory?${query.toString()}`;
