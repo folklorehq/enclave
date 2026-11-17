@@ -1,5 +1,5 @@
 import type { RoutingMode } from './routing-allowlist.js';
-import { WEBHOOKS } from './edge-descriptor.js';
+import { declaredBodyTenantKey, WEBHOOKS } from './edge-descriptor.js';
 import { SIGNATURE_VERIFIER_SOURCES } from './signature-verifier.js';
 
 const REJECTION_STATUS = {
@@ -8,6 +8,7 @@ const REJECTION_STATUS = {
   auth_unsupported: 401,
   auth_malformed: 401,
   signature_invalid: 401,
+  timestamp_stale: 401,
   tenant_unresolved: 401,
   routing_denied: 401,
   payload_too_large: 413,
@@ -43,6 +44,24 @@ export function rejectWebhook(
     JSON.stringify({ msg: REJECTED_EVENT, source: loggableSource(source), mode, reason }),
   );
   return { statusCode: REJECTION_STATUS[reason] };
+}
+
+const VERIFIED_DROP_REASONS: ReadonlySet<WebhookRejectionReason> = new Set([
+  'timestamp_stale',
+  'tenant_unresolved',
+  'routing_denied',
+]);
+
+export function rejectVerifiedWebhook(
+  source: string,
+  mode: RoutingMode,
+  reason: WebhookRejectionReason,
+): { statusCode: number } {
+  const rejected = rejectWebhook(source, mode, reason);
+  const dropped =
+    VERIFIED_DROP_REASONS.has(reason) && declaredBodyTenantKey(source, WEBHOOKS) !== null;
+  // A verified delivery the provider cannot fix is dropped with 2xx so the provider keeps the endpoint enabled.
+  return dropped ? { statusCode: 200 } : rejected;
 }
 
 export function acceptWebhook(source: string, mode: RoutingMode): { statusCode: 200 } {

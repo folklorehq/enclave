@@ -3,9 +3,15 @@ import { DynamoDBClient, GetItemCommand } from '@aws-sdk/client-dynamodb';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
 import type { APIGatewayProxyHandlerV2 } from 'aws-lambda';
-import { resolveTenant, EXTRACTORS } from './tenant-resolver.js';
+import { resolveTenant, hasPayloadTenantKey } from './tenant-resolver.js';
 import { normalizeHeaders } from './signature-verifier.js';
-import { WEBHOOKS, selectEventType, selectValue, verifyDelivery } from './edge-descriptor.js';
+import {
+  WEBHOOKS,
+  deliveryIsFresh,
+  selectEventType,
+  selectValue,
+  verifyDelivery,
+} from './edge-descriptor.js';
 import { extractEventType } from './lambdas/handler.js';
 import {
   isDeclarativeWebhook,
@@ -18,7 +24,12 @@ import { checkRateLimit } from './rate-limiter.js';
 import { fetchDispatcherAuthSecret, computeDispatcherAuthHmac } from './dispatcher-auth.js';
 import { ingestFunctionName } from './ingest-function-name.js';
 import { UUID_PATTERN } from './uuid-pattern.js';
-import { acceptWebhook, loggableSource, rejectWebhook } from './webhook-outcome-log.js';
+import {
+  acceptWebhook,
+  loggableSource,
+  rejectVerifiedWebhook,
+  rejectWebhook,
+} from './webhook-outcome-log.js';
 import {
   captureNotionVerificationToken,
   getNotionVerificationCaptureConfig,
@@ -642,7 +653,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       }
     }
 
-    if (!tenantId && !Object.hasOwn(EXTRACTORS, source)) {
+    if (!tenantId && !hasPayloadTenantKey(source)) {
       return rejectWebhook(source, mode, 'source_unrecognized');
     }
 
@@ -760,6 +771,9 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       if (!secret) return rejectWebhook(source, mode, 'secret_unavailable');
       const signatureValid = verifyDelivery(WEBHOOKS, source, headers, body, secret);
       if (!signatureValid) return rejectWebhook(source, mode, 'signature_invalid');
+      if (!deliveryIsFresh(WEBHOOKS, source, parsed, Date.now())) {
+        return rejectVerifiedWebhook(source, mode, 'timestamp_stale');
+      }
 
       // Zoom CRC: handle endpoint.url_validation AFTER signature verification
       const zoomCrc = handleZoomCrc(source, parsed, secret);
@@ -802,6 +816,9 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 
     const signatureValid = verifyDelivery(WEBHOOKS, source, headers, body, secret);
     if (!signatureValid) return rejectWebhook(source, mode, 'signature_invalid');
+    if (!deliveryIsFresh(WEBHOOKS, source, parsed, Date.now())) {
+      return rejectVerifiedWebhook(source, mode, 'timestamp_stale');
+    }
 
     if (source === INTERCOM_SOURCE && isIntercomPing(parsed)) {
       return { statusCode: 200 };
@@ -818,13 +835,13 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     }
 
     const tenant = await resolveTenant(ddb, source, parsed, headers as Record<string, string>);
-    if (!tenant) return rejectWebhook(source, mode, 'tenant_unresolved');
+    if (!tenant) return rejectVerifiedWebhook(source, mode, 'tenant_unresolved');
     const routingDecision = await isRoutingAllowed(tenant.orgId, source, 'payload');
     if (routingDecision.outcome === 'unavailable') {
       return rejectWebhook(source, mode, 'routing_unavailable');
     }
     if (routingDecision.outcome !== 'allowed') {
-      return rejectWebhook(source, mode, 'routing_denied');
+      return rejectVerifiedWebhook(source, mode, 'routing_denied');
     }
 
     // Rate limiting (skip if RATE_LIMIT_TABLE env var is not configured)

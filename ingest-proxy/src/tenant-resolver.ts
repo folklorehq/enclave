@@ -1,5 +1,7 @@
 import { GetItemCommand } from '@aws-sdk/client-dynamodb';
 import type { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import type { ConnectorWebhook } from '@folklore/contracts';
+import { declaredBodyTenantKey, selectValue, WEBHOOKS } from './edge-descriptor.js';
 
 export interface TenantResolution {
   orgId: string;
@@ -104,17 +106,28 @@ export const EXTRACTORS: Record<string, ExtractorFn> = {
   confluence: jwtIssExtractor,
 };
 
+export function hasPayloadTenantKey(
+  source: string,
+  webhooks: ReadonlyMap<string, ConnectorWebhook> = WEBHOOKS,
+): boolean {
+  return declaredBodyTenantKey(source, webhooks) !== null || Object.hasOwn(EXTRACTORS, source);
+}
+
+function extractedTenantId(source: string, body: unknown, headers: Record<string, string>) {
+  if (!Object.hasOwn(EXTRACTORS, source)) return null;
+  return EXTRACTORS[source]?.(body, headers) || null;
+}
+
 export async function resolveTenant(
   ddb: DynamoDBClient,
   source: string,
   body: unknown,
   headers: Record<string, string>,
+  webhooks: ReadonlyMap<string, ConnectorWebhook> = WEBHOOKS,
 ): Promise<{ orgId: string } | null> {
-  if (!Object.hasOwn(EXTRACTORS, source)) return null;
-  const extractor = EXTRACTORS[source];
-  if (!extractor) return null;
-
-  const externalId = extractor(body, headers);
+  const key = declaredBodyTenantKey(source, webhooks);
+  const externalId =
+    key === null ? extractedTenantId(source, body, headers) : selectValue(key, {}, body);
   if (!externalId) return null;
 
   return fetchRoutingEntry(ddb, source, externalId);

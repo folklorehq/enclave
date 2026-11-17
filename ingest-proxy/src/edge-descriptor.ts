@@ -1,9 +1,11 @@
 import { createHmac } from 'crypto';
 import {
+  bodyTenantKey,
   CONNECTOR_MANIFESTS,
   isDeclarativeWebhook,
   webhookEventTypeSchema,
   type ConnectorWebhook,
+  type WebhookBodyTenantKey,
   type WebhookSelector,
   type WebhookVerifier,
 } from '@folklore/contracts';
@@ -28,6 +30,14 @@ export const WEBHOOKS: ReadonlyMap<string, ConnectorWebhook> = new Map(
     manifest.webhook === null ? [] : [[manifest.kind, manifest.webhook]],
   ),
 );
+
+export function declaredBodyTenantKey(
+  source: string,
+  webhooks: ReadonlyMap<string, ConnectorWebhook>,
+): WebhookBodyTenantKey | null {
+  const webhook = webhooks.get(source);
+  return webhook === undefined ? null : bodyTenantKey(webhook);
+}
 
 const TIMESTAMPED_PREFIX = 'v0=';
 const TIMESTAMPED_VERSION = 'v0';
@@ -110,6 +120,18 @@ export function selectEventType(
 ): string {
   const value = selectValue(selector, headers, parsedBody);
   return webhookEventTypeSchema.safeParse(value).success ? value : '';
+}
+
+export function deliveryIsFresh(
+  webhooks: ReadonlyMap<string, ConnectorWebhook>,
+  source: string,
+  parsedBody: unknown,
+  nowMs: number,
+): boolean {
+  const freshness = webhooks.get(source)?.freshness;
+  if (freshness === undefined) return true;
+  const timestamp = resolveJsonPointer(parsedBody, freshness.pointer);
+  return withinReplayWindow(timestamp, freshness.toleranceSeconds, freshness.unit, nowMs);
 }
 
 export function verifyDelivery(

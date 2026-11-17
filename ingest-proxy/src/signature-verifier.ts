@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from 'crypto';
+import type { WebhookTimestampUnit } from '@folklore/contracts';
 
 const SVIX_SECRET_PREFIX = 'whsec_';
 const CONNECT_JWT_PREFIX = 'jwt ';
@@ -22,10 +23,21 @@ export function normalizeHeaders(
   return normalized;
 }
 
-export function withinReplayWindow(ts: string | undefined, toleranceS: number): boolean {
+function timestampSeconds(timestamp: unknown, unit: WebhookTimestampUnit): number {
+  const value =
+    typeof timestamp === 'number' || typeof timestamp === 'string' ? Number(timestamp) : NaN;
+  return unit === 'ms' ? value / MS_PER_S : value;
+}
+
+export function withinReplayWindow(
+  timestamp: unknown,
+  toleranceS: number,
+  unit: WebhookTimestampUnit = 's',
+  nowMs: number = Date.now(),
+): boolean {
   // The signed basestring includes the timestamp, so this bounds replay; non-numeric timestamps fail closed.
-  const tsNum = Number(ts);
-  return Number.isFinite(tsNum) && Math.abs(Date.now() / MS_PER_S - tsNum) <= toleranceS;
+  const seconds = timestampSeconds(timestamp, unit);
+  return Number.isFinite(seconds) && Math.abs(nowMs / MS_PER_S - seconds) <= toleranceS;
 }
 
 function decodeJwtSegment(segment: string): Record<string, unknown> | null {
