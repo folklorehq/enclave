@@ -12,6 +12,7 @@ import {
   tenantAssignmentSchema,
   versionedTenantAssignmentSchema,
 } from '@folklore/contracts';
+import { bareKmsKeyId } from '../sealing/kms-key-arn.js';
 
 // The assignment shape is defined ONCE in @folklore/contracts (design §4.3) so the control-plane
 // producer and this consumer cannot drift. Env parsing is the bootstrap/dedicated fallback (§6.1);
@@ -54,6 +55,8 @@ export function parseTenantAssignments(env: NodeJS.ProcessEnv): TenantAssignment
   assertNoDuplicates(assignments);
   return assignments;
 }
+
+export const ASSIGNMENT_MANIFEST_RESOURCE_SHARED = 'assignment_manifest_resource_shared';
 
 export const SHARED_POOL_ENV_ASSIGNMENTS_REFUSED = 'shared_pool_env_assignments_refused';
 
@@ -174,5 +177,45 @@ function assertNoDuplicates(assignments: readonly { tenantId: string }[]): void 
       throw new Error(`duplicate tenant assignment for ${assignment.tenantId}`);
     }
     seen.add(assignment.tenantId);
+  }
+}
+
+type SharedResourceAssignment = TenantAssignment & {
+  readonly storageKeyHistory?: readonly { readonly storageKeyId: string }[];
+};
+
+// Run on a verified manifest only: a refusal is recorded for signed bytes, never for unsigned ones.
+export function assertNoSharedResources(assignments: readonly SharedResourceAssignment[]): void {
+  const keyOwners = new Map<string, string>();
+  const bucketOwners = new Map<string, string>();
+  const queueOwners = new Map<string, string>();
+  for (const assignment of assignments) {
+    const { tenantId } = assignment;
+    claimResources(keyOwners, tenantId, [
+      ...[assignment.kmsKeyId, assignment.storageKeyId].map(bareKmsKeyId),
+      ...(assignment.storageKeyHistory ?? []).map((entry) => bareKmsKeyId(entry.storageKeyId)),
+    ]);
+    claimResources(
+      bucketOwners,
+      tenantId,
+      [assignment.sealedBlobBucket, assignment.rawPayloadsBucket, assignment.processedBucket].map(
+        (bucket) => bucket.trim(),
+      ),
+    );
+    claimResources(queueOwners, tenantId, [assignment.queueUrl.trim()]);
+  }
+}
+
+function claimResources(
+  owners: Map<string, string>,
+  tenantId: string,
+  resources: readonly string[],
+): void {
+  for (const resource of resources) {
+    const owner = owners.get(resource);
+    if (owner !== undefined && owner !== tenantId) {
+      throw new Error(ASSIGNMENT_MANIFEST_RESOURCE_SHARED);
+    }
+    owners.set(resource, tenantId);
   }
 }

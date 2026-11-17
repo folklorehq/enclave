@@ -4,6 +4,7 @@ export interface KmsKeyScope {
 }
 
 const BARE_KMS_KEY_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const KMS_KEY_ARN = /^arn:[^:]*:kms:[^:]*:[^:]*:key\/(.+)$/;
 const ACCOUNT_ID = /^\d{12}$/;
 const REGION = /^[a-z]{2}(?:-gov)?-[a-z]+-\d$/;
 const CHINA_REGION_PREFIX = 'cn-';
@@ -22,4 +23,9 @@ export function canonicalKmsKeyArn(keyId: string, scope: KmsKeyScope | undefined
     throw new Error('kms_key_scope_invalid');
   }
   return `arn:${partitionOf(scope.awsRegion)}:kms:${scope.awsRegion}:${scope.awsAccountId}:key/${keyId}`;
+}
+
+export function bareKmsKeyId(keyIdOrArn: string): string {
+  const trimmed = keyIdOrArn.trim();
+  return KMS_KEY_ARN.exec(trimmed)?.[1] ?? trimmed;
 }
