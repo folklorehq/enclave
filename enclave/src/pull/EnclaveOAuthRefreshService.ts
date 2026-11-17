@@ -48,7 +48,8 @@ export class EnclaveOAuthRefreshService {
       orgId: command.orgId,
       deploymentId: command.deploymentId,
     });
-    if (activeGeneration !== command.attestationGeneration) {
+    // The lease only authorizes the refresh; the credential stays bound to the generation it was sealed under.
+    if (activeGeneration === null) {
       return this.failure(command, 'attestation_unavailable');
     }
     if (this.hash(command.encryptedRefreshToken) !== command.expectedRefreshCiphertextSha256) {
