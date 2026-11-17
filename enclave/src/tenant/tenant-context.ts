@@ -7,7 +7,15 @@ import type { Pipeline } from '../pipeline/index.js';
 import type { ResourceScopeFilter } from '../resource-scope/ResourceScopeFilter.js';
 import { llmCacheObjectName, type LlmCacheNamer } from '../inference/llm-cache.js';
 import { TenantCacheSalt } from '../workers/page/draft/TenantCacheSalt.js';
-import { deriveIngestKeypair, deriveKey, deriveLlmCacheNameKey } from '../sealing/keygen.js';
+import {
+  deriveHelpCenterIntegrityKey,
+  deriveHelpCenterSigningKey,
+  deriveHelpCenterSlugKey,
+  deriveIngestKeypair,
+  deriveKey,
+  deriveLlmCacheNameKey,
+  type HelpCenterSigningKey,
+} from '../sealing/keygen.js';
 
 const PERSONAL_IDENTIFIER_KEY_PURPOSE = 'personal-source-identifier-v1';
 const ENTITY_KEY_PURPOSE = 'entity-v1';
@@ -119,6 +127,21 @@ export class TenantContext implements LlmCacheNamer {
   entityKey(): Buffer | null {
     if (!this.cryptoOrNull) return null;
     return deriveKey(this.masterKey, ENTITY_KEY_PURPOSE);
+  }
+
+  helpCenterSigningKey(epoch: number): HelpCenterSigningKey | null {
+    if (!this.cryptoOrNull) return null;
+    return deriveHelpCenterSigningKey(this.masterKey, epoch);
+  }
+
+  helpCenterIntegrityKey(): Buffer | null {
+    if (!this.cryptoOrNull) return null;
+    return deriveHelpCenterIntegrityKey(this.masterKey);
+  }
+
+  helpCenterSlugKey(): Buffer | null {
+    if (!this.cryptoOrNull) return null;
+    return deriveHelpCenterSlugKey(this.masterKey);
   }
 
   titleDigestKey(): Buffer | null {
