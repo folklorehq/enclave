@@ -1,3 +1,5 @@
+/* O_CLOEXEC is POSIX.1-2008, and binding.gyp builds with -std=c99. */
+#define _POSIX_C_SOURCE 200809L
 #include <node_api.h>
 #include <linux/types.h>
 #include <errno.h>
@@ -32,7 +34,7 @@ static void secure_zero(void *buffer, size_t size) {
 
 static int nsm_call(const uint8_t *request, uint64_t request_size,
                     uint8_t *response, uint64_t *response_size) {
-    int fd = open(NSM_DEV, O_RDWR);
+    int fd = open(NSM_DEV, O_RDWR | O_CLOEXEC);
     if (fd < 0) return -1;
     struct nsm_raw args = {
         .request = {
