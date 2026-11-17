@@ -24,6 +24,7 @@ import { TenantPolicyBoundInferenceError } from '../../inference/TenantPolicyBou
 import { TrustedEvidenceContextError } from '../../inference/TrustedEvidenceContextProvider.js';
 import { TrustedTimeAuthorityError } from '../../inference/TrustedTimeAuthority.js';
 import { errorType } from '../../logging/error-fields.js';
+import { OAuthRefreshFailedError } from '../../pull/OAuthRefreshFailedError.js';
 import type { PullNotProcessedReason } from '../../pull/pull-runner.js';
 import { TenantContextZeroizedError } from '../tenant-context.js';
 import { CrossTenantRoutingError, TenantMessageRouteError } from '../tenant-message-router.js';
@@ -158,6 +159,7 @@ const TYPED_CODE_PREFIXES: ReadonlyArray<readonly [ErrorClass, string]> = [
   [EvidenceAnchorVerifierError, 'anchor'],
   [GatewayEvidenceRecorderError, 'gateway_evidence'],
   [TrustedEvidenceContextError, 'context'],
+  [OAuthRefreshFailedError, 'oauth_refresh'],
 ];
 
 /** A fixed `<phase>_<reason>` slug for a failed message attempt; no message text, URL or id enters it. */
@@ -231,7 +233,11 @@ function joinCode(prefix: string, reason: string): string {
 function classification(error: unknown, reservedLength: number): Classification {
   const chain = causeChain(error);
   let reason: string | undefined;
-  for (const link of chain) reason = linkReason(link) ?? reason;
+  for (const link of chain) {
+    reason = linkReason(link) ?? reason;
+    // The refresh outcome is more specific than the 401 it wraps.
+    if (link instanceof OAuthRefreshFailedError) break;
+  }
   if (reason !== undefined) return { reason: roleTaggedReason(chain, reason, reservedLength) };
   reason = builtInClassReason(chain[chain.length - 1]);
   if (reason !== undefined) return { reason };

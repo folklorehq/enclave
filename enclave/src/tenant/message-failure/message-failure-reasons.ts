@@ -1,3 +1,4 @@
+import { linear } from '@folklore/connectors';
 import { ROUTING_TABLE_REFUSALS } from '@folklore/contracts';
 import { HIGH_WATER_FAILURE_CODES } from '@folklore/inference';
 import type { EvidenceKeySessionErrorCode } from '../../inference/EvidenceKeySession.js';
@@ -380,5 +381,6 @@ export const MESSAGE_FAILURE_REASONS: ReadonlySet<string> = new Set<string>([
   ...PIPELINE_REASONS,
   ...CONNECTOR_TRANSPORT_REASONS,
   ...ROUTE_REASONS,
+  ...linear.LINEAR_REQUEST_ERROR_CODES,
   ...OUTPUT_FAILURE_REASONS,
 ]);

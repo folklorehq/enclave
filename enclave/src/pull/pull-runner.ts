@@ -31,6 +31,10 @@ import {
 import { ConnectorEgressTransport } from '../egress/connector-runtime/ConnectorEgressTransport.js';
 import { externalHttpsProxyAgent } from '../egress/proxy.js';
 import { ProviderRejectedError } from '../egress/provider-token-fetch.js';
+import {
+  OAuthRefreshFailedError,
+  type FailedOAuthRefreshOutcome,
+} from './OAuthRefreshFailedError.js';
 import { deriveMemberSourceId, deriveSourceId } from '@folklore/utils';
 import { logger } from '../logger.js';
 import type { MemberPullScope, Pipeline, ProcessedFact } from '../pipeline/index.js';
@@ -973,7 +977,7 @@ export type RefreshedConnector =
   | { outcome: 'ready'; connector: Connector; connection: DecryptedSourceConnection }
   | { outcome: 'rate_limited' };
 
-/** One recovery for a 401, shared by pulls and live listings; every failure rethrows the original error. */
+/** One recovery for a 401; a non-success refresh throws OAuthRefreshFailedError caused by the original, other failures rethrow it. */
 export async function refreshConnectorAfterUnauthorized(
   input: UnauthorizedRefresh,
 ): Promise<RefreshedConnector> {
@@ -1071,9 +1075,11 @@ async function refreshOAuthConnector(input: UnauthorizedRefresh): Promise<Refres
   if (!connection.encryptedRefreshToken || !connection.refreshCiphertextSha256) {
     throw originalError;
   }
-  const refreshed = await oauthRefreshFlights.run(`${deps.orgId}:${connection.connectionId}`, () =>
+  const flight = await oauthRefreshFlights.run(`${deps.orgId}:${connection.connectionId}`, () =>
     rotateOrAdoptOAuthConnection(input, refreshCredential),
   );
+  if ('failed' in flight) throw new OAuthRefreshFailedError(flight.failed, originalError);
+  const refreshed = flight.connection;
   if (!refreshed || refreshed.activationGeneration !== connection.activationGeneration) {
     throw originalError;
   }
@@ -1086,16 +1092,21 @@ async function refreshOAuthConnector(input: UnauthorizedRefresh): Promise<Refres
   return { outcome: 'ready', connector, connection: refreshed };
 }
 
+type OAuthRefreshFlightResult =
+  | { connection: DecryptedSourceConnection | null }
+  | { failed: FailedOAuthRefreshOutcome };
+
 // A rotating refresh token is single-use, so a second refresh from a stale snapshot would revoke the first one's result.
-const oauthRefreshFlights = new SingleFlight<DecryptedSourceConnection | null>();
+// The flight resolves a failure instead of throwing so each waiting caller wraps its own 401 as the cause.
+const oauthRefreshFlights = new SingleFlight<OAuthRefreshFlightResult>();
 
 async function rotateOrAdoptOAuthConnection(
   input: UnauthorizedRefresh,
   refreshOAuthCredential: NonNullable<PullRunnerDeps['refreshOAuthCredential']>,
-): Promise<DecryptedSourceConnection | null> {
+): Promise<OAuthRefreshFlightResult> {
   const { deps, connection } = input;
   const rotated = await rotatedConnectionSince(input);
-  if (rotated) return rotated;
+  if (rotated) return { connection: rotated };
   const command = oauthRefreshCommandSchema.parse({
     encryptedRefreshToken: connection.encryptedRefreshToken,
     orgId: deps.orgId,
@@ -1108,14 +1119,15 @@ async function rotateOrAdoptOAuthConnection(
     expectedRefreshCiphertextSha256: connection.refreshCiphertextSha256,
     ...(input.ownerAccountId === undefined ? {} : { ownerAccountId: input.ownerAccountId }),
   });
+  let outcome: OAuthRefreshMetadataUpdate['outcome'];
   try {
-    const refresh = await refreshOAuthCredential(command);
-    if (refresh.outcome !== 'success') return null;
+    outcome = (await refreshOAuthCredential(command)).outcome;
   } catch {
-    return null;
+    return { connection: null };
   }
+  if (outcome !== 'success') return { failed: outcome };
   const resolution = await input.reconnect();
-  return resolution.outcome === 'connected' ? resolution.connection : null;
+  return { connection: resolution.outcome === 'connected' ? resolution.connection : null };
 }
 
 async function rotatedConnectionSince(

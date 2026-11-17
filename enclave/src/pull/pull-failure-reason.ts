@@ -6,6 +6,7 @@ import {
 } from '@folklore/contracts/enclave';
 import { AppError } from '@folklore/errors';
 import { errorType } from '../logging/error-fields.js';
+import { OAuthRefreshFailedError } from './OAuthRefreshFailedError.js';
 import type { PullNotProcessedReason } from './pull-runner.js';
 
 const NOT_PROCESSED = 'not_processed';
@@ -25,15 +26,15 @@ export interface PullFailure {
 
 /** Fixed lower-snake codes describing a failed pull attempt; provider text never enters. */
 export function pullFailureReason(failure: PullFailure, attempts: number): PullFailureReason {
-  const code = snakeCode(failure.code ?? firstPartyCode(failure.error));
-  const operation = snakeCode(connectorOperation(failure.error));
-  const statusClass = httpStatusClass(failure.error);
+  // The refresh wrapper reports through the message failure code; this signal keeps the 401's shape.
+  const error =
+    failure.error instanceof OAuthRefreshFailedError ? failure.error.cause : failure.error;
+  const code = snakeCode(failure.code ?? firstPartyCode(error));
+  const operation = snakeCode(connectorOperation(error));
+  const statusClass = httpStatusClass(error);
   return {
     phase: failure.phase,
-    errorType:
-      failure.error === undefined
-        ? NOT_PROCESSED
-        : (snakeCode(errorType(failure.error)) ?? UNKNOWN_ERROR),
+    errorType: error === undefined ? NOT_PROCESSED : (snakeCode(errorType(error)) ?? UNKNOWN_ERROR),
     ...(code ? { errorCode: code } : {}),
     ...(operation ? { operation } : {}),
     ...(statusClass ? { statusClass } : {}),
