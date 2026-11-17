@@ -14,7 +14,8 @@
     "@aws-sdk/client-lambda": "^3.1090.0",
     "@aws-sdk/client-sqs": "^3.0.0",
     "@aws-sdk/client-ssm": "^3.0.0",
-    "@folklore/contracts": "workspace:*"
+    "@folklore/contracts": "workspace:*",
+    "@folklore/utils": "workspace:*"
   },
   "devDependencies": {
     "@folklore/eslint-config": "workspace:*",

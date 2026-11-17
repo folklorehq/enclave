@@ -1,4 +1,5 @@
 import type { RoutingMode } from './routing-allowlist.js';
+import { WEBHOOKS } from './edge-descriptor.js';
 import { SIGNATURE_VERIFIER_SOURCES } from './signature-verifier.js';
 
 const REJECTION_STATUS = {
@@ -23,7 +24,10 @@ export type WebhookRejectionReason = keyof typeof REJECTION_STATUS;
 const REJECTED_EVENT = 'dispatcher_webhook_rejected';
 const ACCEPTED_EVENT = 'dispatcher_webhook_accepted';
 const UNRECOGNIZED_SOURCE = 'unrecognized';
-const KNOWN_SOURCES: ReadonlySet<string> = new Set(SIGNATURE_VERIFIER_SOURCES);
+const KNOWN_SOURCES: ReadonlySet<string> = new Set([
+  ...SIGNATURE_VERIFIER_SOURCES,
+  ...WEBHOOKS.keys(),
+]);
 
 // The path segment is caller-chosen, so only a name from the closed verifier set is ever logged.
 export function loggableSource(source: string | undefined): string {

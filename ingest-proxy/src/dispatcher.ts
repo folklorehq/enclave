@@ -4,8 +4,14 @@ import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
 import type { APIGatewayProxyHandlerV2 } from 'aws-lambda';
 import { resolveTenant, EXTRACTORS } from './tenant-resolver.js';
-import { verifySignature, normalizeHeaders } from './signature-verifier.js';
+import { normalizeHeaders } from './signature-verifier.js';
+import { WEBHOOKS, selectEventType, selectValue, verifyDelivery } from './edge-descriptor.js';
 import { extractEventType } from './lambdas/handler.js';
+import {
+  isDeclarativeWebhook,
+  webhookEventTypeSchema,
+  type WebhookSelector,
+} from '@folklore/contracts';
 import { jiraEncryptedWebhookEnvelopeSchema } from '@folklore/contracts/enclave';
 import { fitsEncryptedSqsMessage } from './encrypted-sqs-message-size.js';
 import { checkRateLimit } from './rate-limiter.js';
@@ -56,13 +62,59 @@ const MICROSOFT365_SOURCE = 'microsoft365';
 const INTERCOM_SOURCE = 'intercom';
 const INTERCOM_LIVENESS_ROUTE = 'HEAD /ingest/intercom';
 const JIRA_SOURCE = 'jira';
+const CONFLUENCE_SOURCE = 'confluence';
 const MAX_JIRA_RAW_BODY_BYTES = 2_000_000;
 const MAX_JIRA_ADMISSION_TOKEN_BYTES = 16 * 1024;
 const JIRA_ADMISSION_SEGMENT_PATTERN = /^[A-Za-z0-9_-]+$/;
 const MAX_RATE_LIMIT_ID_BYTES = 128;
 
-// Returns null (never invokes downstream) when the shared auth secret isn't provisioned,
-// rather than sending an invoke the receiving ingest Lambda is guaranteed to reject.
+// A built-in scheme can carry its secret in the body or sign nothing, so only Confluence's is safe on the URL route.
+function isBuiltinVerifierOffUrlRoute(source: string): boolean {
+  return WEBHOOKS.get(source)?.verifier.scheme === 'builtin' && source !== CONFLUENCE_SOURCE;
+}
+
+function parseJsonOrNull(body: string): unknown {
+  try {
+    return JSON.parse(body);
+  } catch {
+    return null;
+  }
+}
+
+function selectorBody(selector: WebhookSelector, body: string): unknown {
+  return selector?.from === 'body' ? parseJsonOrNull(body) : null;
+}
+
+function forwardedEventType(
+  source: string,
+  headers: Record<string, string | undefined>,
+  body: string,
+): string {
+  const webhook = WEBHOOKS.get(source);
+  if (webhook !== undefined && isDeclarativeWebhook(webhook)) {
+    return selectEventType(webhook.eventType, headers, selectorBody(webhook.eventType, body));
+  }
+  const extracted: unknown = extractEventType(source, headers, body);
+  const text =
+    typeof extracted === 'number' && Number.isFinite(extracted) ? String(extracted) : extracted;
+  return webhookEventTypeSchema.safeParse(text).success ? (text as string) : '';
+}
+
+function forwardedDeliveryId(
+  source: string,
+  headers: Record<string, string | undefined>,
+  body: string,
+): string {
+  const selector = WEBHOOKS.get(source)?.deliveryId ?? null;
+  if (selector !== null) return selectValue(selector, headers, selectorBody(selector, body));
+  return (
+    headers['x-github-delivery'] ??
+    headers['webhook-id'] ??
+    headers['x-atlassian-webhook-identifier'] ??
+    ''
+  );
+}
+
 async function buildInvokePayload(
   destTenantId: string,
   destSource: string,
@@ -87,14 +139,10 @@ async function buildInvokePayload(
         source: destSource,
         body: destBody,
         tenantId: destTenantId,
-        deliveryId:
-          destHeaders['x-github-delivery'] ??
-          destHeaders['webhook-id'] ??
-          destHeaders['x-atlassian-webhook-identifier'] ??
-          '',
+        deliveryId: forwardedDeliveryId(destSource, destHeaders, destBody),
         authHmac: computeDispatcherAuthHmac(destTenantId, destSource, secret, mode),
         routingMode: mode,
-        eventType: extractEventType(destSource, destHeaders, destBody),
+        eventType: forwardedEventType(destSource, destHeaders, destBody),
         headers: destHeaders,
         ...(oauthContext ?? {}),
       }),
@@ -665,7 +713,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
           !fitsEncryptedSqsMessage({
             tenantId,
             source,
-            eventType: extractEventType(source, headers, body),
+            eventType: forwardedEventType(source, headers, body),
             payloadBody,
             messageType: 'jira-oauth-envelope',
           })
@@ -699,6 +747,8 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       }
 
       if (source === JIRA_SOURCE) return rejectWebhook(source, mode, 'auth_unsupported');
+      if (isBuiltinVerifierOffUrlRoute(source))
+        return rejectWebhook(source, mode, 'routing_denied');
       const routingDecision = await isRoutingAllowed(tenantId, source, 'url');
       if (routingDecision.outcome === 'unavailable') {
         return rejectWebhook(source, mode, 'routing_unavailable');
@@ -708,7 +758,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       }
       const secret = await fetchPerTenantSecret(tenantId, source);
       if (!secret) return rejectWebhook(source, mode, 'secret_unavailable');
-      const signatureValid = verifySignature(source, headers, body, secret);
+      const signatureValid = verifyDelivery(WEBHOOKS, source, headers, body, secret);
       if (!signatureValid) return rejectWebhook(source, mode, 'signature_invalid');
 
       // Zoom CRC: handle endpoint.url_validation AFTER signature verification
@@ -750,7 +800,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     const secret = await fetchSharedSecret(source);
     if (!secret) return rejectWebhook(source, mode, 'secret_unavailable');
 
-    const signatureValid = verifySignature(source, headers, body, secret);
+    const signatureValid = verifyDelivery(WEBHOOKS, source, headers, body, secret);
     if (!signatureValid) return rejectWebhook(source, mode, 'signature_invalid');
 
     if (source === INTERCOM_SOURCE && isIntercomPing(parsed)) {

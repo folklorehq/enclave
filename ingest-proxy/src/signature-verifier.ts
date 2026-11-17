@@ -22,7 +22,7 @@ export function normalizeHeaders(
   return normalized;
 }
 
-function withinReplayWindow(ts: string | undefined, toleranceS: number): boolean {
+export function withinReplayWindow(ts: string | undefined, toleranceS: number): boolean {
   // The signed basestring includes the timestamp, so this bounds replay; non-numeric timestamps fail closed.
   const tsNum = Number(ts);
   return Number.isFinite(tsNum) && Math.abs(Date.now() / MS_PER_S - tsNum) <= toleranceS;
@@ -38,12 +38,12 @@ function decodeJwtSegment(segment: string): Record<string, unknown> | null {
   }
 }
 
-function decodeHex(value: string): Buffer | null {
+export function decodeHex(value: string): Buffer | null {
   if (value.length === 0 || value.length % 2 !== 0 || !HEX_PATTERN.test(value)) return null;
   return Buffer.from(value, 'hex');
 }
 
-function decodeBase64(value: string): Buffer | null {
+export function decodeBase64(value: string): Buffer | null {
   if (value.length === 0 || !BASE64_PATTERN.test(value)) return null;
   const decoded = Buffer.from(value, 'base64');
   return decoded.toString('base64').replace(/=+$/, '') === value.replace(/=+$/, '')
@@ -59,7 +59,7 @@ function decodeBase64Url(value: string): Buffer | null {
   return decoded.toString('base64url') === value ? decoded : null;
 }
 
-function matchesDigest(provided: Buffer | null, expected: Buffer): boolean {
+export function matchesDigest(provided: Buffer | null, expected: Buffer): boolean {
   return (
     provided !== null && provided.length === expected.length && timingSafeEqual(provided, expected)
   );
