@@ -1,5 +1,6 @@
 import { createSign } from 'node:crypto';
-import { identityLinkSpecs, type IdentityLinkSpec } from '@folklore/contracts';
+import { specIdentityFor } from '@folklore/connectors';
+import { identityLinkSpecs, type IdentityLinkSpec, type IdentitySpec } from '@folklore/contracts';
 import { resolveJsonPointer } from '@folklore/utils';
 import type { Logger } from '@folklore/core';
 import type { ProviderTokenClient, ProviderTokenResponse } from './ProviderTokenClient.js';
@@ -34,13 +35,24 @@ const MEMBER_REVOKE_DEADLINE_MS = GITHUB_REVOKE_MIN_MS;
 const REVOKE_SECRET_TIMEOUT_REASON = 'github_token_revoke_secret_timeout';
 class RevokeSecretTimeoutError extends Error {}
 
+export interface HttpProviderTokenClientDeps {
+  readonly logger?: Logger | undefined;
+  readonly specIdentity?: (kind: string) => IdentitySpec | null;
+}
+
 /** Provider token exchange confined to the enclave's signed endpoint + proxy contract. */
 export class HttpProviderTokenClient implements ProviderTokenClient {
+  private readonly logger: Logger | undefined;
+  private readonly specIdentity: (kind: string) => IdentitySpec | null;
+
   constructor(
     private readonly secrets: ProviderRefreshSecretLoader,
     private readonly options: ProviderTokenFetchOptions,
-    private readonly logger?: Logger,
-  ) {}
+    deps: HttpProviderTokenClientDeps = {},
+  ) {
+    this.logger = deps.logger;
+    this.specIdentity = deps.specIdentity ?? specIdentityFor;
+  }
 
   refreshCapability(config: VerifiedProviderConfig): ProviderRefreshCapability {
     return providerRefreshCapability(config);
@@ -493,11 +505,26 @@ export class HttpProviderTokenClient implements ProviderTokenClient {
         externalTenantId: this.requireId(app['id_code']),
       };
     }
+    const spec = this.specIdentity(config.kind);
+    if (spec) return this.specIdentityFrom(spec, parsed);
     const sourceUserId = this.requireId(config.kind === 'slack' ? parsed['user_id'] : parsed['id']);
     const tenant = config.kind === 'slack' ? parsed['team_id'] : undefined;
     return {
       sourceUserId,
       ...(tenant !== undefined ? { externalTenantId: this.requireId(tenant) } : {}),
+    };
+  }
+
+  private specIdentityFrom(
+    spec: IdentitySpec,
+    parsed: Record<string, unknown>,
+  ): { sourceUserId: string; externalTenantId?: string } {
+    const tenantPointer = spec.externalTenantIdPointer;
+    return {
+      sourceUserId: this.requireId(resolveJsonPointer(parsed, spec.idPointer)),
+      ...(tenantPointer === null
+        ? {}
+        : { externalTenantId: this.requireId(resolveJsonPointer(parsed, tenantPointer)) }),
     };
   }
 

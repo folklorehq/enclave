@@ -149,6 +149,7 @@ export const NOT_PROCESSED_REASONS = [
   'connection_decrypt_failed',
   'export_refs_unavailable',
   'resource_scope_unavailable',
+  'cursor_store_unsealed',
 ] as const satisfies readonly PullNotProcessedReason[];
 
 const EVIDENCE_SESSION_REASONS = [
@@ -315,6 +316,16 @@ const SYNTHESIS_REASONS = [
 
 const PIPELINE_REASONS = ['org_key_unavailable', 'revision_tag_malformed'] as const;
 
+// Fixed codes the connector runtime transport throws; the message is the code, never a host or header.
+const CONNECTOR_TRANSPORT_REASONS = [
+  'egress_host_refused',
+  'egress_redirect_refused',
+  'egress_request_failed',
+  'header_value_refused',
+  'spec_response_not_json',
+  'spec_response_too_large',
+] as const;
+
 const ROUTE_REASONS = [
   'canary_authorization_invalid',
   'message_deadline_exceeded',
@@ -367,6 +378,7 @@ export const MESSAGE_FAILURE_REASONS: ReadonlySet<string> = new Set<string>([
   ...OPENAI_REASONS,
   ...SYNTHESIS_REASONS,
   ...PIPELINE_REASONS,
+  ...CONNECTOR_TRANSPORT_REASONS,
   ...ROUTE_REASONS,
   ...OUTPUT_FAILURE_REASONS,
 ]);

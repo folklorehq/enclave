@@ -270,6 +270,9 @@ export class AttestationBootState {
         ? [['providerInferenceTrustPolicy', manifest.providerInferenceTrustPolicy]]
         : []),
       manifest.assignmentManifestPublicKeySpki ?? null,
+      ...(manifest.firstpartyConnectorTrust
+        ? [['firstpartyConnectorTrust', manifest.firstpartyConnectorTrust]]
+        : []),
       manifest.enclaveOutputKey
         ? [
             manifest.enclaveOutputKey.keyId,

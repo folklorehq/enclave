@@ -170,11 +170,9 @@ export function createOAuthRuntime(options: OAuthCompositionOptions): OAuthRunti
     { getSecretValue: options.getSecretValue },
     options.kmsKeyId,
   );
-  const provider = new HttpProviderTokenClient(
-    providerSecrets,
-    providerFetchOptions,
-    options.logger,
-  );
+  const provider = new HttpProviderTokenClient(providerSecrets, providerFetchOptions, {
+    logger: options.logger,
+  });
   const leaseResolver = new HttpOAuthLeaseResolver(
     options.controlPlaneUrl,
     options.deploymentId,

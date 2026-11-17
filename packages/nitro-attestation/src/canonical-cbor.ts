@@ -570,6 +570,15 @@ function encodeManifestFields(
   if (manifest.assignmentManifestPublicKeySpki !== undefined) {
     fields.push(['assignment-manifest-public-key-spki', manifest.assignmentManifestPublicKeySpki]);
   }
+  if (manifest.firstpartyConnectorTrust !== undefined) {
+    fields.push([
+      'firstparty-connector-trust',
+      [
+        manifest.firstpartyConnectorTrust.signerPublicKeySpki,
+        manifest.firstpartyConnectorTrust.oauthClientKmsKeyArn,
+      ],
+    ]);
+  }
   if (manifest.activePolicyReference !== undefined) {
     fields.push([
       'active-policy-reference',

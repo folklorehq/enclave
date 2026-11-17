@@ -88,7 +88,7 @@ export class EnclaveSourceResourceLister implements SourceResourceLister {
       { orgId: target.orgId },
     );
     if (!token) throw new Error(CONNECTION_UNAVAILABLE);
-    const connector = this.build(target.sourceKind, token, connection);
+    const connector = this.build(target, token, connection);
     if (!connector) throw new Error(CONNECTION_UNAVAILABLE);
     return { connector, connection };
   }
@@ -110,7 +110,7 @@ export class EnclaveSourceResourceLister implements SourceResourceLister {
         mintGitHubInstallationToken: this.deps.mintGitHubInstallationToken,
       },
       reconnect: () => this.resolve(target),
-      build: (token, fresher) => this.build(target.sourceKind, token, fresher),
+      build: (token, fresher) => this.build(target, token, fresher),
     });
     if (fresh.outcome === 'rate_limited') throw originalError;
     return fresh.connector;
@@ -131,14 +131,13 @@ export class EnclaveSourceResourceLister implements SourceResourceLister {
   }
 
   private build(
-    sourceKind: string,
+    target: SourceTarget,
     token: string,
     connection: DecryptedSourceConnection,
   ): Connector | null {
-    return (this.deps.buildConnector ?? buildConnector)(
-      sourceKind,
-      token,
-      connectionMetadata(connection),
-    );
+    return (this.deps.buildConnector ?? buildConnector)(target.sourceKind, token, {
+      ...connectionMetadata(connection),
+      orgId: target.orgId,
+    });
   }
 }

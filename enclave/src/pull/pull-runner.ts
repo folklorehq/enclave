@@ -9,12 +9,15 @@ import {
   type Connector,
   createPullConnector,
   type DocumentBodyMode,
+  isCursorEnvelope,
+  isSpecConnectorKind,
   type PullConnectorDeps,
   type PullOptions,
   type PullResult,
   type SyncCursor,
 } from '@folklore/connectors';
 import { NOTION_KIND, isPausableSourceKind, supportsPerPersonMode } from '@folklore/contracts';
+import { ConnectorSpecError } from '@folklore/errors';
 import {
   oauthRefreshCommandSchema,
   pullStatsSchema,
@@ -25,6 +28,7 @@ import {
   type PullFailedSignal,
   type PullFailureReason,
 } from '@folklore/contracts/enclave';
+import { ConnectorEgressTransport } from '../egress/connector-runtime/ConnectorEgressTransport.js';
 import { externalHttpsProxyAgent } from '../egress/proxy.js';
 import { ProviderRejectedError } from '../egress/provider-token-fetch.js';
 import { deriveMemberSourceId, deriveSourceId } from '@folklore/utils';
@@ -82,7 +86,7 @@ export type PullConnectionMetadata = Pick<
   | 'webhookCleanupExternalTenantId'
   | 'webhookCleanupRegistrationIds'
   | 'webhookCleanupExpiresAt'
->;
+> & { readonly orgId?: string };
 
 export type { PullCompleteSignal };
 
@@ -204,7 +208,8 @@ export type PullRunResult =
         | 'connection_integrity_failed'
         | 'connection_decrypt_failed'
         | 'export_refs_unavailable'
-        | 'resource_scope_unavailable';
+        | 'resource_scope_unavailable'
+        | 'cursor_store_unsealed';
       sourceId: string;
       sourceKind: string;
     }
@@ -272,6 +277,7 @@ async function saveCursor(
   value: string | null,
 ): Promise<void> {
   if (value === null) return;
+  if (isCursorEnvelope(value)) throw new ConnectorSpecError('cursor_envelope_unsealed');
   await ssm.send(
     new PutParameterCommand({
       Name: cursorSsmPath(tenantId, sourceId),
@@ -517,6 +523,16 @@ export function buildConnector(
     gmailLabelAllowlist: parseAllowlist(process.env['EMAIL_GMAIL_LABEL_ALLOWLIST']),
     m365FolderAllowlist: parseAllowlist(process.env['EMAIL_M365_FOLDER_ALLOWLIST']),
     ...(codebaseSelection ? { codebaseSelection } : {}),
+    ...(isSpecConnectorKind(kind) && connectionMetadata?.orgId
+      ? {
+          connectorTransport: new ConnectorEgressTransport({
+            kind,
+            orgId: connectionMetadata.orgId,
+            token,
+            logger: consoleLogger,
+          }),
+        }
+      : {}),
     ...(bodyPolicy ? { documentBodies: bodyPolicy.documentBodies } : {}),
     ...(bodyPolicy?.exportedPageIds ? { exportedPageIds: bodyPolicy.exportedPageIds } : {}),
   };
@@ -567,6 +583,10 @@ export async function runPull(
   const isCode = message.kind === 'code';
   const usesSealedCursor =
     isCode || memberScope !== undefined || message.kind === NOTION_KIND || isSealedMode(deps);
+  // A spec cursor is an envelope the legacy parameter store cannot hold, so the pull stops before any cursor, token or connector work.
+  if (isSpecConnectorKind(message.kind) && !usesSealedCursor) {
+    return notProcessed(message, 'cursor_store_unsealed');
+  }
   // The code cursor loads BEFORE the mint so a mint-403 early return can bump its tick.
   const sealedCursor = await loadRunCursor(deps, message, { isCode, memberScope });
 
@@ -588,7 +608,7 @@ export async function runPull(
     connectorBuilder,
     message.kind,
     token,
-    connectionMetadata(connection),
+    { ...connectionMetadata(connection), orgId: deps.orgId },
     codebaseSelection,
     bodyPolicy,
   );
@@ -993,7 +1013,7 @@ export async function pullWithRefresh(
           connectorBuilder,
           message.kind,
           token,
-          connectionMetadata(fresher),
+          { ...connectionMetadata(fresher), orgId: deps.orgId },
           codebaseSelection,
           bodyPolicy,
         ),

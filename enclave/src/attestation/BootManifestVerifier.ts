@@ -482,6 +482,9 @@ export class BootManifestVerifier {
     const verifiedReleaseIdentity = manifest.verifiedReleaseIdentity
       ? Object.freeze({ ...manifest.verifiedReleaseIdentity })
       : undefined;
+    const firstpartyConnectorTrust = manifest.firstpartyConnectorTrust
+      ? Object.freeze({ ...manifest.firstpartyConnectorTrust })
+      : undefined;
     const activePolicyBootTrust = manifest.activePolicyBootTrust
       ? Object.freeze({
           ...manifest.activePolicyBootTrust,
@@ -517,6 +520,7 @@ export class BootManifestVerifier {
       ...(inferenceAttestation ? { inferenceAttestation } : {}),
       ...(providerInferenceTrustPolicy ? { providerInferenceTrustPolicy } : {}),
       ...(verifiedReleaseIdentity ? { verifiedReleaseIdentity } : {}),
+      ...(firstpartyConnectorTrust ? { firstpartyConnectorTrust } : {}),
       ...(activePolicyBootTrust ? { activePolicyBootTrust } : {}),
       ...(activePolicyCarrier ? { activePolicyCarrier } : {}),
     });
