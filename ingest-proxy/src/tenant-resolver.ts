@@ -52,12 +52,6 @@ const slackExtractor: ExtractorFn = (body) => {
   return typeof teamId === 'string' ? teamId : null;
 };
 
-const linearExtractor: ExtractorFn = (body) => {
-  const b = body as Record<string, unknown> | null;
-  const orgId = b?.organizationId;
-  return typeof orgId === 'string' ? orgId : null;
-};
-
 const notionExtractor: ExtractorFn = (body) => {
   const b = body as Record<string, unknown> | null;
   const wsId = b?.workspace_id;
@@ -98,7 +92,6 @@ function jwtIssExtractor(_body: unknown, headers: Record<string, string>): strin
 export const EXTRACTORS: Record<string, ExtractorFn> = {
   github: githubExtractor,
   slack: slackExtractor,
-  linear: linearExtractor,
   notion: notionExtractor,
   zoom: zoomExtractor,
   intercom: intercomExtractor,
