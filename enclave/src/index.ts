@@ -79,7 +79,11 @@ import { EnclavePageRewriter } from './workers/rewrite/EnclavePageRewriter.js';
 import { EnclaveAgentLoop } from './workers/agent/EnclaveAgentLoop.js';
 import { agentRetrieverDeps } from './workers/agent/agent-retriever-deps.js';
 import { AGENT_ACCESS_PROJECTION_TICK_MS } from './workers/agent/access/AgentAccessProjectionPass.js';
-import { buildAgentAccessProjectionRunner } from './workers/agent/access/build-agent-access-projection-runner.js';
+import {
+  buildAgentAccessProjectionPass,
+  buildOnDemandAgentAccessPull,
+  buildAgentAccessProjectionRunner,
+} from './workers/agent/access/build-agent-access-projection-runner.js';
 import { buildMcpCallTelemetry } from './workers/agent/access/build-mcp-call-telemetry.js';
 import { EnclaveWikiContentDecryptor } from './wiki/EnclaveWikiContentDecryptor.js';
 import { EnclaveWikiEditSealer } from './wiki/EnclaveWikiEditSealer.js';
@@ -179,6 +183,7 @@ import {
   createContainer,
   createRuntimeDatabaseConnection,
   createRuntimeDatabaseReadiness,
+  type AgentAccessPullResult,
   type ApiContainer,
   type AskUsageSinkPort,
   type CreateContainerOptions,
@@ -601,6 +606,8 @@ const titleResidency = new IndexResidencyManager<TitleIndex>({
 });
 let titleCatalog: EnclaveTitleCatalog | undefined;
 let apiContainer: ApiContainer | undefined;
+// Assigned once the control-plane identity and the projection pass exist, after the API container is created.
+let pullAgentAccessProjection: ((orgId: string) => Promise<AgentAccessPullResult>) | undefined;
 const titleEviction = new TitleEviction({
   catalog: () => titleCatalog,
   residency: titleResidency,
@@ -1556,6 +1563,8 @@ try {
     new AskUsageMeter({ sink, logger: askUsageLogger, days: askUsageDays });
   const codebaseSettingsPort = createCodebaseSettingsPort();
   const apiOptions: CreateContainerOptions = {
+    pullAgentAccessProjection: (orgId) =>
+      pullAgentAccessProjection?.(orgId) ?? Promise.resolve('skipped'),
     // content-touching enclave opens no data-carrying egress — box-API telemetry inert by composition, not by omitting POSTHOG_API_KEY.
     telemetry: new NoopTelemetryClient(),
     controlPlaneJwks:
@@ -1860,7 +1869,7 @@ const memberIdentityLinkRunner =
       })
     : undefined;
 memberIdentityLinkRunner?.start();
-const agentAccessProjectionRunner = buildAgentAccessProjectionRunner({
+const agentAccessProjectionDeps = {
   tenants: projectionTenants,
   beginTenant: beginTenantRequest,
   // UNWIRED: dedicated runtimes have no agent-access projection writer, so /mcp answers mcp_access_off there.
@@ -1873,7 +1882,16 @@ const agentAccessProjectionRunner = buildAgentAccessProjectionRunner({
   applier: () => apiContainer?.mcpAccess,
   recorder: mcpCalls.recorder,
   logger,
-});
+};
+const agentAccessProjectionPass = buildAgentAccessProjectionPass(agentAccessProjectionDeps);
+if (agentAccessProjectionPass) {
+  pullAgentAccessProjection = buildOnDemandAgentAccessPull({
+    pass: agentAccessProjectionPass,
+    tenants: projectionTenants,
+    beginTenant: beginTenantRequest,
+  });
+}
+const agentAccessProjectionRunner = buildAgentAccessProjectionRunner(agentAccessProjectionDeps);
 agentAccessProjectionRunner?.start(AGENT_ACCESS_PROJECTION_TICK_MS);
 bootStatus.begin('workers_start');
 
