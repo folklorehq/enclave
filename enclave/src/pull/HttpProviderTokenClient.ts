@@ -21,7 +21,10 @@ import {
   type VerifiedProviderConfig,
 } from '../egress/provider-token-fetch.js';
 import { oauthFailureReason, providerOAuthErrorReason } from './oauth-failure-reason.js';
+import { IDENTITY_INELIGIBLE, OAuthRefusal } from './OAuthRefusal.js';
 
+const LINEAR_VIEWER_GUEST = 'linear_viewer_guest';
+const LINEAR_VIEWER_INACTIVE = 'linear_viewer_inactive';
 const TOKEN_MAX_BYTES = 512 * 1024;
 const TOKEN_VALUE_MAX_BYTES = 16 * 1024;
 const ID_MAX_BYTES = 256;
@@ -99,6 +102,7 @@ export class HttpProviderTokenClient implements ProviderTokenClient {
     config: VerifiedProviderConfig;
     accessToken: string;
     forMember?: true;
+    recheck?: true;
   }): Promise<{ sourceUserId: string; externalTenantId?: string; displayName?: string }> {
     assertSupportedProvider(input.config.kind);
     const spec = input.forMember ? this.identitySpec(input.config.kind) : undefined;
@@ -115,7 +119,7 @@ export class HttpProviderTokenClient implements ProviderTokenClient {
         externalTenantId: await this.resolveJiraCloudId(input.config, input.accessToken),
       };
     }
-    return this.identityFrom(input.config, parsed);
+    return this.identityFrom(input.config, parsed, input.recheck === true);
   }
 
   async revokeMemberTokens(input: {
@@ -487,8 +491,9 @@ export class HttpProviderTokenClient implements ProviderTokenClient {
   private identityFrom(
     config: VerifiedProviderConfig,
     parsed: Record<string, unknown>,
+    recheck = false,
   ): { sourceUserId: string; externalTenantId?: string } {
-    if (config.kind === 'linear') return this.linearIdentity(parsed);
+    if (config.kind === 'linear') return this.linearIdentity(parsed, recheck);
     if (config.kind === 'notion') return { sourceUserId: this.requireId(parsed['id']) };
     if (
       config.kind === 'google_drive' ||
@@ -544,7 +549,10 @@ export class HttpProviderTokenClient implements ProviderTokenClient {
     return id.toLowerCase();
   }
 
-  private linearIdentity(parsed: Record<string, unknown>): {
+  private linearIdentity(
+    parsed: Record<string, unknown>,
+    recheck: boolean,
+  ): {
     sourceUserId: string;
     externalTenantId: string;
   } {
@@ -557,10 +565,19 @@ export class HttpProviderTokenClient implements ProviderTokenClient {
     if (!isRecord(viewer) || !isRecord(organization)) {
       throw new Error('provider_identity_missing');
     }
+    this.requireEligibleLinearViewer(viewer, recheck);
     return {
       sourceUserId: this.requireId(viewer['id']),
       externalTenantId: this.requireId(organization['id']),
     };
+  }
+
+  // A connect needs both flags proven; a refresh recheck acts only on what Linear explicitly says.
+  private requireEligibleLinearViewer(viewer: Record<string, unknown>, recheck: boolean): void {
+    const isGuest = recheck ? viewer['guest'] === true : viewer['guest'] !== false;
+    if (isGuest) throw new OAuthRefusal(IDENTITY_INELIGIBLE, LINEAR_VIEWER_GUEST);
+    const isInactive = recheck ? viewer['active'] === false : viewer['active'] !== true;
+    if (isInactive) throw new OAuthRefusal(IDENTITY_INELIGIBLE, LINEAR_VIEWER_INACTIVE);
   }
 
   private requireId(value: unknown): string {

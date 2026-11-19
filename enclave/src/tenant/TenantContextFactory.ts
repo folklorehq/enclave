@@ -45,6 +45,7 @@ import type { InferenceRouteResolver } from '../inference/routing/InferenceRoute
 import type { EmbeddingProvider } from '../inference/openai/OpenAIEmbedRouteComposition.js';
 import { ResourceScopeFilter } from '../resource-scope/ResourceScopeFilter.js';
 import { TenantResourceScope } from '../resource-scope/TenantResourceScope.js';
+import type { Logger } from '@folklore/core';
 import { TenantContext } from './tenant-context.js';
 
 export interface TenantIdentity {
@@ -92,6 +93,7 @@ export interface TenantContextFactoryDeps {
   activePolicySnapshotFor?: (tenantId: string) => ReturnType<TenantContext['activePolicySnapshot']>;
   enforceTenantPolicy?: boolean;
   emitAuthors?: boolean;
+  logger?: Logger;
   /** Queue-job calls wait in the host gate (up to 90 minutes, then fail); other calls only count toward its windows. */
   upstreamGate?: UpstreamCallGate;
   activePolicyFreshnessFor?: (tenantId: string) => TenantPolicyFreshnessPort | undefined;
@@ -177,6 +179,7 @@ export class TenantContextFactory {
         {
           entityKey: () => context.current?.entityKey() ?? null,
           emitAuthors: this.deps.emitAuthors === true,
+          ...(this.deps.logger === undefined ? {} : { logger: this.deps.logger }),
           resourceScope,
           ...(this.deps.ingestDecisions === undefined
             ? {}

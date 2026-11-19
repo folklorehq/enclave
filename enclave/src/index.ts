@@ -558,6 +558,7 @@ const upstreamGate = isSharedPool
 
 const tenantFactory = new TenantContextFactory({
   s3,
+  logger,
   region: REGION,
   sealedBlobBucket: SEALED_BLOB_BUCKET,
   processedOutputsBucket: PROCESSED_OUTPUTS_BUCKET,

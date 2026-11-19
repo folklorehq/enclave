@@ -94,7 +94,8 @@ const SUPPORTED_PROVIDER_KINDS = new Set([
   'gmail',
   'google_calendar',
 ]);
-const LINEAR_IDENTITY_QUERY = 'query FolkloreOAuthIdentity { viewer { id organization { id } } }';
+const LINEAR_IDENTITY_QUERY =
+  'query FolkloreOAuthIdentity { viewer { id guest active organization { id } } }';
 const JIRA_ACCESSIBLE_RESOURCES_ENDPOINT =
   'https://api.atlassian.com/oauth/token/accessible-resources';
 const GITHUB_USER_INSTALLATIONS_PATH = '/user/installations';

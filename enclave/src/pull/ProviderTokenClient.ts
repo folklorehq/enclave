@@ -27,6 +27,7 @@ export interface ProviderTokenClient {
     config: VerifiedProviderConfig;
     accessToken: string;
     forMember?: true;
+    recheck?: true;
   }): Promise<{ sourceUserId: string; externalTenantId?: string; displayName?: string }>;
   revokeMemberTokens(input: {
     config: VerifiedProviderConfig;

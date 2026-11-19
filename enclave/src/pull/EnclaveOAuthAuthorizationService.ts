@@ -14,7 +14,7 @@ import { createHash, type KeyObject } from 'node:crypto';
 import type { ProviderTokenClient, ProviderTokenResponse } from './ProviderTokenClient.js';
 import type { VerifiedProviderConfig } from '../egress/provider-token-fetch.js';
 import { SealedCodeGrantOpener } from './SealedCodeGrantOpener.js';
-import { OAuthRefusal } from './OAuthRefusal.js';
+import { IDENTITY_INELIGIBLE, OAuthRefusal } from './OAuthRefusal.js';
 import { oauthFailureReason } from './oauth-failure-reason.js';
 
 const REDEMPTION_FAILED = 'oauth_redemption_failed';
@@ -117,10 +117,7 @@ export class EnclaveOAuthAuthorizationService {
         callbackUri: grant.callbackUri,
       });
       this.validateResponse(response);
-      const identity = await this.provider.resolveIdentity({
-        config,
-        accessToken: response.accessToken,
-      });
+      const identity = await this.resolveSourceIdentity(config, response);
       response.sourceUserId = identity.sourceUserId;
       response.externalTenantId = identity.externalTenantId ?? response.externalTenantId;
       const connectionId = this.requireConnectionId(grant);
@@ -241,6 +238,21 @@ export class EnclaveOAuthAuthorizationService {
         response.accessToken = '';
         if (response.refreshToken) response.refreshToken = '';
       }
+    }
+  }
+
+  // An ineligible identity never gets a connection, so the token Linear just issued is revoked rather than left live.
+  private async resolveSourceIdentity(
+    config: VerifiedProviderConfig,
+    response: ProviderTokenResponse,
+  ): Promise<{ sourceUserId: string; externalTenantId?: string }> {
+    try {
+      return await this.provider.resolveIdentity({ config, accessToken: response.accessToken });
+    } catch (error) {
+      if (error instanceof OAuthRefusal && error.message === IDENTITY_INELIGIBLE) {
+        await this.revokeMemberToken(config, response);
+      }
+      throw error;
     }
   }
 

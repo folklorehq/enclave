@@ -300,6 +300,7 @@ export function createOAuthRuntime(options: OAuthCompositionOptions): OAuthRunti
         provider,
         (kind) => sourceProviderConfig(configs, kind),
         leaseResolver,
+        options.logger,
       ).redeem(input);
     },
     mintGitHubInstallationToken: async (input) => {

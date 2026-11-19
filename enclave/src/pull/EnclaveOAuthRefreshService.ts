@@ -1,4 +1,7 @@
 import { createHash } from 'node:crypto';
+import { CONNECTOR_MANIFESTS, bodyTenantKey } from '@folklore/contracts';
+import type { Logger } from '@folklore/core';
+import { IDENTITY_INELIGIBLE, OAuthRefusal } from './OAuthRefusal.js';
 import type { EnclaveCrypto } from '../crypto/esdk.js';
 import {
   oauthRefreshCommandSchema,
@@ -12,6 +15,8 @@ import { ProviderRejectedError } from '../egress/provider-token-fetch.js';
 import type { CredentialSealer } from './EnclaveOAuthAuthorizationService.js';
 import type { OAuthLeaseResolver } from './HttpOAuthLeaseResolver.js';
 import type { CompareAndSwapResult } from './HttpOAuthCredentialPersistence.js';
+
+const RETRYABLE_PROVIDER_STATUSES: ReadonlySet<number> = new Set([408, 429]);
 
 export type RefreshCiphertextInput = OAuthRefreshCommand;
 
@@ -40,6 +45,7 @@ export class EnclaveOAuthRefreshService {
     private readonly provider: ProviderTokenClient,
     private readonly configFor: (sourceKind: string) => VerifiedProviderConfig | null,
     private readonly leaseResolver: OAuthLeaseResolver,
+    private readonly logger?: Logger,
   ) {}
 
   async redeem(input: RefreshCiphertextInput): Promise<OAuthRefreshMetadataUpdate> {
@@ -71,14 +77,17 @@ export class EnclaveOAuthRefreshService {
       try {
         response = await this.provider.refreshAccessToken({ config, refreshToken });
       } catch (error) {
-        return this.failure(
-          command,
-          error instanceof ProviderRejectedError ? 'provider_rejected' : 'provider_error',
-        );
+        return this.failure(command, this.refreshFailureOutcome(error));
       }
       if (!response.accessToken) return this.failure(command, 'provider_rejected');
       if ((config.kind === 'linear' || config.kind === 'notion') && !response.refreshToken) {
         return this.failure(command, 'provider_rejected');
+      }
+      if (
+        this.rechecksIdentity(config.kind) &&
+        (await this.eligibilityOutcome(config, response.accessToken)) === 'identity_ineligible'
+      ) {
+        return this.failure(command, 'identity_ineligible');
       }
       const nextRefreshToken = response.refreshToken ?? refreshToken;
       const accessTokenBytes = Buffer.from(response.accessToken, 'utf8');
@@ -150,6 +159,34 @@ export class EnclaveOAuthRefreshService {
         response.accessToken = '';
         if (response.refreshToken) response.refreshToken = '';
       }
+    }
+  }
+
+  private refreshFailureOutcome(error: unknown): 'provider_rejected' | 'provider_error' {
+    if (!(error instanceof ProviderRejectedError)) return 'provider_error';
+    return RETRYABLE_PROVIDER_STATUSES.has(error.status) ? 'provider_error' : 'provider_rejected';
+  }
+
+  // Routing for these kinds depends on the identity the token proved, so a refresh must prove it again.
+  private rechecksIdentity(kind: string): boolean {
+    const webhook = CONNECTOR_MANIFESTS.find((manifest) => manifest.kind === kind)?.webhook;
+    return webhook !== null && webhook !== undefined && bodyTenantKey(webhook) !== null;
+  }
+
+  // The rotated tokens are already issued, so a transient recheck fault must not kill a healthy connection.
+  private async eligibilityOutcome(
+    config: VerifiedProviderConfig,
+    accessToken: string,
+  ): Promise<'eligible' | 'identity_ineligible'> {
+    try {
+      await this.provider.resolveIdentity({ config, accessToken, recheck: true });
+      return 'eligible';
+    } catch (error) {
+      if (error instanceof OAuthRefusal && error.message === IDENTITY_INELIGIBLE) {
+        return 'identity_ineligible';
+      }
+      this.logger?.warn('refresh_identity_recheck_unavailable', { sourceKind: config.kind });
+      return 'eligible';
     }
   }
 
