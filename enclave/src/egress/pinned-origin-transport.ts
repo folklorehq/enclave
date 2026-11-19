@@ -64,7 +64,8 @@ function supplied(
   const url = new URL(
     typeof input === 'string' ? input : input instanceof URL ? input.href : input.url,
   );
-  const inherited = input instanceof Request ? input : undefined;
+  // Not `instanceof Request`: serve() swaps global.Request, so a native Request would skip the header and method checks.
+  const inherited = typeof input === 'string' || input instanceof URL ? undefined : input;
   const headers = new Headers(inherited?.headers);
   new Headers(init?.headers).forEach((value, name) => headers.set(name, value));
   return { url, method: (init?.method ?? inherited?.method ?? 'GET').toUpperCase(), headers };
