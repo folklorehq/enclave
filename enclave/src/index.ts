@@ -86,7 +86,6 @@ import {
 } from './workers/agent/access/build-agent-access-projection-runner.js';
 import { buildMcpCallTelemetry } from './workers/agent/access/build-mcp-call-telemetry.js';
 import { EnclaveWikiContentDecryptor } from './wiki/EnclaveWikiContentDecryptor.js';
-import { EnclaveWikiEditSealer } from './wiki/EnclaveWikiEditSealer.js';
 import { EnclaveWikiPublicationSealer } from './wiki/EnclaveWikiPublicationSealer.js';
 import { IndexResidencyManager } from './hnsw/IndexResidencyManager.js';
 import { EnclaveTitleCatalog, TITLE_INDEX_RESIDENCY } from './titles/EnclaveTitleCatalog.js';
@@ -1621,8 +1620,6 @@ try {
     // synthesized wiki text is ciphertext at rest; the read path decrypts audience-visible
     // blocks here, in-enclave, over the requesting tenant's sealed key (resolved from `ref.orgId`).
     wikiContentDecryptor,
-    // mined draft→edit prose is sealed to the requesting tenant's key, in-enclave only.
-    wikiEditSealer: new EnclaveWikiEditSealer(resolveTenant),
     wikiPublicationSealer: new EnclaveWikiPublicationSealer(resolveTenant),
     // live-collab Yjs snapshots, comments, and feedback corrections are sealed to the
     // requesting tenant's key, in-enclave only.
