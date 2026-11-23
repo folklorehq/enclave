@@ -15,7 +15,7 @@ import { TenantKeyedHasher } from '../sealing/TenantKeyedHasher.js';
 import { TenantContextZeroizedError, type TenantContext } from '../tenant/tenant-context.js';
 import type { ResolveTenant } from '../tenant/tenant-resolver.js';
 import { TitleIndex, type TitleEntry } from './TitleIndex.js';
-import { padTitle, sealedTitleMac, unpadTitle } from './title-padding.js';
+import { openTitle, padTitle, sealedTitleMac, stampedTitleMac } from './title-padding.js';
 
 export type TitleCatalogEvent =
   | 'title_index_loaded'
@@ -333,8 +333,12 @@ export class EnclaveTitleCatalog implements TitleCatalogPort {
     const binding = { orgId, kind: row.kind, subjectId: row.subjectId, rowId: row.id };
     try {
       const padded = await tenant.crypto.decryptSealedTitle(row.sealed, binding);
-      const title = unpadTitle(padded, sealedTitleMac(hasher, binding));
-      return { key: sealedTitleKey(row.kind, row.subjectId), seq: row.seq, title };
+      const { title, stamp } = openTitle(
+        padded,
+        sealedTitleMac(hasher, binding),
+        stampedTitleMac(hasher, binding),
+      );
+      return { key: sealedTitleKey(row.kind, row.subjectId), seq: row.seq, title, stamp };
     } catch (error) {
       const code = this.repeatingFailureCode(error);
       if (code !== null) return this.skipped(row, code);

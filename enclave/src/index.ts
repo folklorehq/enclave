@@ -88,6 +88,7 @@ import { EnclaveWikiContentDecryptor } from './wiki/EnclaveWikiContentDecryptor.
 import { EnclaveWikiPublicationSealer } from './wiki/EnclaveWikiPublicationSealer.js';
 import { IndexResidencyManager } from './hnsw/IndexResidencyManager.js';
 import { EnclaveTitleCatalog, TITLE_INDEX_RESIDENCY } from './titles/EnclaveTitleCatalog.js';
+import { sealedThemeNamesFrom } from './titles/sealed-theme-names.js';
 import { EnclaveTitleDigester } from './titles/EnclaveTitleDigester.js';
 import { TitleEviction } from './titles/TitleEviction.js';
 import type { TitleIndex } from './titles/TitleIndex.js';
@@ -1819,6 +1820,7 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
     activePolicyBindingForwarderFor,
     activePolicyBackendFor,
     claudeRoutes,
+    sealedThemeNames: sealedThemeNamesFrom(() => titleCatalog),
     ...(embeddingProvider === undefined ? {} : { embeddingProvider }),
     ...(decisionModel === undefined ? {} : { decisionModel }),
     decisionModes: jevSiteMode,

@@ -1,15 +1,29 @@
 import { sealedTitleKey, type SealedTitleKind } from '@folklore/contracts';
 import type { ResidentIndex } from '../hnsw/IndexResidencyManager.js';
+import { UNSTAMPED, type TitleStamp } from './title-padding.js';
 
 export interface TitleEntry {
   key: string;
   seq: string;
   title: string;
+  stamp?: TitleStamp;
 }
 
 interface Held {
   seq: string;
   title: string;
+  stamp: TitleStamp;
+}
+
+/** The title a subject shows: a fallback never beats a real or withdrawn title, then the later sealing, then the later row. */
+function outranks(entry: Held, current: Held): boolean {
+  const entryFallback = entry.stamp.standing === 'fallback';
+  const currentFallback = current.stamp.standing === 'fallback';
+  if (entryFallback !== currentFallback) return !entryFallback;
+  if (entry.stamp.sealedAtMs !== current.stamp.sealedAtMs) {
+    return entry.stamp.sealedAtMs > current.stamp.sealedAtMs;
+  }
+  return BigInt(entry.seq) > BigInt(current.seq);
 }
 
 const INITIAL_WATERMARK = '0';
@@ -94,10 +108,9 @@ export class TitleIndex implements ResidentIndex {
     } else {
       this.noted.set(entry.seq, entry.key);
     }
+    const candidate = { seq: entry.seq, title: entry.title, stamp: entry.stamp ?? UNSTAMPED };
     const current = this.held.get(entry.key);
-    if (!current || BigInt(entry.seq) > BigInt(current.seq)) {
-      this.held.set(entry.key, { seq: entry.seq, title: entry.title });
-    }
+    if (!current || outranks(candidate, current)) this.held.set(entry.key, candidate);
   }
 
   // A noted row Postgres calls unusable is left uncounted, so the count check rebuilds the older title.
