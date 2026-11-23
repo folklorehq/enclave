@@ -11,7 +11,6 @@ import { promisify } from 'util';
 import { awsShortCallTransport } from '../aws/aws-transport.js';
 import { openKmsRecipientCiphertext } from '../aws/kms-recipient-ciphertext.js';
 import { getAttestationDoc } from './nsm.js';
-import { assertDevKmsStubAllowed } from './dev-kms-stub-guard.js';
 import { logger } from '../logger.js';
 import { AttestedRecipients, type AttestedRecipient } from './AttestedRecipients.js';
 import { RecipientKeyCache, type RecipientKeyPair } from './RecipientKeyCache.js';
@@ -162,27 +161,6 @@ async function decryptWithContextAndKeyId(
   kmsKeyId: string | undefined,
   encryptionContext: Record<string, string>,
 ): Promise<{ keyId: string; plaintext: Buffer }> {
-  // Dev-only: localstack KMS cannot perform the Nitro Recipient decrypt (it returns no
-  // CiphertextForRecipient), so a plain KMS Decrypt stands in for every seal.ts decrypt (content
-  // keyring, boot-manifest secrets, provider-refresh secrets, boot checkpoints, runtime-DB creds).
-  // Fail-closed exactly like devMasterKeySealers: the shared guard throws outside development/test,
-  // and the production EIF additionally pins NODE_ENV=production in entrypoint.sh AND denies this
-  // flag from the parent env (aws-transport/egress-allowlist tests), so it can never activate there.
-  // The AAD (EncryptionContext) is forwarded unchanged, so tenant/purpose binding is preserved.
-  if (process.env['ENCLAVE_DEV_KMS_STUB'] === 'true') {
-    assertDevKmsStubAllowed(process.env['NODE_ENV'] ?? '');
-    const devResponse = await kmsClient().send(
-      new DecryptCommand({
-        ...(kmsKeyId === undefined ? {} : { KeyId: kmsKeyId }),
-        CiphertextBlob: ciphertext,
-        EncryptionContext: encryptionContext,
-      }),
-    );
-    if (!devResponse.KeyId || !devResponse.Plaintext) {
-      throw new Error(RECIPIENT_OUTPUT_INVALID);
-    }
-    return { keyId: devResponse.KeyId, plaintext: Buffer.from(devResponse.Plaintext) };
-  }
   return attestedRecipients.withRecipient((attested) =>
     decryptWithRecipient(attested, ciphertext, kmsKeyId, encryptionContext),
   );

@@ -224,11 +224,7 @@ import {
   type BootBoundGenerationContext,
   loadEnclaveActivePolicyTrust,
 } from './inference/BootStateActivePolicyReferenceVerifier.js';
-import {
-  DurableGenerationHighWaterClient,
-  type DurableGenerationHighWaterTransport,
-  type DurableGenerationHighWaterVerifierPort,
-} from './inference/DurableGenerationHighWaterClient.js';
+import { DurableGenerationHighWaterClient } from './inference/DurableGenerationHighWaterClient.js';
 import { DurableGenerationHighWaterClientAdapter } from './inference/DurableGenerationHighWaterClientAdapter.js';
 import { AwsDurableGenerationHighWaterTransport } from './inference/AwsDurableGenerationHighWaterTransport.js';
 import { prewarmBootHighWater } from './inference/high-water/prewarm-boot-high-water.js';
@@ -262,7 +258,6 @@ import {
 import { attestedRecipients } from './sealing/seal.js';
 import { getAttestationDoc } from './sealing/nsm.js';
 import { deriveIngestKeypair } from './sealing/keygen.js';
-import { devMasterKeySealers } from './sealing/dev-master-key-sealers.js';
 import {
   KmsRecipientDecryptor,
   RuntimeDatabaseCredentialConsumer,
@@ -333,13 +328,7 @@ const IDLE_POLL_THRESHOLD = 15;
 // wiki produces no queue traffic, so without this a reader between page loads looks like a quiet host.
 const ACTIVITY_QUIET_WINDOW_MS = 60 * 60 * 1000;
 
-// Dev-only forcePathStyle: localstack doesn't parse bare `*.localhost` virtual-host buckets, so
-// the S3 client must address path-style against it. Production (unset) keeps virtual-host, unchanged.
-const s3 = new S3Client({
-  region: REGION,
-  ...awsLongCallTransport(),
-  forcePathStyle: process.env['ENCLAVE_S3_FORCE_PATH_STYLE'] === 'true',
-});
+const s3 = new S3Client({ region: REGION, ...awsLongCallTransport() });
 const dynamodb = new DynamoDBClient({ region: REGION, ...awsShortCallTransport() });
 const sqs = new SQSClient({ region: REGION, ...awsLongCallTransport() });
 const ssm = new SSMClient({ region: REGION, ...awsShortCallTransport() });
@@ -394,10 +383,6 @@ const ASSIGNMENT_MANIFEST_PUBLIC_KEY = process.env['ASSIGNMENT_MANIFEST_PUBLIC_K
 const bootAssignments = resolveBootAssignments(process.env);
 // Pool-scoped idle (§5): the wake Lambda tracks the pool, so the host reports idle under the pool path.
 const idleSsmPath = `/folklore/pool/${POOL_ID}/idle`;
-
-// Dev-only: localstack KMS can't do the Nitro Recipient decrypt, so ENCLAVE_DEV_KMS_STUB swaps in
-// AES-GCM mint/unseal with DATA_KEK. devMasterKeySealers fails closed outside development/test.
-const devKmsStub = process.env['ENCLAVE_DEV_KMS_STUB'] === 'true';
 
 // Set once the boot manifest is verified, which happens after this factory is constructed but
 // before anything seals a mnemonic — hence the accessor rather than a value (audit F2). Held here
@@ -565,9 +550,6 @@ const tenantFactory = new TenantContextFactory({
   ...(decisionModel === undefined ? {} : { decisionModel, ingestDecisions }),
   factEmbedUsage,
   onIndexUnreadable: () => bootStatus.recordAlarm(HNSW_INDEX_UNREADABLE_CODE),
-  ...(devKmsStub
-    ? devMasterKeySealers(process.env['NODE_ENV'] ?? '', process.env['DATA_KEK'])
-    : {}),
 });
 const generationRegistry = new TenantGenerationRegistry<TenantContext, LiveTenantPolicySnapshot>();
 const registry = new TenantRegistry(generationRegistry);
@@ -602,16 +584,6 @@ const runtimeDatabaseLease = new RuntimeDatabaseLease<
 >({
   requestRestart: (exitCode) => process.exit(exitCode),
 });
-// Non-production only: the API container and the theme snapshot reader share this one pool.
-let localThemeDatabase: ReturnType<typeof createRuntimeDatabaseConnection> | undefined;
-function openLocalThemeDatabase(): ReturnType<typeof createRuntimeDatabaseConnection> | undefined {
-  const url = process.env['DATABASE_URL'];
-  if (!url) return undefined;
-  return createRuntimeDatabaseConnection({
-    url,
-    sslServerName: process.env['DB_SSL_SERVERNAME'] ?? '',
-  });
-}
 let activateRuntimeDatabase: ((config: RuntimeDatabaseConfig) => Promise<void>) | undefined;
 let runtimeDatabaseActivation: Promise<void> | undefined;
 let evictTenantInference: ((tenantId: string) => Promise<void>) | undefined;
@@ -1680,10 +1652,7 @@ try {
     if (!signedRuntimeDatabase) throw new Error(RUNTIME_DATABASE_SIGNED_CONFIG_UNAVAILABLE);
     await activateRuntimeDatabase(signedRuntimeDatabase);
   } else {
-    localThemeDatabase = openLocalThemeDatabase();
-    const startingContainer = createContainer(
-      localThemeDatabase ? { ...apiOptions, database: localThemeDatabase } : apiOptions,
-    );
+    const startingContainer = createContainer(apiOptions);
     try {
       await startingContainer.start();
     } catch (err) {
@@ -1823,9 +1792,7 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
     sqs,
     s3,
     resolveTenant,
-    themeFactRefs: new ThemeSnapshotFactSource(
-      () => runtimeDatabaseLease.database() ?? localThemeDatabase,
-    ),
+    themeFactRefs: new ThemeSnapshotFactSource(() => runtimeDatabaseLease.database()),
     processedBucket: PROCESSED_OUTPUTS_BUCKET,
     processedBucketFor: (orgId) => resolveTenant(orgId).processedOutputsBucket,
     activePolicyFreshnessFor,
@@ -2044,22 +2011,3 @@ process.on('SIGINT', () => void shutdown());
 
 void drainerRef.current.runForever();
 bootStatus.reach('ready');
-
-function unavailableHighWaterTransport(): DurableGenerationHighWaterTransport {
-  const unavailable = (): Promise<never> =>
-    Promise.reject(new Error('high_water_transport_unavailable'));
-  return {
-    read: unavailable,
-    readRecent: unavailable,
-    commit: unavailable,
-  };
-}
-
-function unavailableHighWaterVerifier(): DurableGenerationHighWaterVerifierPort {
-  return {
-    purpose: 'generation-high-water',
-    verify: async () => {
-      throw new Error('high_water_verifier_unavailable');
-    },
-  };
-}
