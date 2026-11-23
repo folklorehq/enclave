@@ -85,14 +85,6 @@ export {
   verifySignedAssignmentManifestV4,
 } from './signed-assignment-manifest-v4.js';
 export {
-  GATE_A_WRAPPER_CANONICAL_DOMAIN,
-  digestGateAWrapperV1,
-  digestGateAWrapperWithoutArtifactDigestV1,
-  encodeGateAWrapperSigningMaterialV1,
-  encodeGateAWrapperSigningInputV1,
-  encodeGateAWrapperV1,
-} from './gate-a-canonical.js';
-export {
   canonicalCbor,
   canonicalJsonDigest,
   digestCanonicalCbor,
