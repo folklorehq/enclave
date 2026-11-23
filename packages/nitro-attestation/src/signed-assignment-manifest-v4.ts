@@ -1,4 +1,4 @@
-import { createHash, createPublicKey, verify } from 'node:crypto';
+import { createHash, verify } from 'node:crypto';
 import {
   ASSIGNMENT_MANIFEST_V4_DOMAIN,
   buildSignerPurposeSignatureMessage,
@@ -7,7 +7,7 @@ import {
   type SignedAssignmentManifestV4,
 } from '@folklore/contracts';
 import { canonicalCbor, canonicalJsonDigest, digestCanonicalCbor } from './canonical-cbor.js';
-import { SignedAssignmentManifestError } from './signed-assignment-manifest.js';
+import { publicKeyFromSpki, SignedAssignmentManifestError } from './signed-assignment-manifest.js';
 
 export function encodeAssignmentManifestSubjectV4(input: {
   payload: AssignmentManifestV4Payload;
@@ -68,18 +68,4 @@ export function verifySignedAssignmentManifestV4(
     throw new SignedAssignmentManifestError('assignment_manifest_signature_invalid');
   }
   return envelope;
-}
-
-function publicKeyFromSpki(publicKeySpki: string) {
-  try {
-    const publicKey = createPublicKey({
-      key: Buffer.from(publicKeySpki, 'base64'),
-      format: 'der',
-      type: 'spki',
-    });
-    if (publicKey.asymmetricKeyType !== 'ed25519') throw new Error('wrong key type');
-    return publicKey;
-  } catch {
-    throw new SignedAssignmentManifestError('assignment_manifest_verifier_invalid');
-  }
 }

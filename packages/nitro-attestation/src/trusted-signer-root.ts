@@ -38,7 +38,7 @@ function publicKeySpkiDerSha256(publicKeyPem: string): string {
     .digest('hex');
 }
 
-function canonicalMemberSet(
+export function canonicalMemberSet(
   members: readonly { memberId: string; publicKeySpkiDerSha256: string }[],
 ): string {
   const sorted = [...members]

@@ -67,7 +67,7 @@ export function verifySignedAssignmentManifest(
   return parsed.data;
 }
 
-function publicKeyFromSpki(publicKeySpki: string) {
+export function publicKeyFromSpki(publicKeySpki: string) {
   let publicKey;
   try {
     publicKey = createPublicKey({

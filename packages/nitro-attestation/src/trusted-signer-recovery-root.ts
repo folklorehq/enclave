@@ -1,5 +1,7 @@
 import { createHash, createPublicKey, verify } from 'node:crypto';
-import { canonicalJson } from '@folklore/contracts'; // The independently pinned recovery signer root (plan "Keyset, roots, recovery installation, and
+import { canonicalJson } from '@folklore/contracts';
+import { canonicalMemberSet } from './trusted-signer-root.js';
+// The independently pinned recovery signer root (plan "Keyset, roots, recovery installation, and
 // reader capability"): exactly five active Ed25519 members, threshold 3-of-5. It is NOT a field
 // inside the normal root or any incoming keyset. The pinned artifact carries public material only;
 // tests build their own roots with fresh keys via `buildTrustedSignerRecoveryRoot`.
@@ -33,20 +35,6 @@ function publicKeySpkiDerSha256(publicKeyPem: string): string {
   return createHash('sha256')
     .update(key.export({ type: 'spki', format: 'der' }))
     .digest('hex');
-}
-
-function canonicalMemberSet(
-  members: readonly { memberId: string; publicKeySpkiDerSha256: string }[],
-): string {
-  const sorted = [...members]
-    .map((member) => ({
-      memberId: member.memberId,
-      publicKeySpkiDerSha256: member.publicKeySpkiDerSha256,
-    }))
-    .sort((left, right) =>
-      left.memberId < right.memberId ? -1 : left.memberId > right.memberId ? 1 : 0,
-    );
-  return canonicalJson(sorted);
 }
 
 export function buildTrustedSignerRecoveryRoot(input: {
