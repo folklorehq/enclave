@@ -103,7 +103,6 @@ export const MESSAGE_SENTENCE_REASONS: ReadonlyMap<string, string> = new Map([
   ['9e27eba56fb90f7c', 'jira_source_connection_unavailable'],
   ['6c6e0f31633f3365', 'jira_timestamp_invalid'],
   ['9e7ea51eb98b1644', 'jira_webhook_delivery_invalid'],
-  ['f3641442b6643d22', 'judge_requires_policy_bound_inference'],
   ['2115c74d6690f1ed', 'lease_duration_must_positive_integer'],
   ['f3f6b1e1acb91cb0', 'legacy_assignment_floor_unavailable'],
   ['2bc48fa87c4f0b3c', 'legacy_assignment_key_record_inactive'],
