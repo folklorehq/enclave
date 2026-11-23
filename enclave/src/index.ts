@@ -18,6 +18,7 @@ import type { TenantContext } from './tenant/tenant-context.js';
 import {
   resolveBootAssignments,
   parseAssignmentManifestWire,
+  assertAssignmentResourceNamesMatchTenants,
   assertNoSharedResources,
 } from './tenant/tenant-assignments.js';
 import { TenantAssignmentApplier } from './tenant/TenantAssignmentApplier.js';
@@ -1207,6 +1208,10 @@ async function refreshAssignments(isCurrent: IsCurrentRefresh): Promise<void> {
     );
     refusalTarget = parsed;
     assertNoSharedResources(verified.assignments);
+    assertAssignmentResourceNamesMatchTenants(
+      verified.assignments,
+      verified.wire === 'SignedAssignmentManifestV4' ? verified.raw.scope : undefined,
+    );
     assertInferenceAttestationEcho(verified.inferenceAttestation, parsed.wire);
     const isV4 = parsed.wire === 'SignedAssignmentManifestV4';
     if (isV4 && !liveActivePolicySnapshotVerifier) {

@@ -6,12 +6,17 @@ import {
   type SignedAssignmentManifest,
   type TenantAssignment,
   type VersionedTenantAssignment,
+  canonicalQueueUrlSchema,
   parseAssignmentManifest as parseContractManifest,
   parseAssignmentManifestWire as parseContractAssignmentManifestWire,
   parseVersionedAssignmentManifest as parseContractVersionedManifest,
   tenantAssignmentSchema,
+  tenantBucketNames,
+  tenantResourceName,
+  tenantWebhookQueueName,
   versionedTenantAssignmentSchema,
 } from '@folklore/contracts';
+import { isLowercaseRfcUuid } from '@folklore/utils';
 import { bareKmsKeyId } from '../sealing/kms-key-arn.js';
 
 // The assignment shape is defined ONCE in @folklore/contracts (design §4.3) so the control-plane
@@ -56,7 +61,11 @@ export function parseTenantAssignments(env: NodeJS.ProcessEnv): TenantAssignment
   return assignments;
 }
 
+const SQS_URL_PATTERN = /^https:\/\/sqs\.([^.]+)\.amazonaws\.com\/(\d{12})\/([^/]+)$/;
+
 export const ASSIGNMENT_MANIFEST_RESOURCE_SHARED = 'assignment_manifest_resource_shared';
+export const ASSIGNMENT_MANIFEST_RESOURCE_NAME_MISMATCH =
+  'assignment_manifest_resource_name_mismatch';
 
 export const SHARED_POOL_ENV_ASSIGNMENTS_REFUSED = 'shared_pool_env_assignments_refused';
 
@@ -203,6 +212,34 @@ export function assertNoSharedResources(assignments: readonly SharedResourceAssi
       ),
     );
     claimResources(queueOwners, tenantId, [assignment.queueUrl.trim()]);
+  }
+}
+
+// Buckets and the webhook queue are named from the tenant id by the shared render. KMS key ids are
+// random, so they are bound by the org encryption-context condition of the rootless key policy
+// (PR #5158) and are otherwise only checked for sharing above. A V4 manifest also fixes the queue's
+// account and region to its signed scope.
+export function assertAssignmentResourceNamesMatchTenants(
+  assignments: readonly TenantAssignment[],
+  scope?: { readonly awsAccountId: string; readonly awsRegion: string },
+): void {
+  for (const assignment of assignments) {
+    const { tenantId } = assignment;
+    const buckets = tenantBucketNames(tenantResourceName(tenantId));
+    const queue = canonicalQueueUrlSchema.safeParse(assignment.queueUrl).success
+      ? SQS_URL_PATTERN.exec(assignment.queueUrl)
+      : null;
+    if (
+      !isLowercaseRfcUuid(tenantId) ||
+      assignment.sealedBlobBucket !== buckets.sealedBlobs ||
+      assignment.rawPayloadsBucket !== buckets.rawPayloads ||
+      assignment.processedBucket !== buckets.processed ||
+      queue === null ||
+      queue[3] !== tenantWebhookQueueName(tenantId) ||
+      (scope !== undefined && (queue[1] !== scope.awsRegion || queue[2] !== scope.awsAccountId))
+    ) {
+      throw new Error(ASSIGNMENT_MANIFEST_RESOURCE_NAME_MISMATCH);
+    }
   }
 }
 
