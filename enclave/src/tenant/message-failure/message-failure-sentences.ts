@@ -147,7 +147,6 @@ export const MESSAGE_SENTENCE_REASONS: ReadonlyMap<string, string> = new Map([
   ['5a1a4aa13cc6ceac', 'pull_fact_budget_invalid'],
   ['24d88d573094e993', 'purge_org_requires_a_non_empty_org_id'],
   ['790d5e99c96a4f39', 'purge_org_requires_non_empty_command_id'],
-  ['a3762e37bc86fad3', 'recall_dispatch_returned_no_bot_id'],
   ['ebc75b72f33ee457', 'recovery_reader_report_duplicate'],
   ['78a955bf4e331b22', 'recovery_root_installation_input_invalid'],
   ['f372371ef9211d66', 'recovery_root_installation_report_invalid'],
@@ -236,5 +235,4 @@ export const MESSAGE_SENTENCE_REASONS: ReadonlyMap<string, string> = new Map([
   ['b3e4a0c1600c8362', 'wrong_key_size'],
   ['29feda6694063fdd', 'wrong_key_type'],
   ['f692d996967d3e1d', 'wrong_root_type'],
-  ['c309cca94fc6d677', 'zoom_bot_recall_client_required_api_calls'],
 ]);
