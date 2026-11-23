@@ -70,8 +70,6 @@ export const MESSAGE_SENTENCE_REASONS: ReadonlyMap<string, string> = new Map([
   ['a229c72fcc41be89', 'global_inference_backend_unavailable_under_public'],
   ['3a9a8cdff2ef417a', 'gmail_label_allowlist_accepts_at_most_one_label'],
   ['aa9ac49371a3804b', 'google_drive_missing_start_page_token'],
-  ['0df95666d66243f0', 'help_center_document_ref_invalid'],
-  ['fe5167e33834f7c1', 'help_center_signing_epoch_invalid'],
   ['da24afb79b138676', 'hnsw_namespace_generation_invalid'],
   ['162cee389301a2a4', 'identity_owner_is_unavailable'],
   ['6089e2988d9ad77e', 'identity_pointer_changed_while_advisory_lock_held'],

@@ -1,14 +1,7 @@
 import { hkdfSync, createPrivateKey, createPublicKey, KeyObject } from 'crypto';
 import { entropyToMnemonic } from 'bip39';
-import { HELP_CENTER_MAX_SIGNING_EPOCH } from '@folklore/contracts/help-center';
-import { sha256Hex } from '@folklore/utils';
 
 const LLM_CACHE_NAME_KEY_PURPOSE = 'llm-cache-name-v1';
-const HELP_CENTER_INTEGRITY_KEY_PURPOSE = 'help-center-integrity-v1';
-const HELP_CENTER_SLUG_KEY_PURPOSE = 'help-center-slug-v1';
-const HELP_CENTER_RELEASE_KEY_PURPOSE = 'help-center-release-v1:epoch-';
-const ED25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
-const ED25519_RAW_PUBLIC_KEY_LENGTH = 32;
 
 export function deriveKey(masterKey: Buffer, purpose: string, length = 32): Buffer {
   return Buffer.from(hkdfSync('sha256', masterKey, Buffer.alloc(0), purpose, length));
@@ -47,40 +40,4 @@ export function deriveIngestKeypair(masterKey: Buffer): IngestKeypair {
   const publicKeyRaw = Buffer.from(publicKey.export({ type: 'spki', format: 'der' }).slice(-32));
 
   return { privateKey, publicKey, publicKeyRaw };
-}
-
-export interface HelpCenterSigningKey {
-  readonly privateKey: KeyObject;
-  readonly publicKeyRaw: Buffer;
-  readonly keyId: string;
-  readonly epoch: number;
-}
-
-export function deriveHelpCenterIntegrityKey(masterKey: Buffer): Buffer {
-  return deriveKey(masterKey, HELP_CENTER_INTEGRITY_KEY_PURPOSE);
-}
-
-export function deriveHelpCenterSlugKey(masterKey: Buffer): Buffer {
-  return deriveKey(masterKey, HELP_CENTER_SLUG_KEY_PURPOSE);
-}
-
-// The caller owns the returned KeyObject and must not keep it past the call.
-export function deriveHelpCenterSigningKey(masterKey: Buffer, epoch: number): HelpCenterSigningKey {
-  if (!Number.isSafeInteger(epoch) || epoch < 1 || epoch > HELP_CENTER_MAX_SIGNING_EPOCH) {
-    throw new Error('help_center_signing_epoch_invalid');
-  }
-  const seed = deriveKey(masterKey, `${HELP_CENTER_RELEASE_KEY_PURPOSE}${epoch}`);
-  const der = Buffer.concat([ED25519_PKCS8_PREFIX, seed]);
-  try {
-    const privateKey = createPrivateKey({ key: der, format: 'der', type: 'pkcs8' });
-    const publicKeyRaw = Buffer.from(
-      createPublicKey(privateKey)
-        .export({ type: 'spki', format: 'der' })
-        .subarray(-ED25519_RAW_PUBLIC_KEY_LENGTH),
-    );
-    return { privateKey, publicKeyRaw, keyId: sha256Hex(publicKeyRaw), epoch };
-  } finally {
-    seed.fill(0);
-    der.fill(0);
-  }
 }

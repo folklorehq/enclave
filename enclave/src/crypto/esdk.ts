@@ -34,12 +34,6 @@ const RESOURCE_SCOPE_PURPOSE = 'resource-scope';
 const JIRA_WEBHOOK_REPLAY_PURPOSE = 'jira-webhook-replay';
 const CODE_GRAPH_NAMES_PURPOSE = 'code-graph-names';
 const CODE_GRAPH_TOMBSTONE_PURPOSE = 'code-graph-tombstone';
-const HELP_CENTER_PURPOSES = [
-  'help-center-revision',
-  'help-center-settings',
-  'help-center-policy',
-  'help-center-approval',
-] as const;
 const OWNER_ACCOUNT_ID_KEY = 'ownerAccountId';
 const OWNER_STRICT_KEYS = [OWNER_ACCOUNT_ID_KEY] as const;
 
@@ -51,14 +45,6 @@ export interface FactBodyRef {
   factId: string;
   orgId: string;
   ownerAccountId?: string;
-}
-
-// A help center document is sealed to (org, subject, version, purpose); the box API chooses all four.
-export interface HelpCenterDocumentRef {
-  orgId: string;
-  subjectId: string;
-  version: number;
-  purpose: string;
 }
 
 // A live-editing Yjs snapshot is the full current wiki prose; sealed to the fact key, bound to
@@ -505,14 +491,6 @@ export class EnclaveCrypto {
     return this.open(ciphertext, ASK_TURN_PURPOSE, this.askTurnIdentity(expected));
   }
 
-  encryptHelpCenterDocument(plaintext: Buffer, ref: HelpCenterDocumentRef): Promise<Buffer> {
-    return this.seal(plaintext, this.helpCenterDocumentContext(ref));
-  }
-
-  decryptHelpCenterDocument(ciphertext: Buffer, expected: HelpCenterDocumentRef): Promise<Buffer> {
-    return this.openContext(ciphertext, this.helpCenterDocumentContext(expected), expected.purpose);
-  }
-
   async encryptSealedTitle(plaintext: Buffer, ref: SealedTitleRef): Promise<Buffer> {
     return this.seal(plaintext, {
       ...this.sealedTitleIdentity(ref),
@@ -792,21 +770,6 @@ export class EnclaveCrypto {
       chatId: ref.chatId,
       ownerUserId: ref.ownerUserId,
       subject: ref.subject,
-    };
-  }
-
-  private helpCenterDocumentContext(ref: HelpCenterDocumentRef): Record<string, string> {
-    const purposeValid = (HELP_CENTER_PURPOSES as readonly string[]).includes(ref.purpose);
-    const idsValid = [ref.orgId, ref.subjectId].every(isLowercaseRfcUuid);
-    if (!purposeValid || !idsValid || !Number.isSafeInteger(ref.version) || ref.version < 1) {
-      throw new Error('help_center_document_ref_invalid');
-    }
-    // Not `version`: hasSealedEnvelopeMarker refuses that key on every plain context.
-    return {
-      orgId: ref.orgId,
-      subjectId: ref.subjectId,
-      documentVersion: String(ref.version),
-      purpose: ref.purpose,
     };
   }
 
