@@ -112,7 +112,6 @@ export const MESSAGE_SENTENCE_REASONS: ReadonlyMap<string, string> = new Map([
   ['a492698474c78a52', 'legacy_assignment_key_record_unavailable'],
   ['f9beecc50d8061e9', 'legacy_assignment_read_floor_exceeded'],
   ['9c5f6b4ed0c641cb', 'linear_cursor_token_too_long'],
-  ['744d8c6684949a9f', 'llm_response_missing_required_fields'],
   ['18e5046cb2da0d1a', 'local_inference_endpoint_must_use_https_or_http'],
   ['a27e3d2a639b7850', 'local_inference_policy_conflicts_public_inference'],
   ['21fc8bef03be3b0a', 'local_inference_policy_forbidden_production'],

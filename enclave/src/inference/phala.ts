@@ -47,27 +47,6 @@ const PROVIDER_SEPARATOR = '/';
 
 export const RECEIPT_POLICY = 'per-call' as const;
 
-export interface SyntheticPhalaPayloadV1 {
-  payloadKind: 'synthetic-commissioning' | 'customer-content';
-  body: Uint8Array;
-}
-
-export class SyntheticPhalaInferenceError extends Error {
-  readonly code = 'provider_not_synthetic' as const;
-
-  constructor() {
-    super('provider_not_synthetic');
-    this.name = 'SyntheticPhalaInferenceError';
-  }
-}
-
-// UNWIRED: synthetic commissioning is test-only and has no live provider caller.
-export function assertSyntheticPhalaPayload(input: SyntheticPhalaPayloadV1): void {
-  if (process.env['NODE_ENV'] === 'production' || input.payloadKind !== 'synthetic-commissioning') {
-    throw new SyntheticPhalaInferenceError();
-  }
-}
-
 export function familyOf(model: string): string {
   const normalized = model.trim().toLowerCase();
   const separator = normalized.indexOf(PROVIDER_SEPARATOR);
