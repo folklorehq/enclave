@@ -319,6 +319,7 @@ const CONNECTOR_TRANSPORT_REASONS = [
   'egress_request_failed',
   'header_value_refused',
   'spec_response_not_json',
+  'spec_response_refused',
   'spec_response_too_large',
 ] as const;
 
