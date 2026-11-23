@@ -11,7 +11,6 @@ import {
 import type { TelemetryClient } from '@folklore/telemetry';
 import { DirectoryRejectionReporter } from './DirectoryRejectionReporter.js';
 import { TeamProjectionFailureReporter } from './TeamProjectionFailureReporter.js';
-import type { TenantBatchConsent } from './TenantBatchConsent.js';
 import type { TenantHistoryWindow } from './TenantHistoryWindow.js';
 import type { TenantProjectionOutcome } from './TenantEntitlementProjectionRunner.js';
 
@@ -26,9 +25,7 @@ export interface EntitlementProjectionSync {
 export interface EntitlementProjectionApplierDeps {
   readonly database: () => ProjectionDatabase | undefined;
   readonly logger: Logger;
-  readonly batchConsent?: TenantBatchConsent;
   readonly historyWindow: Pick<TenantHistoryWindow, 'record'>;
-  readonly onBatchNotAllowed?: (orgId: string) => Promise<unknown>;
   readonly opsTelemetry?: TelemetryClient;
   readonly now?: () => number;
   readonly createService?: (
@@ -60,38 +57,10 @@ export class EntitlementProjectionApplier {
   async apply(orgId: string, source: DirectorySourcePort): Promise<TenantProjectionOutcome> {
     const database = this.deps.database();
     if (!database) return 'database_unavailable';
-    const seen: { directory?: DirectorySync } = {};
-    const outcome = await this.createService(
-      this.observed(orgId, source, (directory) => {
-        seen.directory = directory;
-        this.recordHistoryWindow(orgId, directory);
-      }),
+    return this.createService(
+      this.observed(orgId, source, (directory) => this.recordHistoryWindow(orgId, directory)),
       database,
     ).sync();
-    if (outcome === 'applied' && seen.directory) {
-      this.recordConsent(orgId, seen.directory);
-      await this.cancelBatchesWithoutConsent(orgId, seen.directory);
-    }
-    return outcome;
-  }
-
-  // Decided from the applied state alone, so a restart between two passes cannot skip it.
-  private async cancelBatchesWithoutConsent(
-    orgId: string,
-    directory: DirectorySync,
-  ): Promise<void> {
-    if (directory.orgId !== orgId || directory.entitlement.batchAllowed === true) return;
-    try {
-      await this.deps.onBatchNotAllowed?.(orgId);
-    } catch {
-      this.deps.logger.warn('batch_opt_out_cancel_failed', {});
-    }
-  }
-
-  // Consent comes only from a projection that was applied, so a stale or rejected pass never moves it.
-  private recordConsent(orgId: string, directory: DirectorySync): void {
-    if (directory.orgId !== orgId) return;
-    this.deps.batchConsent?.record(orgId, directory.revision, directory.entitlement.batchAllowed);
   }
 
   // Recorded before the write that can flag a backfill, so no backfill pull can run on the narrower window.

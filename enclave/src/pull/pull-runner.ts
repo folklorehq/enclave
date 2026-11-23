@@ -160,7 +160,7 @@ export function resolvePullWindow(
   return { cursor: { value: backfill ? null : storedCursor }, options: { since, backfill } };
 }
 
-export type PullCursorStoreMode = 'sealed' | 'legacy_ssm';
+export type PullCursorStoreMode = 'sealed';
 
 export interface PullRunnerDeps {
   ssm: SSMClient;

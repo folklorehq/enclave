@@ -43,7 +43,6 @@ import {
   type ProjectionDatabase,
 } from './directory/EntitlementProjectionApplier.js';
 import { RedisDirectoryNudgeSignal } from './directory/RedisDirectoryNudgeSignal.js';
-import { TenantBatchConsent } from './directory/TenantBatchConsent.js';
 import { TenantHistoryWindow } from './directory/TenantHistoryWindow.js';
 import {
   TenantEntitlementProjectionRunner,
@@ -66,7 +65,7 @@ import { HNSW_INDEX_UNREADABLE_CODE } from './hnsw/index.js';
 import { createTenantResolver } from './tenant/tenant-resolver.js';
 import { BoxServer } from './http/BoxServer.js';
 import { HostHeadroomGauge } from './workers/HostHeadroomGauge.js';
-import { SynthesisConsumer, type SynthesisConsumerDeps } from './workers/SynthesisConsumer.js';
+import { SynthesisConsumer } from './workers/SynthesisConsumer.js';
 import { ThemeSnapshotFactSource } from './workers/ThemeSnapshotFactSource.js';
 import { AnswerUsageDayCounts } from './inference/AnswerUsageDayCounts.js';
 import { AskUsageMeter } from './inference/AskUsageMeter.js';
@@ -125,10 +124,6 @@ import { OperationAuthority } from './inference/OperationAuthority.js';
 import { AttestedSsmParameterReader } from './attestation/AttestedSsmParameterReader.js';
 import { ClaudeRouteComposition } from './inference/claude/ClaudeRouteComposition.js';
 import { CLAUDE_ROUTE_CONFIG_INVALID } from './inference/claude/claude-route-errors.js';
-import {
-  ACTIVE_EMBEDDING_SPACE,
-  assertEmbeddingSpaceDeployable,
-} from './inference/embedding-space.js';
 import { OpenAIEmbedRouteComposition } from './inference/openai/OpenAIEmbedRouteComposition.js';
 import {
   OPENAI_EMBED_ROUTE_INVALID_ALARM,
@@ -216,9 +211,7 @@ import type { RuntimeDatabaseConfig } from '@folklore/contracts/enclave-attestat
 import { sha256Hex } from '@folklore/utils';
 import {
   createRuntimeAttestationComposition,
-  enableRuntimeAttestation,
   initializeRuntimeAttestationForBoot,
-  startRuntimeAttestation,
 } from './attestation/runtime-attestation-composition.js';
 import type { VerifiedBootManifest } from './attestation/BootManifestVerifier.js';
 import {
@@ -298,7 +291,7 @@ import {
 import { EnclaveBootStatus } from './boot/EnclaveBootStatus.js';
 import { enclaveOutputSignerFailureCode } from './boot/enclave-output-signer-failure-code.js';
 import { bootModuleLoadGuard } from './boot/boot-module-load-guard.js';
-import { assertDedicatedModeRetired, assertSharedPoolIdentity } from './boot/boot-mode.js';
+import { assertPoolId, assertSharedPoolIdentity } from './boot/boot-mode.js';
 import { InferenceApiKeyLoader } from './boot/InferenceApiKeyLoader.js';
 import { UnsubscribeSecretLoader } from './boot/UnsubscribeSecretLoader.js';
 
@@ -363,7 +356,7 @@ async function loadInferenceKey(): Promise<void> {
 
 // Unlike the inference key, a failed read leaves the unsubscribe route off instead of stopping a pool that serves tenants.
 async function loadUnsubscribeSecret(): Promise<void> {
-  if (!UNSUBSCRIBE_SECRET_SSM_PATH || process.env['UNSUBSCRIBE_SECRET']) return;
+  if (!UNSUBSCRIBE_SECRET_SSM_PATH) return;
   try {
     process.env['UNSUBSCRIBE_SECRET'] = await new UnsubscribeSecretLoader(
       new AwsBootManifestSsmParameters(ssm),
@@ -388,12 +381,10 @@ async function loadAgentToken(): Promise<void> {
   });
 }
 
-// A shared pool (POOL_ID set) learns its assigned tenants from the content-free manifest on the
-// check-in channel (§4.3) and boots with zero tenants; production refuses a boot without POOL_ID,
-// so the env-configured dedicated box only exists in development and test.
+// The enclave is a shared pool: it learns its assigned tenants from the content-free manifest on
+// the check-in channel (§4.3) and boots with zero tenants. A boot without POOL_ID is refused.
 const POOL_ID = process.env['POOL_ID']?.trim() ?? '';
-const isSharedPool = POOL_ID.length > 0;
-assertDedicatedModeRetired({ nodeEnv: process.env['NODE_ENV'], poolId: POOL_ID });
+assertPoolId(POOL_ID);
 
 const ASSIGNMENT_MANIFEST_PUBLIC_KEY = process.env['ASSIGNMENT_MANIFEST_PUBLIC_KEY'] ?? '';
 
@@ -401,11 +392,8 @@ const ASSIGNMENT_MANIFEST_PUBLIC_KEY = process.env['ASSIGNMENT_MANIFEST_PUBLIC_K
 // by tenantId so no keyed op can reach another tenant's material. The applier is the one path that
 // builds/tears down contexts — used for the boot set here and for live (re)assignment below (§4.3).
 const bootAssignments = resolveBootAssignments(process.env);
-// Pool-scoped idle (§5): the wake Lambda tracks the pool, so a shared host reports idle under the
-// pool path; a dedicated box keeps its per-tenant path so N=1 behavior is unchanged.
-const idleSsmPath = isSharedPool
-  ? `/folklore/pool/${POOL_ID}/idle`
-  : `/folklore/${bootAssignments[0]!.tenantId}/idle`;
+// Pool-scoped idle (§5): the wake Lambda tracks the pool, so the host reports idle under the pool path.
+const idleSsmPath = `/folklore/pool/${POOL_ID}/idle`;
 
 // Dev-only: localstack KMS can't do the Nitro Recipient decrypt, so ENCLAVE_DEV_KMS_STUB swaps in
 // AES-GCM mint/unseal with DATA_KEK. devMasterKeySealers fails closed outside development/test.
@@ -441,7 +429,6 @@ const routingTables = new RoutingTableRefresher({
 });
 const claudeRoutes = new InferenceRouteResolver(routingTables);
 if (claudeRoutes.invalidReason !== undefined) bootStatus.recordAlarm(CLAUDE_ROUTE_CONFIG_INVALID);
-const tenantBatchConsent = new TenantBatchConsent();
 const tenantHistoryWindow = new TenantHistoryWindow();
 const claudeComposition = new ClaudeRouteComposition({
   resolver: claudeRoutes,
@@ -453,7 +440,6 @@ const claudeComposition = new ClaudeRouteComposition({
     ),
   manifest: () => verifiedBootManifest,
   onAlarm: (code: string) => bootStatus.recordAlarm(code),
-  batch: { consent: tenantBatchConsent },
 });
 
 const providerRoutes = new ProviderRouteRegistry([claudeComposition]);
@@ -473,7 +459,6 @@ const openaiEmbedComposition = new OpenAIEmbedRouteComposition({
 if (OPENAI_EMBED_ROUTE_STATE.kind === 'invalid') {
   bootStatus.recordAlarm(`${OPENAI_EMBED_ROUTE_INVALID_ALARM}_${OPENAI_EMBED_ROUTE_STATE.reason}`);
 }
-assertEmbeddingSpaceDeployable({ sharedPool: isSharedPool, space: ACTIVE_EMBEDDING_SPACE });
 const embeddingProvider = openaiEmbedComposition.provider();
 
 const typesafeDecisionComposition = new TypeSafeDecisionComposition({
@@ -548,12 +533,10 @@ function activePolicyBackendFor(
 const nsmAttestationTurn = new NsmAttestationTurnstile({
   onQueuedTurnSkipped: () => bootStatus.recordAlarm(NSM_TURN_REFRESH_TIMEOUT_CODE),
 });
-const upstreamGate = isSharedPool
-  ? new HostUpstreamCallGate({
-      attestationCapacity: nsmAttestationTurn,
-      onPassThroughOverCeiling: () => bootStatus.recordAlarm(NSM_PASS_THROUGH_OVER_CEILING_CODE),
-    })
-  : undefined;
+const upstreamGate = new HostUpstreamCallGate({
+  attestationCapacity: nsmAttestationTurn,
+  onPassThroughOverCeiling: () => bootStatus.recordAlarm(NSM_PASS_THROUGH_OVER_CEILING_CODE),
+});
 
 const tenantFactory = new TenantContextFactory({
   s3,
@@ -561,8 +544,6 @@ const tenantFactory = new TenantContextFactory({
   region: REGION,
   sealedBlobBucket: SEALED_BLOB_BUCKET,
   processedOutputsBucket: PROCESSED_OUTPUTS_BUCKET,
-  signedRecoveryPubkey: () => (isSharedPool ? undefined : verifiedBootManifest?.recoveryPubkey),
-  signedStorageKeyArn: () => (isSharedPool ? undefined : verifiedBootManifest?.storageKeyArn),
   signedKmsScope: () =>
     verifiedBootManifest
       ? {
@@ -571,13 +552,10 @@ const tenantFactory = new TenantContextFactory({
         }
       : undefined,
   activePolicySnapshotFor: (tenantId) => activePolicySnapshotFor(tenantId),
-  enforceTenantPolicy: isSharedPool,
-  emitAuthors: isSharedPool,
-  upstreamGate: upstreamGate
-    ? new BackgroundAwareUpstreamGate(upstreamGate, undefined, {
-        onWaitStalled: () => bootStatus.recordAlarm(GATE_WAIT_STALLED_CODE),
-      })
-    : undefined,
+  emitAuthors: true,
+  upstreamGate: new BackgroundAwareUpstreamGate(upstreamGate, undefined, {
+    onWaitStalled: () => bootStatus.recordAlarm(GATE_WAIT_STALLED_CODE),
+  }),
   activePolicyFreshnessFor: (tenantId) => activePolicyFreshnessFor(tenantId),
   activePolicyRuntimeEvidenceFor: (tenantId) => activePolicyRuntimeEvidenceFor(tenantId),
   activePolicyBindingForwarderFor: (tenantId) => activePolicyBindingForwarderFor(tenantId),
@@ -712,7 +690,6 @@ const policySnapshots = new TenantPolicySnapshotRegistry<LiveTenantPolicySnapsho
   generationRegistry,
 );
 const policyWiring = new TenantPolicyWiring<LiveTenantPolicySnapshot>({
-  sharedPool: isSharedPool,
   generations: generationRegistry,
   snapshots: policySnapshots,
   attestation: () => runtimeAttestation,
@@ -853,7 +830,7 @@ runtimeAttestation = await initializeRuntimeAttestationForBoot(
       verifiedDeploymentId: verifiedBootManifest?.deploymentId,
     });
     const bootManifest = verifiedBootManifest;
-    if (isSharedPool && process.env['NODE_ENV'] === 'production') {
+    if (process.env['NODE_ENV'] === 'production') {
       if (!bootManifest?.generationHighWaterRuntimeConfig) {
         throw new Error('generation_high_water_runtime_config_missing');
       }
@@ -863,7 +840,7 @@ runtimeAttestation = await initializeRuntimeAttestationForBoot(
     if (activePolicyCarrier && !activePolicyBootTrust) {
       throw new Error('boot_manifest_active_policy_boot_trust_unavailable');
     }
-    if (isSharedPool && process.env['NODE_ENV'] === 'production' && !activePolicyBootTrust) {
+    if (process.env['NODE_ENV'] === 'production' && !activePolicyBootTrust) {
       throw new Error('shared_pool_active_policy_boot_trust_unavailable');
     }
     if (bootManifest && activePolicyBootTrust) {
@@ -945,7 +922,7 @@ runtimeAttestation = await initializeRuntimeAttestationForBoot(
     setInferenceCommissioning(verifiedBootManifest?.inferenceCommissioning);
     if (signedPolicy) configureInferenceAttestation(signedPolicy);
     else if (!trustPolicy && !providerPolicy) configureLocalInferencePolicy();
-    if (process.env['NODE_ENV'] === 'production' && isSharedPool) {
+    if (process.env['NODE_ENV'] === 'production') {
       assignmentManifestPublicKeyForVerifiedBoot(
         verifiedBootManifest,
         ASSIGNMENT_MANIFEST_PUBLIC_KEY,
@@ -957,28 +934,24 @@ runtimeAttestation = await initializeRuntimeAttestationForBoot(
   logger.child({ component: 'attestation' }),
 );
 bootStatus.reach('attestation_prepared');
-const poolRuntimeAttestation = isSharedPool
-  ? new PoolRuntimeAttestationService(
-      () => ({
-        poolDeploymentId: DEPLOYMENT_ID,
-        assignmentGeneration: verifiedPoolManifest?.generation ?? 0,
-        assignmentDigest: verifiedPoolManifest?.digest ?? '',
-        assignmentManifestVerified: verifiedPoolManifest !== undefined,
-        tenantAssigned: registry.size > 0,
-        tenantApiReady: apiContainer !== undefined,
-        runtimeDatabase: runtimeDatabaseLease.receipt(),
-      }),
-      { attest: getAttestationDoc },
-    )
-  : undefined;
-const poolRuntimeAttestationListener = poolRuntimeAttestation
-  ? new NodeRuntimeAttestationListener(
-      Number(process.env['ENCLAVE_ATTESTATION_PORT'] ?? '') || DEFAULT_ENCLAVE_ATTESTATION_PORT,
-    )
-  : undefined;
-const poolRuntimeAttestationServer = poolRuntimeAttestation
-  ? new RuntimeAttestationServer({ collect: (nonce) => poolRuntimeAttestation.collect(nonce) })
-  : undefined;
+const poolRuntimeAttestation = new PoolRuntimeAttestationService(
+  () => ({
+    poolDeploymentId: DEPLOYMENT_ID,
+    assignmentGeneration: verifiedPoolManifest?.generation ?? 0,
+    assignmentDigest: verifiedPoolManifest?.digest ?? '',
+    assignmentManifestVerified: verifiedPoolManifest !== undefined,
+    tenantAssigned: registry.size > 0,
+    tenantApiReady: apiContainer !== undefined,
+    runtimeDatabase: runtimeDatabaseLease.receipt(),
+  }),
+  { attest: getAttestationDoc },
+);
+const poolRuntimeAttestationListener = new NodeRuntimeAttestationListener(
+  Number(process.env['ENCLAVE_ATTESTATION_PORT'] ?? '') || DEFAULT_ENCLAVE_ATTESTATION_PORT,
+);
+const poolRuntimeAttestationServer = new RuntimeAttestationServer({
+  collect: (nonce) => poolRuntimeAttestation.collect(nonce),
+});
 console.log('tenant contexts assigned', { count: registry.size });
 
 bootStatus.begin('inference_key_read');
@@ -1122,12 +1095,7 @@ const storageCanaryProof = new StorageCanaryProof({
 });
 // Pool-wide emergency halt (unchanged single-tenant semantics); per-tenant gates are built on demand
 // (§6.3) since the assigned set changes live, so halting tenant A never stops tenant B's queue.
-const poolHalt = new HaltGate(
-  haltCache,
-  DEPLOYMENT_ID,
-  logger,
-  isSharedPool ? [poolHaltKey(POOL_ID)] : [],
-);
+const poolHalt = new HaltGate(haltCache, DEPLOYMENT_ID, logger, [poolHaltKey(POOL_ID)]);
 const evictTenantSubsystems = async (tenantId: string): Promise<void> => {
   const results = await Promise.allSettled(
     [
@@ -1158,7 +1126,7 @@ const tenantRequestQuiescence = new TenantRequestQuiescenceMonitor({
 const isTenantHaltedNow = (tenantId: string) =>
   new HaltGate(haltCache, DEPLOYMENT_ID, logger, [
     tenantHaltKey(tenantId),
-    ...(isSharedPool ? [poolHaltKey(POOL_ID)] : []),
+    poolHaltKey(POOL_ID),
   ]).isHalted();
 const beginTenantRequest = async (tenantId: string) => {
   if (await isTenantHaltedNow(tenantId)) return undefined;
@@ -1167,9 +1135,8 @@ const beginTenantRequest = async (tenantId: string) => {
 
 // §4.3: the agent publishes this pool's content-free manifest to Redis on check-in; the enclave
 // re-reads it and rebuilds the registry (add/remove tenants, §2.2 pt 5). Idempotent, so a periodic
-// re-read reconverges to the latest assignment. Dedicated boxes have no POOL_ID and no manifest.
+// re-read reconverges to the latest assignment.
 async function refreshAssignments(isCurrent: IsCurrentRefresh): Promise<void> {
-  if (!isSharedPool) return;
   let refusalTarget: NormalizedAssignmentManifestV1 | undefined;
   try {
     const manifest = await haltCache.get(poolAssignmentsKey(POOL_ID));
@@ -1249,9 +1216,6 @@ async function refreshAssignments(isCurrent: IsCurrentRefresh): Promise<void> {
       if (stopIfSuperseded(isCurrent)) return;
       apiContainer = runtimeDatabaseLease.api();
     }
-    if (!runtimeAttestation && !poolRuntimeAttestation) {
-      throw new Error('runtime_attestation_not_ready');
-    }
     const activeEntries = policyState?.entries;
     const activeContexts = activeEntries
       ? [...activeEntries.values()].map((entry) => entry.context)
@@ -1318,13 +1282,7 @@ async function refreshAssignments(isCurrent: IsCurrentRefresh): Promise<void> {
     verifiedPoolManifest = verified;
     let signed: { publicKey: Uint8Array; signature: Uint8Array };
     try {
-      if (isSharedPool) {
-        if (!poolRuntimeAttestation) throw new Error('runtime_attestation_not_ready');
-        signed = await poolRuntimeAttestation.signCurrent(acknowledgmentPayload);
-      } else {
-        if (!runtimeAttestation) throw new Error('runtime_attestation_not_ready');
-        signed = runtimeAttestation.signAssignmentAck(acknowledgmentPayload);
-      }
+      signed = await poolRuntimeAttestation.signCurrent(acknowledgmentPayload);
     } catch (error: unknown) {
       if (error instanceof Error && error.message === 'runtime_attestation_not_ready') {
         if (!stopIfSuperseded(isCurrent)) await assignmentRefusals.record(parsed, error);
@@ -1372,14 +1330,12 @@ function stopIfSuperseded(isCurrent: IsCurrentRefresh): boolean {
   return true;
 }
 
-const residentMemorySampler = isSharedPool
-  ? new PoolResidentMemorySampler(haltCache, DEPLOYMENT_ID, {
-      meminfo: () => readFileSync('/proc/meminfo', 'utf8'),
-      rssBytes: () => process.memoryUsage().rss,
-      tenantCount: () => registry.size,
-      now: Date.now,
-    })
-  : undefined;
+const residentMemorySampler = new PoolResidentMemorySampler(haltCache, DEPLOYMENT_ID, {
+  meminfo: () => readFileSync('/proc/meminfo', 'utf8'),
+  rssBytes: () => process.memoryUsage().rss,
+  tenantCount: () => registry.size,
+  now: Date.now,
+});
 
 const ASSIGNMENT_REFRESH_STALL_MS = 300_000;
 const assignmentRefreshFlight = new AssignmentRefreshFlight(
@@ -1405,10 +1361,13 @@ const assignmentRefreshTimer = setInterval(
 );
 const eventLoopDelayMonitor = new EventLoopDelayMonitor(logger);
 eventLoopDelayMonitor.start();
-const assignmentWakeSubscriber = isSharedPool
-  ? new AssignmentWakeSubscriber(haltCache.redis, POOL_ID, assignmentRefreshFlight, logger)
-  : undefined;
-assignmentWakeSubscriber?.start();
+const assignmentWakeSubscriber = new AssignmentWakeSubscriber(
+  haltCache.redis,
+  POOL_ID,
+  assignmentRefreshFlight,
+  logger,
+);
+assignmentWakeSubscriber.start();
 
 // the enclave has no PostHog egress, so ops telemetry (attestation failures, receipt
 // verifications, model-gate rejections) is buffered onto the shared Redis list the box agent
@@ -1420,9 +1379,7 @@ const mcpCalls = buildMcpCallTelemetry({ telemetry: opsTelemetry, logger });
 setVerifiedInferenceReceiptSink(async (sessionId) => {
   const context = currentInferenceReceiptContext();
   if (!context) return;
-  const sessionPublicKey = poolRuntimeAttestation
-    ? await poolRuntimeAttestation.currentSessionPublicKey()
-    : runtimeAttestation?.sessionPublicKey();
+  const sessionPublicKey = await poolRuntimeAttestation.currentSessionPublicKey();
   if (!sessionPublicKey) return;
   const unsigned = {
     name: 'inference.receipt_verified' as const,
@@ -1433,10 +1390,7 @@ setVerifiedInferenceReceiptSink(async (sessionId) => {
     attestation_session_key_sha256: sha256Hex(Buffer.from(sessionPublicKey)),
   };
   const payload = Buffer.from(inferenceReceiptProofPayload(unsigned), 'utf8');
-  const signed = poolRuntimeAttestation
-    ? await poolRuntimeAttestation.signCurrent(payload)
-    : runtimeAttestation?.signAssignmentAck(payload);
-  if (!signed) return;
+  const signed = await poolRuntimeAttestation.signCurrent(payload);
   const proof: InferenceReceiptProof = {
     ...unsigned,
     signature: Buffer.from(signed.signature).toString('base64'),
@@ -1547,7 +1501,7 @@ try {
           ...(embeddingProvider === undefined ? {} : { embeddingProvider }),
         }),
         recordTokenUsage,
-        upstreamGate?.passThrough(),
+        upstreamGate.passThrough(),
         profile,
       ),
     });
@@ -1574,7 +1528,7 @@ try {
     // assigned set (else 403) — this gate runs before any handler touches a keyring (§4.2 step 2).
     isAssignedOrg: (orgId: string) => registry.has(orgId),
     // A pool's ORG_ID names the pool, not a tenant, so it must never be written as an organization.
-    skipOrgBootstrap: isSharedPool,
+    skipOrgBootstrap: true,
     // The API reports activity only from behind its own auth gate: /api/* takes unauthenticated
     // traffic from anywhere, and a scanner hitting it must not be able to hold this host awake.
     onAuthenticatedRequest: () => activityMonitor.touch(),
@@ -1741,21 +1695,9 @@ bootStatus.begin('attestation_listener_start');
 // unauthenticated upgrade hold the host (or a whole shared pool) awake indefinitely.
 activityMonitor.addPin(() => apiContainer?.hasActiveCollabSession() ?? false);
 
-if (!isSharedPool) {
-  runtimeAttestation = await enableRuntimeAttestation(
-    runtimeAttestation,
-    logger.child({ component: 'attestation' }),
-  );
-  runtimeAttestation = await startRuntimeAttestation(
-    runtimeAttestation,
-    logger.child({ component: 'attestation' }),
-  );
-}
-if (poolRuntimeAttestationServer && poolRuntimeAttestationListener) {
-  await poolRuntimeAttestationServer.start(poolRuntimeAttestationListener);
-  logger.info('pool runtime attestation listener started');
-  bootStatus.reach('attestation_listening');
-}
+await poolRuntimeAttestationServer.start(poolRuntimeAttestationListener);
+logger.info('pool runtime attestation listener started');
+bootStatus.reach('attestation_listening');
 
 const projectionTenants = (): ProjectionTenant[] =>
   registry.all().flatMap((context) => {
@@ -1765,14 +1707,12 @@ const projectionTenants = (): ProjectionTenant[] =>
 // The shared-pool tenant DB has no other writer of each tenant's entitlement row.
 const entitlementProjectionApplier = new EntitlementProjectionApplier({
   database: () => runtimeDatabaseLease.database(),
-  batchConsent: tenantBatchConsent,
   historyWindow: tenantHistoryWindow,
-  onBatchNotAllowed: (orgId) => synthesisConsumer?.cancelBatches(orgId) ?? Promise.resolve(0),
   opsTelemetry,
   logger: logger.child({ component: 'entitlement_projection' }),
 });
 const entitlementProjectionRunner =
-  isSharedPool && controlPlaneIdentity && controlPlaneFetch && DEPLOYMENT_ID
+  controlPlaneIdentity && controlPlaneFetch && DEPLOYMENT_ID
     ? new TenantEntitlementProjectionRunner({
         tenants: projectionTenants,
         beginTenant: beginTenantRequest,
@@ -1809,7 +1749,7 @@ const memberIdentityLinkRelay = new MemberIdentityLinkRelay({
   logger: logger.child({ component: 'member_identity_link' }),
 });
 const memberIdentityLinkRunner =
-  isSharedPool && controlPlaneIdentity && controlPlaneFetch && DEPLOYMENT_ID && PROCESSED_QUEUE_URL
+  controlPlaneIdentity && controlPlaneFetch && DEPLOYMENT_ID && PROCESSED_QUEUE_URL
     ? new TenantPeriodicRunner<ProjectionTenant, MemberLinkRelayOutcome>({
         tenants: projectionTenants,
         beginTenant: beginTenantRequest,
@@ -1840,9 +1780,8 @@ memberIdentityLinkRunner?.start();
 const agentAccessProjectionDeps = {
   tenants: projectionTenants,
   beginTenant: beginTenantRequest,
-  // UNWIRED: dedicated runtimes have no agent-access projection writer, so /mcp answers mcp_access_off there.
   controlPlane:
-    isSharedPool && controlPlaneIdentity && controlPlaneFetch
+    controlPlaneIdentity && controlPlaneFetch
       ? { origin: controlPlaneIdentity.origin, fetch: controlPlaneFetch }
       : undefined,
   deploymentId: DEPLOYMENT_ID,
@@ -1863,19 +1802,6 @@ const agentAccessProjectionRunner = buildAgentAccessProjectionRunner(agentAccess
 agentAccessProjectionRunner?.start(AGENT_ACCESS_PROJECTION_TICK_MS);
 bootStatus.begin('workers_start');
 
-function batchSynthesisDeps(): { batch?: NonNullable<SynthesisConsumerDeps['batch']> } {
-  const route = claudeComposition.batchRoute();
-  if (route === undefined) return {};
-  return {
-    batch: {
-      api: route.api,
-      ready: () => route.ready(),
-      consent: tenantBatchConsent,
-      allowedModels: claudeRoutes.allowedModels(),
-    },
-  };
-}
-
 // One consumer serves every assigned tenant: it resolves each request's keyring/crypto from the
 // message's own orgId (§4.2/§2.2), so wiki + theme synthesis run for the whole pool, not just N=1.
 if (SYNTHESIS_REQUEST_QUEUE_URL) {
@@ -1893,13 +1819,12 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
     activePolicyBindingForwarderFor,
     activePolicyBackendFor,
     claudeRoutes,
-    ...batchSynthesisDeps(),
     ...(embeddingProvider === undefined ? {} : { embeddingProvider }),
     ...(decisionModel === undefined ? {} : { decisionModel }),
     decisionModes: jevSiteMode,
     providerRoutes,
-    upstreamPaused: (upstream) => (upstreamGate?.pauseRemainingMs(upstream) ?? 0) > 0,
-    enforceTenantPolicy: isSharedPool,
+    upstreamPaused: (upstream) => upstreamGate.pauseRemainingMs(upstream) > 0,
+    enforceTenantPolicy: true,
     upstreamGate,
     synthesisQueueUrl: SYNTHESIS_REQUEST_QUEUE_URL,
     processedQueueUrl: PROCESSED_QUEUE_URL,
@@ -1953,7 +1878,7 @@ const canaryAuthorizationConsumer =
 const router = new TenantMessageRouter({
   registry,
   ssm,
-  cursorStore: isSharedPool ? 'sealed' : 'legacy_ssm',
+  cursorStore: 'sealed',
   historyWindow: tenantHistoryWindow,
   s3,
   processedBucket: PROCESSED_OUTPUTS_BUCKET,
@@ -1971,17 +1896,10 @@ const router = new TenantMessageRouter({
   recordJiraWebhookDelivery,
   mintGitHubInstallationToken,
   exportedPageRefs: exportedPageRefReader,
-  canaryProofSigner: poolRuntimeAttestation
-    ? {
-        sign: (payload) => poolRuntimeAttestation.signCurrent(payload),
-        sessionPublicKey: () => poolRuntimeAttestation.currentSessionPublicKey(),
-      }
-    : runtimeAttestation
-      ? {
-          sign: (payload) => runtimeAttestation!.signAssignmentAck(payload),
-          sessionPublicKey: () => runtimeAttestation!.sessionPublicKey(),
-        }
-      : undefined,
+  canaryProofSigner: {
+    sign: (payload) => poolRuntimeAttestation.signCurrent(payload),
+    sessionPublicKey: () => poolRuntimeAttestation.currentSessionPublicKey(),
+  },
   canaryProofSink,
   canaryAuthorizationConsumer,
 });
@@ -2021,7 +1939,6 @@ drainerRef.current = new QueueSetDrainer({
   isBusy: () => activityMonitor.isBusy(),
   headroom: () => drainHeadroomGauge.read(),
   onDrainComplete: async () => {
-    if (!isSharedPool) return;
     await haltCache.set(`pool:usage:${DEPLOYMENT_ID}`, collectPoolUsage(), 300);
   },
   onMessageFailure: (code) => bootStatus.recordMessageFailure(code),

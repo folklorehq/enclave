@@ -7,7 +7,6 @@ import { ClaudeRouteError } from './claude-route-errors.js';
 import { claudeIdentityMismatch } from './ClaudeCredentialSource.js';
 import { mapClaudeError, type ClaudeErrorContext } from './claude-error-map.js';
 import {
-  BATCH_CACHE_TTL,
   buildClaudeRequest,
   claudeThinkingEnabled,
   inputCharsOf,
@@ -15,8 +14,6 @@ import {
   type ClaudeRequestInput,
 } from './claude-request.js';
 import type { AnthropicRoute } from './anthropic-route.js';
-import type { BatchSendRoute, BatchingClaudeSender } from './BatchingClaudeSender.js';
-import { batchRunScope } from './BatchRunScope.js';
 import { CHARS_PER_TOKEN_FLOOR, promptTokenFloor } from '../token-floor.js';
 
 export type CreatedMessage = Anthropic.Message;
@@ -41,12 +38,6 @@ interface StreamTally extends UsageCounts {
   metered: boolean;
 }
 
-const ZERO_COUNTS: UsageCounts = {
-  inputTokens: 0,
-  outputTokens: 0,
-  cacheReadTokens: 0,
-  cacheWriteTokens: 0,
-};
 const SDK_LOG_LEVEL = 'off';
 const NO_RETRIES = 0;
 const END_TURNS: ReadonlySet<string> = new Set(['end_turn', 'stop_sequence']);
@@ -64,8 +55,6 @@ export interface ClaudeMessagesBackendDeps {
   readonly errorContext: ClaudeErrorContext;
   readonly onIdentityMismatch: () => void;
   readonly cachedSystemPrefix?: CachedSystemPrefix;
-  readonly batching?: BatchSendRoute;
-  readonly orgId?: string;
 }
 
 /** One Messages call per operation, with the response bound to the compiled identity before it is used. */
@@ -104,7 +93,6 @@ export class ClaudeMessagesBackend {
   ): AsyncGenerator<string> {
     const tally = this.freshTally();
     try {
-      batchRunScope.assertMaySpend();
       const request = buildClaudeRequest({
         route: this.deps.route,
         prompt,
@@ -146,8 +134,7 @@ export class ClaudeMessagesBackend {
   ): Promise<string> {
     try {
       const full = { ...input, cachedSystemPrefix: this.deps.cachedSystemPrefix };
-      const message =
-        (await this.replayed(full, operation)) ?? (await this.sent(full, operation, signal));
+      const message = await this.sent(full, operation, signal);
       return this.completedText(message);
     } catch (error) {
       // A caller's abort is not an upstream failure, so it is never mapped, alarmed or recorded as an outage.
@@ -160,30 +147,11 @@ export class ClaudeMessagesBackend {
     return isAbortOf(error, signal) || (signal.aborted && error instanceof APIUserAbortError);
   }
 
-  private senderOf(): BatchingClaudeSender | undefined {
-    const { batching, orgId, route } = this.deps;
-    if (batching === undefined || orgId === undefined) return undefined;
-    return batching.senderFor(orgId, route.untagged ? 'untagged' : route.purpose, route.arm);
-  }
-
-  // The lookup is keyed by the one-hour bytes a batch would carry; only a hit uses them.
-  private async replayed(
-    input: ClaudeRequestInput,
-    operation: 'generate' | 'structured',
-  ): Promise<CreatedMessage | undefined> {
-    const sender = this.senderOf();
-    if (sender === undefined) return undefined;
-    const message = await sender.send(buildClaudeRequest({ ...input, cacheTtl: BATCH_CACHE_TTL }));
-    if (message !== undefined) this.reportUsage(ZERO_COUNTS, operation, true);
-    return message;
-  }
-
   private async sent(
     input: ClaudeRequestInput,
     operation: 'generate' | 'structured',
     signal?: AbortSignal,
   ): Promise<CreatedMessage> {
-    batchRunScope.assertMaySpend();
     const request = buildClaudeRequest(input);
     let message: CreatedMessage;
     try {
@@ -327,18 +295,14 @@ export class ClaudeMessagesBackend {
     );
   }
 
-  private reportUsage(
-    counts: UsageCounts,
-    operation: 'generate' | 'structured',
-    cached = false,
-  ): void {
+  private reportUsage(counts: UsageCounts, operation: 'generate' | 'structured'): void {
     const route = this.deps.route;
     this.deps.usageSink({
       model: route.model,
       operation,
       promptTokens: tokenCount(counts.inputTokens),
       completionTokens: tokenCount(counts.outputTokens),
-      cached,
+      cached: false,
       purpose: route.untagged ? 'untagged' : route.purpose,
       outcome: route.arm === 'D' ? 'ok' : 'shadow',
       cacheReadTokens: tokenCount(counts.cacheReadTokens),

@@ -1,16 +1,12 @@
-export const DEDICATED_MODE_RETIRED = 'dedicated_mode_retired';
+export const POOL_ID_REQUIRED = 'pool_id_required';
 export const SHARED_POOL_BOOT_MANIFEST_UNVERIFIED = 'shared_pool_boot_manifest_unverified';
 export const SHARED_POOL_IDENTITY_MISMATCH = 'shared_pool_identity_mismatch';
 
 const PRODUCTION = 'production';
 
-export function assertDedicatedModeRetired(input: {
-  readonly nodeEnv: string | undefined;
-  readonly poolId: string;
-}): void {
-  if (input.nodeEnv === PRODUCTION && input.poolId.length === 0) {
-    throw new Error(DEDICATED_MODE_RETIRED);
-  }
+/** The enclave is a shared pool in every mode; a boot without a pool id is refused. */
+export function assertPoolId(poolId: string): void {
+  if (poolId.length === 0) throw new Error(POOL_ID_REQUIRED);
 }
 
 export function assertSharedPoolIdentity(input: {
@@ -19,7 +15,7 @@ export function assertSharedPoolIdentity(input: {
   readonly verifiedOrgId: string | undefined;
   readonly verifiedDeploymentId: string | undefined;
 }): void {
-  if (input.nodeEnv !== PRODUCTION || input.poolId.length === 0) return;
+  if (input.nodeEnv !== PRODUCTION) return;
   if (input.verifiedOrgId === undefined && input.verifiedDeploymentId === undefined) {
     throw new Error(SHARED_POOL_BOOT_MANIFEST_UNVERIFIED);
   }

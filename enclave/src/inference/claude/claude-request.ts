@@ -16,14 +16,13 @@ import type { AnthropicRoute } from './anthropic-route.js';
 const CLAUDE_INFERENCE_GEO = 'us';
 const HAIKU_MODEL = 'claude-haiku-5-5';
 const SONNET_MODEL = 'claude-sonnet-5-5';
-export const BATCH_CACHE_TTL = '1h';
 
 export const CLAUDE_REQUEST_TOO_LARGE = 'claude_request_too_large_for_model';
 
 interface TextBlock {
   readonly type: 'text';
   readonly text: string;
-  readonly cache_control?: { readonly type: 'ephemeral'; readonly ttl?: typeof BATCH_CACHE_TTL };
+  readonly cache_control?: { readonly type: 'ephemeral' };
 }
 
 export interface ClaudeRequestBody {
@@ -45,7 +44,6 @@ export interface ClaudeRequestInput {
   readonly systemPrompt?: string;
   readonly structured?: ToolSpec;
   readonly cachedSystemPrefix?: CachedSystemPrefix;
-  readonly cacheTtl?: typeof BATCH_CACHE_TTL;
 }
 
 export function buildClaudeRequest(input: ClaudeRequestInput): ClaudeRequestBody {
@@ -108,12 +106,8 @@ function markedPrefix(input: ClaudeRequestInput): TextBlock[] | undefined {
   return [
     text(prefix.salt),
     text(prefix.rules),
-    { ...text(prefix.facts), cache_control: cacheControlFor(input.cacheTtl) },
+    { ...text(prefix.facts), cache_control: { type: 'ephemeral' } },
   ];
-}
-
-function cacheControlFor(ttl: typeof BATCH_CACHE_TTL | undefined): TextBlock['cache_control'] {
-  return ttl === undefined ? { type: 'ephemeral' } : { type: 'ephemeral', ttl };
 }
 
 function text(value: string): TextBlock {

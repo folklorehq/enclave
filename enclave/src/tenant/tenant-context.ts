@@ -11,7 +11,6 @@ import { deriveIngestKeypair, deriveKey, deriveLlmCacheNameKey } from '../sealin
 
 const PERSONAL_IDENTIFIER_KEY_PURPOSE = 'personal-source-identifier-v1';
 const ENTITY_KEY_PURPOSE = 'entity-v1';
-const BATCH_NAME_KEY_PURPOSE = 'batch-name-v1';
 const TITLE_DIGEST_KEY_PURPOSE = 'title-digest-v1';
 const TITLE_MAC_KEY_PURPOSE = 'sealed-title-mac-v1';
 
@@ -109,11 +108,6 @@ export class TenantContext implements LlmCacheNamer {
   personalIdentifierKey(): Buffer | null {
     if (!this.cryptoOrNull) return null;
     return deriveKey(this.masterKey, PERSONAL_IDENTIFIER_KEY_PURPOSE);
-  }
-
-  batchNameKey(): Buffer | null {
-    if (!this.cryptoOrNull) return null;
-    return deriveKey(this.masterKey, BATCH_NAME_KEY_PURPOSE);
   }
 
   entityKey(): Buffer | null {

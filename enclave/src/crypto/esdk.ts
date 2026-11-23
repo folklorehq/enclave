@@ -26,7 +26,6 @@ const ASK_TURN_PURPOSE = 'ask-turn';
 const SEALED_TITLE_PURPOSE = 'sealed-title';
 const AGENT_RUN_AUDIT_PURPOSE = 'agent-run-audit';
 const LLM_CACHE_PURPOSE = 'llm-cache';
-const BATCH_MANIFEST_PURPOSE = 'batch-manifest';
 const OAUTH_CREDENTIAL_PURPOSE = 'oauth-credential';
 const PULL_CURSOR_PURPOSE = 'pull-cursor';
 const CODEBASE_SELECTION_PURPOSE = 'codebase-selection';
@@ -97,19 +96,6 @@ export interface WikiFeedbackRef {
 export interface LlmCacheRef {
   orgId: string;
   objectName: string;
-}
-
-// A batch manifest is sealed to (org, request, version); the version rides in the header so a rolled-back object is detectable.
-export interface BatchManifestRef {
-  orgId: string;
-  wikiRequestId: string;
-  version: number;
-}
-
-export interface OpenedBatchManifest {
-  plaintext: Buffer;
-  version: number;
-  wikiRequestId: string;
 }
 
 // The `code` connector's per-repo pull cursor carries raw file paths (content-derived), so it is
@@ -541,38 +527,6 @@ export class EnclaveCrypto {
       orgId: expected.orgId,
       cacheKey: expected.objectName,
     });
-  }
-
-  encryptBatchManifest(plaintext: Buffer, ref: BatchManifestRef): Promise<Buffer> {
-    return this.seal(plaintext, {
-      orgId: ref.orgId,
-      wikiRequestId: ref.wikiRequestId,
-      manifestVersion: String(ref.version),
-      purpose: BATCH_MANIFEST_PURPOSE,
-    });
-  }
-
-  async decryptBatchManifest(
-    ciphertext: Buffer,
-    expected: { orgId: string; wikiRequestId?: string },
-  ): Promise<OpenedBatchManifest> {
-    const { plaintext, messageHeader } = await esdkDecrypt(this.keyring, ciphertext);
-    const ctx = messageHeader.encryptionContext;
-    const version = Number(ctx['manifestVersion']);
-    const mismatch =
-      this.hasSealedEnvelopeMarker(ctx) ||
-      ctx['purpose'] !== BATCH_MANIFEST_PURPOSE ||
-      ctx['orgId'] !== expected.orgId ||
-      typeof ctx['wikiRequestId'] !== 'string' ||
-      (expected.wikiRequestId !== undefined && ctx['wikiRequestId'] !== expected.wikiRequestId) ||
-      !Number.isSafeInteger(version) ||
-      version < 1;
-    if (mismatch) throw new EncryptionContextMismatchError(BATCH_MANIFEST_PURPOSE);
-    return {
-      plaintext: Buffer.from(plaintext),
-      version,
-      wikiRequestId: ctx['wikiRequestId'] ?? '',
-    };
   }
 
   encryptPullCursor(plaintext: Buffer, ref: PullCursorRef): Promise<Buffer> {

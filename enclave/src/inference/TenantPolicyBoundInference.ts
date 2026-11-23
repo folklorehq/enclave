@@ -59,8 +59,6 @@ import {
   type StreamingInference,
 } from './generate-stream.js';
 import { llmCacheKey } from './llm-cache.js';
-import { BatchPendingError } from './claude/batch-errors.js';
-import { batchRunScope } from './claude/BatchRunScope.js';
 import { TrustedTimeAuthorityError } from './TrustedTimeAuthority.js';
 import { DEFAULT_REFRESH_TIMEOUT_MS } from './attestation-turn-base.js';
 import { attestationTurnScope } from './AttestationTurnScope.js';
@@ -223,7 +221,6 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
   }
 
   async embed(text: string, signal?: AbortSignal): Promise<number[]> {
-    batchRunScope.assertMaySpend();
     signal?.throwIfAborted();
     const embed = () => this.underRole('embed', () => this.embedUnderPolicy(text, signal));
     return signal === undefined ? embed() : this.underSignal(signal, embed);
@@ -775,8 +772,6 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
     for (;;) {
       const route = chain[index] ?? ACI_ROUTE;
       const next = chain[index + 1];
-      // A run that only collects may replay sealed results, which only the provider route holds.
-      if (route.kind === 'aci') batchRunScope.assertMaySpend();
       const tracked = inferenceOutageScope.attempt(() => attempt(route));
       try {
         const result = await tracked.result;
@@ -785,7 +780,6 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
       } catch (error) {
         if (
           next === undefined ||
-          error instanceof BatchPendingError ||
           !(error instanceof ProviderRouteError && error.fallbackEligible)
         ) {
           throw error;

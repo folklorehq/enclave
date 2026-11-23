@@ -10,7 +10,6 @@ import {
   parseAssignmentManifest as parseContractManifest,
   parseAssignmentManifestWire as parseContractAssignmentManifestWire,
   parseVersionedAssignmentManifest as parseContractVersionedManifest,
-  tenantAssignmentSchema,
   tenantBucketNames,
   tenantResourceName,
   tenantWebhookQueueName,
@@ -20,8 +19,8 @@ import { isLowercaseRfcUuid } from '@folklore/utils';
 import { bareKmsKeyId } from '../sealing/kms-key-arn.js';
 
 // The assignment shape is defined ONCE in @folklore/contracts (design §4.3) so the control-plane
-// producer and this consumer cannot drift. Env parsing is the bootstrap/dedicated fallback (§6.1);
-// `parseAssignmentManifest` is the runtime path for a manifest delivered on the check-in channel.
+// producer and this consumer cannot drift. `parseAssignmentManifest` is the runtime path for a
+// manifest delivered on the check-in channel.
 export type { TenantAssignment, AssignmentManifest };
 
 /** Explicit bootstrap compatibility boundary for unsigned legacy assignment sources. */
@@ -37,30 +36,6 @@ export function toInitialStorageKeyVersion(
   });
 }
 
-// Storage key is REQUIRED so a manifest/env without one fails closed — the ESDK content keyring
-// must never fall back to the master key (its Decrypt is attestation-gated).
-const REQUIRED_FIELDS = [
-  'tenantId',
-  'kmsKeyId',
-  'storageKeyId',
-  'queueUrl',
-  'sealedBlobBucket',
-  'rawPayloadsBucket',
-  'processedBucket',
-] as const;
-
-/** Resolves the enclave's assigned tenants from env: TENANT_ASSIGNMENTS (a JSON array, shared pool) or the TENANT_ID single-tenant fallback (a dedicated box, the default tier §6.1). */
-export function parseTenantAssignments(env: NodeJS.ProcessEnv): TenantAssignment[] {
-  const manifest = env['TENANT_ASSIGNMENTS']?.trim();
-  const assignments = manifest ? parseManifest(manifest) : parseSingleTenant(env);
-
-  if (assignments.length === 0) {
-    throw new Error('no tenant assignments configured (set TENANT_ASSIGNMENTS or TENANT_ID)');
-  }
-  assertNoDuplicates(assignments);
-  return assignments;
-}
-
 const SQS_URL_PATTERN = /^https:\/\/sqs\.([^.]+)\.amazonaws\.com\/(\d{12})\/([^/]+)$/;
 
 export const ASSIGNMENT_MANIFEST_RESOURCE_SHARED = 'assignment_manifest_resource_shared';
@@ -69,10 +44,8 @@ export const ASSIGNMENT_MANIFEST_RESOURCE_NAME_MISMATCH =
 
 export const SHARED_POOL_ENV_ASSIGNMENTS_REFUSED = 'shared_pool_env_assignments_refused';
 
-/** A pool boots with zero tenants and refuses env assignments; only a dedicated box reads them. */
+/** A pool boots with zero tenants and refuses env assignments: its tenants come from the signed manifest only. */
 export function resolveBootAssignments(env: NodeJS.ProcessEnv): TenantAssignment[] {
-  const isPool = (env['POOL_ID']?.trim() ?? '') !== '';
-  if (!isPool) return parseTenantAssignments(env);
   const hasEnvSet =
     (env['TENANT_ASSIGNMENTS']?.trim() ?? '') !== '' || (env['TENANT_ID']?.trim() ?? '') !== '';
   if (hasEnvSet) throw new Error(SHARED_POOL_ENV_ASSIGNMENTS_REFUSED);
@@ -115,68 +88,6 @@ export function parseAssignmentManifestWire(
   });
   assertNoDuplicates(parsed.assignments);
   return parsed;
-}
-
-function parseManifest(manifest: string): TenantAssignment[] {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(manifest);
-  } catch {
-    throw new Error('TENANT_ASSIGNMENTS is not valid JSON');
-  }
-  if (!Array.isArray(parsed)) throw new Error('TENANT_ASSIGNMENTS must be a JSON array');
-  return parsed.map((entry, index) => toAssignment(entry, index));
-}
-
-function parseSingleTenant(env: NodeJS.ProcessEnv): TenantAssignment[] {
-  const tenantId = env['TENANT_ID']?.trim();
-  if (!tenantId) return [];
-  return [
-    toAssignment(
-      {
-        tenantId,
-        tenantDeploymentId: env['DEPLOYMENT_ID'],
-        kmsKeyId: env['KMS_KEY_ID'],
-        storageKeyId: env['STORAGE_KEY_ARN'],
-        queueUrl: env['QUEUE_URL'],
-        sealedBlobBucket: env['SEALED_BLOB_BUCKET'],
-        rawPayloadsBucket: env['RAW_PAYLOADS_BUCKET'],
-        processedBucket: env['PROCESSED_OUTPUTS_BUCKET'],
-        recoveryPubkey: env['RECOVERY_PUBKEY'] ?? '',
-      },
-      0,
-    ),
-  ];
-}
-
-// Friendly per-field messages first (a misconfigured env should name the missing field), then the
-// shared zod schema is the authoritative shape guard — the returned value is a contract-valid
-// TenantAssignment, never a locally-shaped near-miss.
-function toAssignment(entry: unknown, index: number): TenantAssignment {
-  if (typeof entry !== 'object' || entry === null) {
-    throw new Error(`tenant assignment [${index}] is not an object`);
-  }
-  const record = entry as Record<string, unknown>;
-  for (const field of REQUIRED_FIELDS) {
-    const value = record[field];
-    if (typeof value !== 'string' || value.trim() === '') {
-      throw new Error(`tenant assignment [${index}] is missing ${field}`);
-    }
-  }
-  return tenantAssignmentSchema.parse({
-    tenantId: (record['tenantId'] as string).trim(),
-    ...(typeof record['tenantDeploymentId'] === 'string' &&
-    record['tenantDeploymentId'].trim() !== ''
-      ? { tenantDeploymentId: record['tenantDeploymentId'].trim() }
-      : {}),
-    kmsKeyId: (record['kmsKeyId'] as string).trim(),
-    storageKeyId: (record['storageKeyId'] as string).trim(),
-    queueUrl: (record['queueUrl'] as string).trim(),
-    sealedBlobBucket: (record['sealedBlobBucket'] as string).trim(),
-    rawPayloadsBucket: (record['rawPayloadsBucket'] as string).trim(),
-    processedBucket: (record['processedBucket'] as string).trim(),
-    recoveryPubkey: typeof record['recoveryPubkey'] === 'string' ? record['recoveryPubkey'] : '',
-  });
 }
 
 function assertNoDuplicates(assignments: readonly { tenantId: string }[]): void {

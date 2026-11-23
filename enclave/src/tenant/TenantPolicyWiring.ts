@@ -3,7 +3,7 @@ import type { InferenceUsageSink, VerifiedActivePolicySnapshotV1 } from '@folklo
 import type { VerifiedBootManifest } from '../attestation/BootManifestVerifier.js';
 import type { RuntimeEvidenceSessionPort } from '../attestation/ports.js';
 import type { BootBoundGenerationContext } from '../inference/BootStateActivePolicyReferenceVerifier.js';
-import { ANSWER_CACHE_VERSION, type InferenceModel } from '../inference/CachedInference.js';
+import type { InferenceModel } from '../inference/CachedInference.js';
 import type { StreamingInference } from '../inference/generate-stream.js';
 import type { InferenceLatencyProfile } from '../inference/public-aci-operation-limits.js';
 import { expectedTenantGenerationContext } from '../inference/expected-tenant-generation-context.js';
@@ -11,7 +11,6 @@ import { SharedPoolRuntimeEvidence } from '../inference/SharedPoolRuntimeEvidenc
 import type { UpstreamCallGate } from '../inference/TenantPolicyBoundInference.js';
 import type { LlmOperationCache } from '../inference/vector-cache.js';
 import {
-  dedicatedCachedInference,
   poolPolicyBoundInference,
   type PoolPolicyPorts,
 } from '../inference/tenant-inference-builders.js';
@@ -20,7 +19,6 @@ import type { TenantGenerationRegistry } from './TenantGenerationRegistry.js';
 import type { TenantPolicySnapshotRegistry } from './TenantPolicySnapshotRegistry.js';
 
 export interface TenantPolicyWiringDeps<S extends VerifiedActivePolicySnapshotV1> {
-  readonly sharedPool: boolean;
   readonly generations: TenantGenerationRegistry<TenantContext, S>;
   readonly snapshots: TenantPolicySnapshotRegistry<S, TenantContext>;
   readonly attestation: () => RuntimeEvidenceSessionPort | null | undefined;
@@ -86,17 +84,15 @@ export class TenantPolicyWiring<S extends VerifiedActivePolicySnapshotV1> {
     latencyProfile: InferenceLatencyProfile = 'interactive',
   ): AnswerInferenceBuild {
     return (orgId, tenant, cache) =>
-      this.deps.sharedPool
-        ? poolPolicyBoundInference({
-            orgId,
-            snapshot: () => tenant.activePolicySnapshot(),
-            policy,
-            operationCache: cache,
-            usageSink,
-            latencyProfile,
-            ...(upstreamGate === undefined ? {} : { upstreamGate }),
-          })
-        : dedicatedCachedInference(cache, ANSWER_CACHE_VERSION);
+      poolPolicyBoundInference({
+        orgId,
+        snapshot: () => tenant.activePolicySnapshot(),
+        policy,
+        operationCache: cache,
+        usageSink,
+        latencyProfile,
+        ...(upstreamGate === undefined ? {} : { upstreamGate }),
+      });
   }
 
   private providerPolicyInstalled(): boolean {

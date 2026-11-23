@@ -12,7 +12,6 @@ import type { TenantPolicyOperationBackend } from '../TenantPolicyBoundInference
 import { recordTokenUsage } from '../TokenUsageScope.js';
 import { observeUpstreamFetch } from '../upstream-observation.js';
 import type { ClaudeCredentialSource } from './ClaudeCredentialSource.js';
-import type { BatchSendRoute } from './BatchingClaudeSender.js';
 import { ClaudeMessagesBackend } from './ClaudeMessagesBackend.js';
 import {
   CLAUDE_OPERATION_DEADLINE,
@@ -39,7 +38,6 @@ export interface ClaudeOperationBackendFactoryDeps {
   readonly transport: () => AnthropicTransport;
   readonly usageSink?: InferenceUsageSink;
   readonly onAlarm?: (code: string) => void;
-  readonly batching?: BatchSendRoute;
 }
 
 const isMovedHead = (error: unknown): boolean =>
@@ -60,7 +58,7 @@ export function createClaudeOperationBackendFactory(
       throw new ClaudeRouteError('claude_model_not_allowed');
     }
     const admission = await deps.authority.admit(binding, snapshot);
-    return new ClaudeOperation(deps, binding, route, admission, snapshot.orgId).backend();
+    return new ClaudeOperation(deps, binding, route, admission).backend();
   };
 }
 
@@ -74,7 +72,6 @@ class ClaudeOperation {
     private readonly binding: VerifiedActivePolicyRoleBindingV1,
     private readonly route: AnthropicRoute,
     private readonly admission: OperationAdmission,
-    private readonly orgId: string,
   ) {
     this.errorContext = {
       upstream: `${PROVIDER_ROUTE_POLICY.anthropic.upstreamKeyPrefix}${route.model}`,
@@ -158,8 +155,6 @@ class ClaudeOperation {
       errorContext: this.errorContext,
       onIdentityMismatch: () => credentials.invalidate('mismatch'),
       ...(prefix === undefined ? {} : { cachedSystemPrefix: prefix }),
-      orgId: this.orgId,
-      ...(this.deps.batching === undefined ? {} : { batching: this.deps.batching }),
     });
   }
 

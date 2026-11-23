@@ -33,14 +33,3 @@ export function isLegacyEmbeddingSpace(space: EmbeddingSpace): boolean {
 export const ACTIVE_EMBEDDING_SPACE: EmbeddingSpace = embeddingSpaceFor(OPENAI_EMBED_ROUTE_STATE);
 export const ACTIVE_EMBEDDING_SPACE_IS_LEGACY: boolean =
   isLegacyEmbeddingSpace(ACTIVE_EMBEDDING_SPACE);
-
-export const EMBEDDING_SPACE_REQUIRES_SHARED_POOL = 'embedding_space_requires_shared_pool';
-
-/** Only a shared pool can reach the OpenAI embed route, so any other deployment fails at boot instead of dead-lettering later. */
-export function assertEmbeddingSpaceDeployable(input: {
-  readonly sharedPool: boolean;
-  readonly space: EmbeddingSpace;
-}): void {
-  if (input.sharedPool || isLegacyEmbeddingSpace(input.space)) return;
-  throw new Error(EMBEDDING_SPACE_REQUIRES_SHARED_POOL);
-}

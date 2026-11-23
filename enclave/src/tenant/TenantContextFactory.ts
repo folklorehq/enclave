@@ -24,7 +24,7 @@ import {
   singleVersionSealedContentKeyring,
   type SealedContentKeyringConfig,
 } from '../crypto/esdk.js';
-import { LLM_CACHE_PROMPT_VERSION, type InferenceModel } from '../inference/CachedInference.js';
+import type { InferenceModel } from '../inference/CachedInference.js';
 import { S3LlmCache } from '../inference/S3LlmCache.js';
 import type { LlmCacheNamer } from '../inference/llm-cache.js';
 import {
@@ -36,7 +36,6 @@ import {
   type UpstreamCallGate,
 } from '../inference/TenantPolicyBoundInference.js';
 import {
-  dedicatedCachedInference,
   poolPolicyBoundInference,
   poolPolicyPortsFrom,
   type SealedDecisionModel,
@@ -78,10 +77,6 @@ export type UnsealMasterKeyFn = (
 export interface TenantContextFactoryDeps {
   s3: S3Client;
   region: string;
-  /** From the root-signed boot manifest (audit F2), read late: it is verified after this is built. */
-  signedRecoveryPubkey?: () => string | undefined;
-  /** The tenant's storage key ARN from the verified boot manifest; the identity's env value must agree. */
-  signedStorageKeyArn?: () => string | undefined;
   /** The account and region of the verified boot manifest; a bare tenant key id resolves only there. */
   signedKmsScope?: () => KmsKeyScope | undefined;
   /** Test seam: replaces the KMS client constructor the ESDK keyring uses. */
@@ -91,7 +86,6 @@ export interface TenantContextFactoryDeps {
   mintMasterKey?: MintMasterKeyFn;
   unsealMasterKey?: UnsealMasterKeyFn;
   activePolicySnapshotFor?: (tenantId: string) => ReturnType<TenantContext['activePolicySnapshot']>;
-  enforceTenantPolicy?: boolean;
   emitAuthors?: boolean;
   logger?: Logger;
   /** Queue-job calls wait in the host gate (up to 90 minutes, then fail); other calls only count toward its windows. */
@@ -246,9 +240,6 @@ export class TenantContextFactory {
       orgId: tenantId,
       namer,
     });
-    if (!this.deps.enforceTenantPolicy) {
-      return dedicatedCachedInference(cache, LLM_CACHE_PROMPT_VERSION);
-    }
     return poolPolicyBoundInference({
       orgId: tenantId,
       snapshot: snapshotProvider,
@@ -270,9 +261,7 @@ export class TenantContextFactory {
 
   // The content keyring is built from the tenant's STORAGE key, never the master key: the master
   // key's Decrypt is attestation-gated, and an IAM decrypt on it would be a non-attested unseal
-  // path. The dedicated box's storage key arrives in the SIGNED boot manifest; the pool box's in
-  // the assignment manifest. Either may be absent only if the other is present, and the two must
-  // agree — a mismatch or a total absence refuses the boot.
+  // path. The storage key arrives in the assignment manifest; its absence refuses the boot.
   private buildSealedContentKeyrings(identity: TenantIdentity): SealedContentKeyringConfig {
     const history = identity.storageKeyHistory.map((entry) => ({
       version: entry.version,
@@ -304,10 +293,6 @@ export class TenantContextFactory {
   }
 
   private assertSignedStorageKey(identity: TenantIdentity, activeStorageKeyId: string): void {
-    const signedKey = this.deps.signedStorageKeyArn?.()?.trim() ?? '';
-    if (signedKey && activeStorageKeyId !== signedKey) {
-      throw new Error('refusing boot: storage key disagrees with the signed boot manifest');
-    }
     if (!activeStorageKeyId) {
       throw new Error(
         'refusing boot: no storage key configured (content keyring must never fall back to the master CMK)',
@@ -367,7 +352,7 @@ export class TenantContextFactory {
     );
     const recoveryKey = assertRecoveryConfigured(
       identity.recoveryPubkey,
-      identity.signedRecoveryPubkey ?? this.deps.signedRecoveryPubkey?.(),
+      identity.signedRecoveryPubkey,
     );
     const { masterKey, sealedBlob } = await this.mint(identity);
     try {
