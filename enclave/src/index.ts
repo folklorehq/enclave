@@ -147,6 +147,7 @@ import { IngestTransportBreaker } from './pipeline/ingest-decisions/accounting/I
 import { JEV_QUESTION_SETS } from './workers/decisions/jev-question-sets.js';
 import { InferenceRouteResolver } from './inference/routing/InferenceRouteResolver.js';
 import { AwsRoutingParameterReader } from './inference/routing/AwsRoutingParameterReader.js';
+import { createSignedSpecLoader } from './firstparty-connectors/SignedSpecLoader.js';
 import { RoutingTableRefresher } from './inference/routing/RoutingTableRefresher.js';
 import { RoutingTableVerifier } from './inference/routing/RoutingTableVerifier.js';
 import { routingParameterArn } from './inference/routing/routing-parameter-arn.js';
@@ -1023,6 +1024,21 @@ const controlPlaneIdentity = verifiedManifest?.controlPlaneIdentity;
 const controlPlaneFetch = controlPlaneIdentity
   ? createPinnedControlPlaneFetch(globalThis.fetch, controlPlaneIdentity)
   : undefined;
+const signedSpecLoader =
+  verifiedManifest && controlPlaneIdentity && controlPlaneFetch
+    ? createSignedSpecLoader({
+        signerPublicKeySpki: verifiedManifest.firstpartyConnectorTrust?.signerPublicKeySpki ?? null,
+        controlPlaneUrl: controlPlaneIdentity.origin,
+        deploymentId: verifiedManifest.deploymentId,
+        agentToken: () => process.env['AGENT_TOKEN'] ?? '',
+        fetchImpl: controlPlaneFetch,
+        logger: logger.child({ component: 'signed_specs' }),
+      })
+    : null;
+if (signedSpecLoader) {
+  await signedSpecLoader.refreshOnce();
+  signedSpecLoader.start();
+}
 const enabledOAuthProviders =
   verifiedManifest?.oauthProviders.filter((provider) => provider.enabled) ?? [];
 const jiraOAuthProvider = enabledOAuthProviders.find((provider) => provider.kind === 'jira');

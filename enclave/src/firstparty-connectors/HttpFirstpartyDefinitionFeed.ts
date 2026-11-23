@@ -1,5 +1,7 @@
-import { FIRSTPARTY_MAX_LIVE_CONNECTORS } from '@folklore/contracts';
-import { firstpartyConnectorFeedSchema } from '@folklore/contracts/enclave';
+import {
+  SIGNED_CONNECTOR_FEED_MAX_ENTRIES,
+  firstpartyConnectorFeedSchema,
+} from '@folklore/contracts/enclave';
 import { FirstpartyFeedError } from '@folklore/errors';
 import { ResponseBodyTooLargeError, readBoundedText } from '../inference/bounded-response-body.js';
 import { assertControlPlaneOrigin } from '../pull/control-plane-url.js';
@@ -18,7 +20,6 @@ interface FeedCandidates {
   readonly malformed: number;
 }
 
-// UNWIRED: no composition root builds this yet.
 export class HttpFirstpartyDefinitionFeed {
   constructor(
     private readonly deps: {
@@ -75,10 +76,10 @@ export class HttpFirstpartyDefinitionFeed {
 
   private candidatesOf(text: string): FeedCandidates {
     const raw = this.rawEntries(text);
-    if (raw.length > FIRSTPARTY_MAX_LIVE_CONNECTORS) {
+    if (raw.length > SIGNED_CONNECTOR_FEED_MAX_ENTRIES) {
       throw new FirstpartyFeedError('firstparty_feed_too_many');
     }
-    FirstpartyDefinitionVerifier.assertUniqueKeys(raw.flatMap((entry) => this.rawSlotOf(entry)));
+    FirstpartyDefinitionVerifier.assertUniqueKeys(raw.flatMap((entry) => this.rawNameOf(entry)));
     const entries: FirstpartyFeedEntry[] = [];
     for (const candidate of raw) {
       const parsed = entrySchema.safeParse(candidate);
@@ -101,8 +102,9 @@ export class HttpFirstpartyDefinitionFeed {
     return definitions;
   }
 
-  private rawSlotOf(entry: unknown): string[] {
-    const slot = (entry as { envelope?: { slot?: unknown } } | null)?.envelope?.slot;
-    return typeof slot === 'string' ? [slot] : [];
+  private rawNameOf(entry: unknown): string[] {
+    const envelope = (entry as { envelope?: { slot?: unknown; kind?: unknown } } | null)?.envelope;
+    const name = envelope?.slot ?? envelope?.kind;
+    return typeof name === 'string' ? [name] : [];
   }
 }
