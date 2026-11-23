@@ -1,4 +1,8 @@
-import { inferenceTrustPolicyV2Schema } from '@folklore/contracts';
+import {
+  COMPILED_INFERENCE_ENDPOINT_IDENTITY,
+  inferenceTrustPolicyV2Schema,
+  type InferenceEndpointIdentity,
+} from '@folklore/contracts';
 import type {
   InferenceBackend,
   InferenceUsageSink,
@@ -12,7 +16,10 @@ import type {
 } from './TenantPolicyBoundInference.js';
 import { OperationAuthority } from './OperationAuthority.js';
 import { createPublicAciOperationBackend } from './PublicAciOperationBackend.js';
-import { createPinnedInferenceTransport } from '../egress/inference.js';
+import {
+  assertCompiledInferenceEndpoint,
+  createPinnedInferenceTransport,
+} from '../egress/inference.js';
 import { promptTokenFloor } from './token-floor.js';
 import { recordTokenUsage } from './TokenUsageScope.js';
 import { assertPublicInferenceEmbeddingDimension } from './phala.js';
@@ -35,6 +42,7 @@ export interface PublicAciRuntimeBackendFactoryOptions {
     tlsSpkiSha256: readonly string[];
   }) => { fetch: typeof fetch; close: () => Promise<void> };
   readonly backendFactory?: typeof createPublicAciOperationBackend;
+  readonly endpointIdentity?: InferenceEndpointIdentity;
 }
 
 const CHAT_COMPLETIONS_PATH = '/chat/completions';
@@ -56,15 +64,17 @@ export function createPublicAciRuntimeBackendFactory(
   const policy = inferenceTrustPolicyV2Schema.parse(options.providerPolicy);
   if (policy.version !== 2 || policy.evidence.profile !== 'dstack-tdx-public-v1')
     throw new Error('public_aci_provider_policy_mismatch');
+  const identity = options.endpointIdentity ?? COMPILED_INFERENCE_ENDPOINT_IDENTITY;
+  if (policy.origin !== identity.origin) throw new Error('inference_endpoint_identity_mismatch');
   const makeBackend = options.backendFactory ?? createPublicAciOperationBackend;
   const makeTransport =
     options.fetchFactory ??
     ((p) =>
-      createPinnedInferenceTransport({
-        ...p,
-        route: policy.route,
-        tlsSpkiSha256: [...p.tlsSpkiSha256],
-      }));
+      createPinnedInferenceTransport(
+        { ...p, route: policy.route, tlsSpkiSha256: [...p.tlsSpkiSha256] },
+        globalThis.fetch,
+        identity,
+      ));
   const authority = new OperationAuthority({
     tenantId: options.tenantId,
     freshness: options.freshness,
@@ -73,6 +83,13 @@ export function createPublicAciRuntimeBackendFactory(
     providerPolicyGeneration: policy.generation,
   });
   return async (binding, snapshot): Promise<TenantPolicyOperationBackend> => {
+    assertCompiledInferenceEndpoint(
+      {
+        origin: snapshot.policy.route.origin,
+        tlsSpkiSha256: snapshot.policy.channel.tlsSpkiSha256,
+      },
+      identity,
+    );
     const admission = await authority.admit(binding, snapshot, {
       afterRoleCheck: assertPublicInferenceEmbeddingDimension,
     });

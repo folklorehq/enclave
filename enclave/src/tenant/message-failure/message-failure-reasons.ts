@@ -163,6 +163,7 @@ const INFERENCE_TRANSPORT_REASONS = [
   'inference_api_key_missing',
   'inference_api_key_read_failed',
   'inference_api_key_unavailable',
+  'inference_endpoint_identity_mismatch',
   'inference_fetch_failed',
   'inference_origin_mismatch',
   'inference_refused',

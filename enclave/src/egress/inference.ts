@@ -1,7 +1,11 @@
 import { X509Certificate, createHash } from 'node:crypto';
 import { checkServerIdentity } from 'node:tls';
 import { matchesSpkiPin } from '@folklore/utils';
-import type { InferenceTrustPolicyV1 } from '@folklore/contracts';
+import {
+  COMPILED_INFERENCE_ENDPOINT_IDENTITY,
+  type InferenceEndpointIdentity,
+  type InferenceTrustPolicyV1,
+} from '@folklore/contracts';
 import { ProxyAgent } from 'undici';
 import { EGRESS_PROXY_PORT } from './proxy.js';
 
@@ -10,14 +14,31 @@ type InferenceTransportPolicy = Pick<InferenceTrustPolicyV1, 'origin' | 'route' 
 export function createPinnedInferenceFetch(
   policy: InferenceTransportPolicy,
   fetchImpl: typeof globalThis.fetch = globalThis.fetch,
+  identity: InferenceEndpointIdentity = COMPILED_INFERENCE_ENDPOINT_IDENTITY,
 ): typeof globalThis.fetch {
-  return createPinnedInferenceTransport(policy, fetchImpl).fetch;
+  return createPinnedInferenceTransport(policy, fetchImpl, identity).fetch;
+}
+
+// Every pinned inference transport passes here, so no signed policy can name a host or pin the image lacks.
+export function assertCompiledInferenceEndpoint(
+  policy: { readonly origin: string; readonly tlsSpkiSha256: readonly string[] },
+  identity: InferenceEndpointIdentity,
+): void {
+  if (
+    policy.origin !== identity.origin ||
+    policy.tlsSpkiSha256.length === 0 ||
+    policy.tlsSpkiSha256.some((pin) => !identity.tlsSpkiSha256.includes(pin))
+  ) {
+    throw new Error('inference_endpoint_identity_mismatch');
+  }
 }
 
 export function createPinnedInferenceTransport(
   policy: InferenceTransportPolicy,
   fetchImpl: typeof globalThis.fetch = globalThis.fetch,
+  identity: InferenceEndpointIdentity = COMPILED_INFERENCE_ENDPOINT_IDENTITY,
 ): { fetch: typeof globalThis.fetch; close: () => Promise<void> } {
+  assertCompiledInferenceEndpoint(policy, identity);
   const origin = policy.origin;
   const route = policy.route;
   const pins = [...policy.tlsSpkiSha256];
