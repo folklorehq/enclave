@@ -1,4 +1,4 @@
-import { createHash, createPublicKey, verify } from 'node:crypto';
+import { createHash, createPublicKey } from 'node:crypto';
 import { canonicalJson } from '@folklore/contracts';
 import { canonicalCbor } from './canonical-cbor.js';
 
@@ -253,47 +253,4 @@ export function signerRootEnrollmentAuthorizationDigest(
   preimage: SignerRootEnrollmentAuthorizationPreimageV1,
 ): string {
   return createHash('sha256').update(canonicalJson(preimage), 'utf8').digest('hex');
-}
-
-export interface SignerRootQuorumSignatureV1 {
-  readonly memberId: string;
-  readonly signature: string;
-}
-
-export function verifySignerRootQuorum(input: {
-  root: TrustedSignerRootV1;
-  domainTag: string;
-  subjectBytes: Uint8Array;
-  signatures: readonly SignerRootQuorumSignatureV1[];
-}): void {
-  if (input.root.rootKind !== 'normal' || input.root.threshold !== 2) {
-    throw new Error('signer_root_invalid');
-  }
-  if (input.signatures.length < 2) throw new Error('signer_root_quorum_invalid');
-  const memberIds = input.signatures.map((entry) => entry.memberId);
-  if (new Set(memberIds).size !== memberIds.length) {
-    throw new Error('signer_root_quorum_invalid');
-  }
-  const message = Buffer.concat([
-    Buffer.from(`${input.domainTag}\u0000`, 'utf8'),
-    Buffer.from(input.subjectBytes),
-  ]);
-  let validCount = 0;
-  for (const entry of input.signatures) {
-    const member = input.root.members.find((candidate) => candidate.memberId === entry.memberId);
-    if (!member) throw new Error('signer_root_member_unavailable');
-    let publicKey;
-    try {
-      publicKey = createPublicKey(member.publicKeyPem);
-    } catch {
-      throw new Error('signer_root_member_key_invalid');
-    }
-    if (publicKey.asymmetricKeyType !== 'ed25519') {
-      throw new Error('signer_root_member_key_invalid');
-    }
-    const valid = verify(null, message, publicKey, Buffer.from(entry.signature, 'base64'));
-    if (!valid) throw new Error('signer_root_signature_invalid');
-    validCount += 1;
-  }
-  if (validCount < input.root.threshold) throw new Error('signer_root_quorum_invalid');
 }

@@ -4,10 +4,6 @@
     "noEmit": true,
     "rootDir": "."
   },
-  "include": [
-    "src/**/*.ts",
-    "test/dstack-native-evidence-canonical.test.ts",
-    "test/public-api.test.ts"
-  ],
+  "include": ["src/**/*.ts", "test/public-api.test.ts"],
   "exclude": ["dist", "node_modules"]
 }

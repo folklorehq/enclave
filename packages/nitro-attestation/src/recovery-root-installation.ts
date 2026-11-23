@@ -149,15 +149,3 @@ export function evaluateRecoveryRootInstallation(input: {
     epochRegression,
   };
 }
-
-export function verifyRecoveryRootInstallation(input: {
-  newRecoveryRootDigest: string;
-  newRootEpoch: number;
-  expectedBuildId: string;
-  expectedSourceCommit?: string;
-  expectedArtifactDigest?: string;
-  priorRootEpoch?: number;
-  reports: readonly RecoveryRootInstallationReportV1[];
-}): RecoveryRootInstallationEvaluation {
-  return evaluateRecoveryRootInstallation(input);
-}

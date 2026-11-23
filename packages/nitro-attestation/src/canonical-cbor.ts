@@ -15,14 +15,10 @@ import {
 import {
   ACTIVE_INFERENCE_TRUST_POLICY_V2_CANONICAL_DOMAIN,
   activeInferenceTrustPolicyV2Schema,
-  durableGenerationHighWaterCheckpointSchema,
-  gatewayEvidenceEnvelopeSchema,
 } from '@folklore/contracts';
 import type {
   ActivePolicyAuthorizationEnvelopeV1,
   ActiveInferenceTrustPolicyV2,
-  DurableGenerationHighWaterCheckpointV1,
-  GatewayEvidenceEnvelopeV1,
   InferenceTrustPolicyV1,
   InferenceTrustPolicyV2,
 } from '@folklore/contracts';
@@ -32,9 +28,6 @@ import { canonicalJson, type AssignmentManifestV3Payload } from '@folklore/contr
 
 const CONFIGURATION_GENERATION_MAX = 2_147_483_647;
 const NITRO_USER_DATA_MAX_BYTES = 512;
-const DURABLE_GENERATION_HIGH_WATER_CHECKPOINT_DOMAIN =
-  'folklore.durable-generation-high-water-checkpoint.v1';
-const GATEWAY_EVIDENCE_ENVELOPE_DOMAIN = 'folklore.aci-gateway-evidence.v1';
 
 function encodeSecretReference(reference: BootManifest['secretReferences'][number]): unknown[] {
   if (reference.store === 'secrets-manager') {
@@ -240,43 +233,6 @@ function encodeActiveInferenceRoleBinding(
   ];
 }
 
-function encodeGatewayEvidenceRoleBinding(
-  binding: GatewayEvidenceEnvelopeV1['roleBindings'][number],
-): unknown[] {
-  return [
-    binding.role,
-    binding.sessionId,
-    binding.model,
-    binding.modelRevision,
-    binding.modelArtifactDigest,
-    binding.channelKeyDigest,
-    binding.expiresAt,
-  ];
-}
-
-function encodeCommissioningProvenance(
-  provenance: NonNullable<GatewayEvidenceEnvelopeV1['commissioningProvenance']>,
-): unknown[] {
-  return [
-    provenance.protectedSourceCommit,
-    provenance.eifArtifactPath,
-    provenance.eifDigest,
-    provenance.pcr0,
-    provenance.bootRootDigest,
-    provenance.deploymentId,
-    provenance.runtimeIdentityDigest,
-    provenance.recipientKmsReceiptDigest,
-    provenance.assignmentAcknowledgmentDigest,
-    provenance.routeProofDigest,
-    provenance.admissionProofDigest,
-    provenance.queueChecksDigest,
-    provenance.dlqChecksDigest,
-    provenance.aciReportSignatureDigest,
-    provenance.releaseProvenanceDigest,
-    provenance.finalCommitMarker,
-  ];
-}
-
 export function encodeActiveInferenceTrustPolicyV2(
   input: ActiveInferenceTrustPolicyV2,
 ): Uint8Array {
@@ -430,77 +386,6 @@ export function digestActivePolicyAuthorizationEnvelopeV1(
   return createHash('sha256')
     .update(encodeActivePolicyAuthorizationEnvelopeV1(input))
     .digest('hex');
-}
-
-export function encodeDurableGenerationHighWaterCheckpoint(
-  input: DurableGenerationHighWaterCheckpointV1,
-): Uint8Array {
-  const checkpoint = durableGenerationHighWaterCheckpointSchema.parse(input);
-  return encode([
-    DURABLE_GENERATION_HIGH_WATER_CHECKPOINT_DOMAIN,
-    checkpoint.checkpointVersion,
-    checkpoint.orgId,
-    checkpoint.deploymentId,
-    checkpoint.policyGeneration,
-    checkpoint.activationGeneration,
-    [checkpoint.keysetHighWater.epoch, checkpoint.keysetHighWater.digest],
-    checkpoint.policyDigest,
-    checkpoint.releaseId,
-    checkpoint.protectedSourceCommit,
-    checkpoint.eifDigest,
-    checkpoint.signerKeyId,
-    checkpoint.previousCheckpointDigest,
-    checkpoint.issuedAt,
-    checkpoint.checkpointDigest,
-    checkpoint.signature,
-  ]);
-}
-
-export function encodeGatewayEvidenceEnvelope(input: GatewayEvidenceEnvelopeV1): Uint8Array {
-  const evidence = gatewayEvidenceEnvelopeSchema.parse(input);
-  return encode([
-    GATEWAY_EVIDENCE_ENVELOPE_DOMAIN,
-    evidence.evidenceId,
-    evidence.orgId,
-    evidence.deploymentId,
-    evidence.tenantContextDigest,
-    evidence.eifDigest,
-    evidence.pcr0,
-    evidence.bootRootDigest,
-    evidence.gatewayBuildDigest,
-    evidence.verifierSourceCommit,
-    evidence.verifierArchiveSha256,
-    evidence.dcapQvlVersion,
-    evidence.releaseProvenanceDigest,
-    evidence.policyDigest,
-    evidence.policyGeneration,
-    evidence.activationGeneration,
-    [evidence.keysetHighWater.epoch, evidence.keysetHighWater.digest],
-    evidence.routeIdentity,
-    evidence.keysetDigest,
-    evidence.roleBindings.map(encodeGatewayEvidenceRoleBinding),
-    [
-      evidence.admission.decision,
-      evidence.admission.scope,
-      evidence.admission.assignmentDigest,
-      evidence.admission.leaseExpiry,
-    ],
-    [
-      evidence.trustedTime.checkpointDigest,
-      evidence.trustedTime.bootEpoch,
-      evidence.trustedTime.sampledAt,
-    ],
-    evidence.exchange === null
-      ? null
-      : [evidence.exchange.role, evidence.exchange.servedAt, evidence.exchange.result],
-    evidence.commissioningProvenance === null
-      ? null
-      : encodeCommissioningProvenance(evidence.commissioningProvenance),
-    evidence.failureCode,
-    evidence.createdAt,
-    evidence.signerKeyId,
-    evidence.signature,
-  ]);
 }
 
 export function encodeBootManifest(input: BootManifest): Uint8Array {

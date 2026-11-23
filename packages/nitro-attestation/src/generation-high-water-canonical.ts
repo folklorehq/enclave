@@ -6,7 +6,6 @@ import {
   highWaterLogEntryV1Schema,
   highWaterLogCheckpointV1Schema,
   type GenerationContextV1,
-  type HighWaterCandidateV1,
   type HighWaterLogEntryV1,
 } from '@folklore/contracts';
 
@@ -50,37 +49,6 @@ export function decodeGenerationHighWaterLogEntryV1(bytes: Uint8Array): HighWate
     if (error instanceof GenerationHighWaterCanonicalError) throw error;
     throw new GenerationHighWaterCanonicalError('high_water_object_invalid');
   }
-}
-
-export function decodeGenerationHighWaterCandidateV1(input: {
-  readonly context: GenerationContextV1;
-  readonly entry: HighWaterLogEntryV1;
-  readonly bytes: Uint8Array;
-}): HighWaterCandidateV1 {
-  const context = generationContextV1Schema.parse(input.context);
-  const entry = decodeGenerationHighWaterLogEntryV1(input.bytes);
-  if (!isDeepStrictEqual(entry, highWaterLogEntryV1Schema.parse(input.entry))) {
-    throw new GenerationHighWaterCanonicalError('high_water_replay_mismatch');
-  }
-  const entryContext = generationContextV1Schema.parse({
-    orgId: entry.checkpoint.orgId,
-    deploymentId: entry.checkpoint.deploymentId,
-    policyDigest: entry.checkpoint.policyDigest,
-    policyGeneration: entry.checkpoint.policyGeneration,
-    activationGeneration: entry.checkpoint.activationGeneration,
-    configurationGeneration: entry.checkpoint.configurationGeneration,
-    keysetEpoch: entry.checkpoint.keysetEpoch,
-    keysetDigest: entry.checkpoint.keysetDigest,
-    releaseId: entry.checkpoint.releaseId,
-    protectedSourceCommit: entry.checkpoint.protectedSourceCommit,
-    eifDigest: entry.checkpoint.eifDigest,
-    pcr0: entry.checkpoint.pcr0,
-    bootRootDigest: entry.checkpoint.bootRootDigest,
-  });
-  if (!isDeepStrictEqual(entryContext, context)) {
-    throw new GenerationHighWaterCanonicalError('high_water_replay_mismatch');
-  }
-  return { context, entry, bytes: Uint8Array.from(input.bytes) };
 }
 
 export function generationHighWaterEntryDigestV1(entry: HighWaterLogEntryV1): string {

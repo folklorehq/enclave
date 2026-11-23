@@ -113,12 +113,10 @@ export {
   canonicalSignerRootEnrollmentSubjectBytes,
   signerRootEnrollmentAuthorizationDigest,
   trustedSignerRootV1,
-  verifySignerRootQuorum,
   type SignerRootEnrollmentAuthorizationPreimageV1,
   type SignerRootEnrollmentBootstrapSubjectV1,
   type SignerRootEnrollmentFloorBoundSubjectV1,
   type SignerRootEnrollmentSubjectV1,
-  type SignerRootQuorumSignatureV1,
   type TrustedSignerRootMemberV1,
   type TrustedSignerRootV1,
 } from './trusted-signer-root.js';
@@ -140,7 +138,6 @@ export {
   canonicalRecoveryRootUpdateSubjectBytes,
   recoveryRootUpdateAuthorizationDigest,
   signedRecoveryRootUpdateV1Schema,
-  verifySignedRecoveryRootUpdate,
   type RecoveryRootUpdateAuthorizationPreimageV1,
   type RecoveryRootUpdateFloorBoundSubjectV1,
   type SignedRecoveryRootUpdateV1,
@@ -182,20 +179,6 @@ export {
   encodeProviderNativeBindingV1,
   type ControlledGatewayProofBindingV1,
 } from './model-provenance-canonical.js';
-export {
-  DSTACK_NATIVE_EVIDENCE_V1_DOMAIN,
-  DSTACK_RAW_EVIDENCE_V2_DOMAIN,
-  canonicalDstackNativeEvidenceArrayV1,
-  digestDstackNativeEvidenceV1,
-  digestDstackRawEvidenceV2,
-  DstackRawEvidenceDigestAuthority,
-  encodeDstackNativeEvidenceV1,
-  type DstackNativeEvidenceDigestResultV1,
-  type DstackNativeEvidenceUpstreamAppInfoV1,
-  type DstackNativeEvidenceUpstreamV1,
-  type DstackNativeEvidenceV1,
-  type DstackRawEvidenceDigestV2,
-} from './dstack-native-evidence-canonical.js';
 export {
   ACTIVE_POLICY_CARRIER_PAYLOAD_V1_DOMAIN,
   SIGNED_ACTIVE_POLICY_CARRIER_V1_DOMAIN,
@@ -244,7 +227,6 @@ export {
   GenerationHighWaterCanonicalError,
 } from './generation-high-water-canonical.js';
 export type { GenerationHighWaterSigningMaterial } from './generation-high-water-canonical.js';
-export { decodeGenerationHighWaterCandidateV1 } from './generation-high-water-canonical.js';
 export {
   classifyGenerationHighWaterProgressionV1,
   generationHighWaterReleaseKeyV1,

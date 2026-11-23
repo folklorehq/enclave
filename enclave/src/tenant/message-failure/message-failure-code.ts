@@ -1,27 +1,16 @@
 import {
   AciSessionVerificationError,
-  AciTrustStateError,
   AciVerificationError,
   ActivePolicyCarrierVerificationError,
-  ControlledGatewayModelArtifactVerificationError,
-  ForwardLeaseStoreError,
   GenerationContextFloorError,
-  ModelProvenanceGateError,
-  OfficialAciExchangeError,
   OfficialAciReceiptVerificationError,
-  PreForwardAdmissionError,
-  PreForwardRouteProofVerificationError,
-  ProviderNativeModelArtifactVerificationError,
   VerifiedActivePolicySnapshotVerifierError,
 } from '@folklore/inference';
 import { AppError } from '@folklore/errors';
 import { ZodError } from 'zod';
 import { ProviderEgressError, ProviderRejectedError } from '../../egress/provider-token-fetch.js';
 import { HnswBlobUnreadableError } from '../../hnsw/IndexObjectTransfer.js';
-import { EvidenceAnchorVerifierError } from '../../inference/EvidenceAnchorVerifier.js';
-import { GatewayEvidenceRecorderError } from '../../inference/GatewayEvidenceRecorder.js';
 import { TenantPolicyBoundInferenceError } from '../../inference/TenantPolicyBoundInference.js';
-import { TrustedEvidenceContextError } from '../../inference/TrustedEvidenceContextProvider.js';
 import { TrustedTimeAuthorityError } from '../../inference/TrustedTimeAuthority.js';
 import { errorType } from '../../logging/error-fields.js';
 import { OAuthRefreshFailedError } from '../../pull/OAuthRefreshFailedError.js';
@@ -135,7 +124,6 @@ const FIXED_CLASS_REASONS: ReadonlyArray<readonly [ErrorClass, string]> = [
   [CrossTenantRoutingError, 'cross_tenant'],
   [UnknownTenantError, 'tenant_unassigned'],
   [TenantContextZeroizedError, 'tenant_zeroized'],
-  [PreForwardAdmissionError, 'aci_admission_refused'],
   // A schema refusal names no field: an issue path or message can echo the parsed value.
   [ZodError, 'schema_invalid'],
   [HnswBlobUnreadableError, 'hnsw_blob_unreadable'],
@@ -146,19 +134,9 @@ const TYPED_CODE_PREFIXES: ReadonlyArray<readonly [ErrorClass, string]> = [
   [AciVerificationError, 'aci'],
   [AciSessionVerificationError, 'aci_session'],
   [OfficialAciReceiptVerificationError, 'aci_receipt'],
-  [OfficialAciExchangeError, 'aci_exchange'],
-  [AciTrustStateError, 'aci_trust'],
   [ActivePolicyCarrierVerificationError, 'policy_carrier'],
   [GenerationContextFloorError, 'generation_floor'],
   [VerifiedActivePolicySnapshotVerifierError, 'policy_snapshot'],
-  [ForwardLeaseStoreError, 'forward_lease'],
-  [ModelProvenanceGateError, 'provenance_gate'],
-  [ProviderNativeModelArtifactVerificationError, 'native_artifact'],
-  [ControlledGatewayModelArtifactVerificationError, 'gateway_artifact'],
-  [PreForwardRouteProofVerificationError, 'route_proof'],
-  [EvidenceAnchorVerifierError, 'anchor'],
-  [GatewayEvidenceRecorderError, 'gateway_evidence'],
-  [TrustedEvidenceContextError, 'context'],
   [OAuthRefreshFailedError, 'oauth_refresh'],
 ];
 

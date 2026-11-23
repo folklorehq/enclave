@@ -1,7 +1,6 @@
 import { linear } from '@folklore/connectors';
 import { ROUTING_TABLE_REFUSALS } from '@folklore/contracts';
 import { HIGH_WATER_FAILURE_CODES } from '@folklore/inference';
-import type { EvidenceKeySessionErrorCode } from '../../inference/EvidenceKeySession.js';
 import { EMBEDDING_SPACE_REQUIRES_SHARED_POOL } from '../../inference/embedding-space.js';
 import { OPENAI_EMBED_CODES } from '../../inference/openai/openai-embed-errors.js';
 import type { PullNotProcessedReason } from '../../pull/pull-runner.js';
@@ -152,11 +151,6 @@ export const NOT_PROCESSED_REASONS = [
   'resource_scope_unavailable',
   'cursor_store_unsealed',
 ] as const satisfies readonly PullNotProcessedReason[];
-
-const EVIDENCE_SESSION_REASONS = [
-  'evidence_session_aborted',
-  'evidence_envelope_invalid',
-] as const satisfies readonly EvidenceKeySessionErrorCode[];
 
 const INFERENCE_TRANSPORT_REASONS = [
   'inference_api_key_access_denied',
@@ -373,7 +367,6 @@ export const MESSAGE_FAILURE_REASONS: ReadonlySet<string> = new Set<string>([
   ...RUNTIME_EVIDENCE_REASONS,
   ...TRUSTED_TIME_REASONS,
   ...NOT_PROCESSED_REASONS,
-  ...EVIDENCE_SESSION_REASONS,
   ...INFERENCE_TRANSPORT_REASONS,
   ...INFERENCE_PATH_REASONS,
   ...CLAUDE_REASONS,

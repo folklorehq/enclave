@@ -20,12 +20,6 @@ import {
   recoveryRootInstallationReportV1Schema,
   type RecoveryRootInstallationReportV1,
 } from '@folklore/nitro-attestation';
-import { DstackEvidenceAdapter, unavailableResult } from './DstackEvidenceAdapter.js';
-import type {
-  DstackNativeVerificationInputV1,
-  DstackNativeVerificationResultV1,
-  DstackNativeVerifierPort,
-} from './DstackNativeVerifier.js';
 import type { BootSessionState } from './ports.js';
 
 export type PinnedBootManifestKeyStatus = 'active' | 'verification-only' | 'disabled' | 'revoked';
@@ -34,10 +28,6 @@ export interface PinnedBootManifestKey {
   keyId: string;
   status: PinnedBootManifestKeyStatus;
   publicKey: KeyObject;
-}
-
-export interface BootManifestVerifierOptions {
-  dstackVerifier?: DstackNativeVerifierPort;
 }
 
 export interface BootManifestRuntimeIdentity {
@@ -143,13 +133,11 @@ export const bootManifestVerificationErrors = {
 
 export class BootManifestVerifier {
   readonly #keysById: ReadonlyMap<string, PinnedBootManifestKey>;
-  readonly #dstackEvidenceAdapter: DstackEvidenceAdapter | undefined;
   readonly #keysetGeneration: number;
   readonly #keysetDigest: string;
 
   constructor(
     pinnedKeys: readonly PinnedBootManifestKey[] | { signedKeyset: SignedBootManifestKeyset },
-    options: BootManifestVerifierOptions = {},
   ) {
     if (Array.isArray(pinnedKeys)) throw new Error(bootManifestVerificationErrors.keySet);
     if (!pinnedKeys || typeof pinnedKeys !== 'object' || !('signedKeyset' in pinnedKeys)) {
@@ -160,9 +148,6 @@ export class BootManifestVerifier {
     this.#keysById = this.createKeySet(this.keysFromSignedKeyset(keyset));
     this.#keysetGeneration = keyset.generation;
     this.#keysetDigest = hashBootManifestKeyset(keyset);
-    this.#dstackEvidenceAdapter = options.dstackVerifier
-      ? new DstackEvidenceAdapter(options.dstackVerifier)
-      : undefined;
   }
 
   verify(input: unknown, runtimeIdentity: BootManifestRuntimeIdentity): VerifiedBootManifest {
@@ -308,14 +293,6 @@ export class BootManifestVerifier {
       sourceCommit,
       artifactDigest,
     });
-  }
-
-  async verifyDstackEvidence(
-    input: DstackNativeVerificationInputV1,
-  ): Promise<DstackNativeVerificationResultV1> {
-    return this.#dstackEvidenceAdapter
-      ? this.#dstackEvidenceAdapter.verify(input)
-      : unavailableResult();
   }
 
   private keysFromSignedKeyset(keyset: BootManifestKeyset): readonly PinnedBootManifestKey[] {

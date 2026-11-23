@@ -1,10 +1,6 @@
 import { createHash } from 'node:crypto';
 import { canonicalJson } from '@folklore/contracts';
-import { canonicalCbor, digestCanonicalCbor } from './canonical-cbor.js';
-import {
-  verifyRecoveryRootQuorum,
-  type TrustedSignerRecoveryRootV1,
-} from './trusted-signer-recovery-root.js';
+import { canonicalCbor } from './canonical-cbor.js';
 
 // SignedRecoveryRootUpdateV1: verified against the OLD independently pinned recovery root using the
 // floor-bound discriminator. The previous floor fields must equal the loader's latest committed floor
@@ -214,63 +210,4 @@ export function recoveryRootUpdateAuthorizationDigest(
   preimage: RecoveryRootUpdateAuthorizationPreimageV1,
 ): string {
   return createHash('sha256').update(canonicalJson(preimage), 'utf8').digest('hex');
-}
-
-export function verifySignedRecoveryRootUpdate(input: {
-  update: SignedRecoveryRootUpdateV1;
-  oldRoot: TrustedSignerRecoveryRootV1;
-  floor: { floorGeneration: number; floorDigest: string };
-}): void {
-  let update: SignedRecoveryRootUpdateV1;
-  try {
-    update = signedRecoveryRootUpdateV1Schema.parse(input.update);
-  } catch (error) {
-    const signatures = (input.update as { signatures?: unknown }).signatures;
-    if (Array.isArray(signatures) && signatures.length !== 3) {
-      throw new Error('recovery_root_quorum_invalid');
-    }
-    throw error;
-  }
-  if (
-    update.previousFloorGeneration !== input.floor.floorGeneration ||
-    update.previousFloorDigest !== input.floor.floorDigest
-  ) {
-    throw new Error('recovery_root_previous_floor_mismatch');
-  }
-  if (update.oldRecoveryRootDigest !== input.oldRoot.rootDigest) {
-    throw new Error('recovery_root_old_root_mismatch');
-  }
-  // A verifier update digest that aliases an already-bound digest is a reuse/rollback attempt.
-  if (
-    update.verifierUpdateDigest === update.previousFloorDigest ||
-    update.verifierUpdateDigest === update.oldRecoveryRootDigest ||
-    update.verifierUpdateDigest === update.newRecoveryRootDigest
-  ) {
-    throw new Error('recovery_root_verifier_update_digest_reused');
-  }
-  const subject: RecoveryRootUpdateFloorBoundSubjectV1 = {
-    domainTag: 'folklore.recovery-root-update-floor-bound.v1',
-    version: 1,
-    recoveryRootUpdatePayloadDigest: update.recoveryRootUpdatePayloadDigest,
-    oldRecoveryRootDigest: update.oldRecoveryRootDigest,
-    newRecoveryRootDigest: update.newRecoveryRootDigest,
-    oldRootEpoch: update.oldRootEpoch,
-    newRootEpoch: update.newRootEpoch,
-    verifierUpdateDigest: update.verifierUpdateDigest,
-    environment: update.environment,
-    awsAccountId: update.awsAccountId,
-    awsRegion: update.awsRegion,
-    previousFloorGeneration: update.previousFloorGeneration,
-    previousFloorDigest: update.previousFloorDigest,
-  };
-  const bytes = canonicalRecoveryRootUpdateSubjectBytes(subject);
-  if (digestCanonicalCbor(bytes) !== update.subjectDigest) {
-    throw new Error('recovery_root_subject_digest_mismatch');
-  }
-  verifyRecoveryRootQuorum({
-    root: input.oldRoot,
-    domainTag: subject.domainTag,
-    subjectBytes: bytes,
-    signatures: update.signatures,
-  });
 }
