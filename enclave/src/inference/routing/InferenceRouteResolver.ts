@@ -19,7 +19,6 @@ import {
   type PurposeRoute,
   type RoutedProviderId,
   type RouteTarget,
-  type ShadowArm,
 } from '@folklore/contracts';
 import { isAnthropicRoute, isClaudeModelId } from '../claude/anthropic-route.js';
 import {
@@ -272,12 +271,6 @@ export class InferenceRouteResolver {
 
   callGraph(arm: InferenceArmId): ClaudeCallGraph {
     return arm === DEFAULT_ARM ? this.#config.callGraph : this.#config.arms[arm].callGraph;
-  }
-
-  shadowArmsFor(orgId: string, requested: readonly ShadowArm[]): ShadowArm[] {
-    const { shadowOrgIdSha256 } = this.#config;
-    if (shadowOrgIdSha256 === '' || sha256Hex(orgId) !== shadowOrgIdSha256) return [];
-    return [...new Set(requested)].filter((arm) => arm in this.#config.arms);
   }
 
   reviewSamplePercent(): number {

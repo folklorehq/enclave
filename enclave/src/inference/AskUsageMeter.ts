@@ -1,5 +1,6 @@
 import type { TokenUsage } from '@folklore/contracts/enclave';
-import type { AskUsageAttribution, AskUsageSinkPort } from '@folklore/api';
+import type { AskUsageSinkPort } from '@folklore/api';
+import type { AskUsageSubject } from '@folklore/contracts';
 import { contentFreeErrorType, type Logger } from '@folklore/core';
 import type { AnswerUsageDayCounts } from './AnswerUsageDayCounts.js';
 import { tokenUsageScope, type MeasuredRun } from './TokenUsageScope.js';
@@ -29,7 +30,7 @@ interface OpenedStream {
 export class AskUsageMeter {
   constructor(private readonly deps: AskUsageMeterDeps) {}
 
-  async generate(subject: AskUsageAttribution, run: () => Promise<string>): Promise<string> {
+  async generate(subject: AskUsageSubject, run: () => Promise<string>): Promise<string> {
     let partial: TokenUsage[] = [];
     let measured: MeasuredRun<string>;
     try {
@@ -45,7 +46,7 @@ export class AskUsageMeter {
   }
 
   // The provider call's usage events fire in the async context where `open` runs, so the scope must be open there, not per read.
-  stream(subject: AskUsageAttribution, open: () => AsyncIterable<string>): AsyncIterable<string> {
+  stream(subject: AskUsageSubject, open: () => AsyncIterable<string>): AsyncIterable<string> {
     const opened = this.openMetered(open);
     return this.relay(subject, opened);
   }
@@ -66,7 +67,7 @@ export class AskUsageMeter {
     return { source, peek: () => peek() };
   }
 
-  private async *relay(subject: AskUsageAttribution, opened: OpenedStream): AsyncGenerator<string> {
+  private async *relay(subject: AskUsageSubject, opened: OpenedStream): AsyncGenerator<string> {
     let source: SettlingStream | undefined;
     try {
       source = await opened.source;
@@ -91,7 +92,7 @@ export class AskUsageMeter {
     }
   }
 
-  private async record(subject: AskUsageAttribution, usage: readonly TokenUsage[]): Promise<void> {
+  private async record(subject: AskUsageSubject, usage: readonly TokenUsage[]): Promise<void> {
     if (usage.length === 0) return;
     this.count(subject, usage);
     try {
@@ -104,7 +105,7 @@ export class AskUsageMeter {
     }
   }
 
-  private count(subject: AskUsageAttribution, usage: readonly TokenUsage[]): void {
+  private count(subject: AskUsageSubject, usage: readonly TokenUsage[]): void {
     if (this.deps.days === undefined) return;
     try {
       this.deps.days.flushDue(this.now().getTime());

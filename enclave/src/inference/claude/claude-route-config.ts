@@ -3,7 +3,7 @@ import type {
   InferenceEffort,
   InferencePurpose,
   ClaudeModelId,
-  ShadowArm,
+  InferenceArmId,
 } from '@folklore/contracts';
 
 // prettier-ignore
@@ -45,14 +45,11 @@ export interface ClaudeRouteConfig {
   };
   readonly batch: BatchRouteSettings;
   readonly callGraph: ClaudeCallGraph;
-  readonly arms: Readonly<Record<ShadowArm, ClaudeArmConfig>>;
-  readonly shadowOrgIdSha256: string;
+  readonly arms: Readonly<Record<Exclude<InferenceArmId, 'D'>, ClaudeArmConfig>>;
   readonly reviewSamplePercent: number;
 }
 
 const REVIEW_SAMPLE_PERCENT = 10;
-// Empty on purpose: no organization is shadowed, so FOLKLORE_OWN_ORG_ID_SHA256 must never feed this.
-const SHADOW_ORG_ID_SHA256 = '';
 
 export const CLAUDE_ROUTE_CONFIG: ClaudeRouteConfig = deepFreeze({
   identity: CLAUDE_ROUTE_IDENTITY,
@@ -62,6 +59,5 @@ export const CLAUDE_ROUTE_CONFIG: ClaudeRouteConfig = deepFreeze({
     R: { callGraph: 'reference', purposes: {} },
     B: { callGraph: 'v2', purposes: {} },
   },
-  shadowOrgIdSha256: SHADOW_ORG_ID_SHA256,
   reviewSamplePercent: REVIEW_SAMPLE_PERCENT,
 });

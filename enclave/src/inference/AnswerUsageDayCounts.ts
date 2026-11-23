@@ -1,4 +1,4 @@
-import type { AskUsageAttribution } from '@folklore/api';
+import type { AskUsageSubject } from '@folklore/contracts';
 import {
   USAGE_LOG_COST_BUCKET_MICROS,
   usageCostMicros,
@@ -14,7 +14,6 @@ export const ANSWER_USAGE_MAX_ROWS = 10_000;
 const ANSWER_USAGE_DAILY_EVENT = 'answer_usage_daily';
 const ANSWER_USAGE_DROPPED_EVENT = 'answer_usage_daily_dropped';
 const KEY_SEPARATOR = '|';
-const ORG_ONLY_SURFACE: AskUsageSurface = 'page_rewrite';
 
 interface SurfaceDay {
   readonly orgId: string;
@@ -31,7 +30,7 @@ export class AnswerUsageDayCounts {
 
   constructor(private readonly deps: { readonly logger: Logger; readonly now?: () => number }) {}
 
-  add(subject: AskUsageAttribution, usage: readonly TokenUsage[]): void {
+  add(subject: AskUsageSubject, usage: readonly TokenUsage[]): void {
     const paid = usage.filter((entry) => paidCallsOf(entry) > 0);
     if (paid.length === 0) return;
     const calls = paid.reduce((sum, entry) => sum + paidCallsOf(entry), 0);
@@ -58,8 +57,8 @@ export class AnswerUsageDayCounts {
     if (flushed > 0) this.logDropped();
   }
 
-  private rowFor(subject: AskUsageAttribution): SurfaceDay | undefined {
-    const surface = 'scope' in subject ? ORG_ONLY_SURFACE : subject.surface;
+  private rowFor(subject: AskUsageSubject): SurfaceDay | undefined {
+    const { surface } = subject;
     const dayStart = utcDayStart(new Date((this.deps.now ?? Date.now)())).getTime();
     const key = [subject.orgId, surface, utcDayKey(new Date(dayStart))].join(KEY_SEPARATOR);
     const existing = this.rows.get(key);

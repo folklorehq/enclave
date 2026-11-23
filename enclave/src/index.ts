@@ -75,7 +75,6 @@ import { HaltGate, poolHaltKey, tenantHaltKey } from './control/HaltGate.js';
 import { ActivityMonitor } from './control/ActivityMonitor.js';
 import { EnclaveFactRetriever } from './retrieval/EnclaveFactRetriever.js';
 import { EnclaveFactAnswerer } from './workers/EnclaveFactAnswerer.js';
-import { EnclavePageRewriter } from './workers/rewrite/EnclavePageRewriter.js';
 import { EnclaveAgentLoop } from './workers/agent/EnclaveAgentLoop.js';
 import { agentRetrieverDeps } from './workers/agent/agent-retriever-deps.js';
 import { AGENT_ACCESS_PROJECTION_TICK_MS } from './workers/agent/access/AgentAccessProjectionPass.js';
@@ -1548,15 +1547,10 @@ try {
         profile,
       ),
     });
-  // A user waits on an answer, so it keeps the short bound; a whole page outgrows it.
+  // A user waits on an answer, so it keeps the short bound.
   const answerInference = tenantInferenceMemo('interactive');
-  const rewriteInference = tenantInferenceMemo('batch');
   evictTenantInference = async (tenantId) => {
-    await Promise.all([
-      answerInference.evict(tenantId),
-      rewriteInference.evict(tenantId),
-      titleEviction.evict(tenantId),
-    ]);
+    await Promise.all([answerInference.evict(tenantId), titleEviction.evict(tenantId)]);
   };
   const askUsageLogger = logger.child({ component: 'ask_usage' });
   const askUsageDays = new AnswerUsageDayCounts({ logger: askUsageLogger });
@@ -1609,48 +1603,19 @@ try {
     factExcerptReaderFactory: buildRetriever,
     // grounded answers reuse the same per-request gated retrieval spine, then feed only
     // audience-visible decrypted bodies to the in-enclave TEE model — nothing leaves the enclave.
-    // Both seams resolve per request from the answer's own orgId: the retriever and the sealed
-    // generate cache above, so neither can bind to a boot-time tenant.
-    answerServiceFactory: (retrieverDeps, usage) => {
-      const meter = askUsageMeter(usage);
-      return new EnclaveFactAnswerer(
-        buildRetriever(retrieverDeps),
-        (caller, prompt, systemPrompt, shouldCache) =>
-          meter.generate({ orgId: caller.orgId, userId: caller.userId, surface: 'ask' }, () =>
-            answerInference
-              .get(caller.orgId)
-              .generate(prompt, systemPrompt, undefined, shouldCache),
-          ),
-      );
-    },
+    // Both seams resolve per request from the answer's own orgId: the retriever and the tenant's
+    // inference, so neither can bind to a boot-time tenant.
     streamingAnswerServiceFactory: (retrieverDeps, usage) => {
       const meter = askUsageMeter(usage);
-      return new EnclaveFactAnswerer(
-        buildRetriever(retrieverDeps),
-        (caller, prompt, systemPrompt, shouldCache) =>
-          meter.generate({ orgId: caller.orgId, userId: caller.userId, surface: 'ask' }, () =>
-            answerInference
-              .get(caller.orgId)
-              .generate(prompt, systemPrompt, undefined, shouldCache),
-          ),
-        (caller, request) =>
-          meter.stream({ orgId: caller.orgId, userId: caller.userId, surface: 'ask' }, () =>
-            streamOrBuffer(answerInference.get(caller.orgId), request),
-          ),
-      );
-    },
-    pageRewriterFactory: (usage) => {
-      const meter = askUsageMeter(usage);
-      return new EnclavePageRewriter((orgId, request) =>
-        meter.stream({ orgId, scope: 'org_only' }, () =>
-          streamOrBuffer(rewriteInference.get(orgId), request),
+      return new EnclaveFactAnswerer(buildRetriever(retrieverDeps), (caller, request) =>
+        meter.stream({ orgId: caller.orgId, userId: caller.userId, surface: 'ask' }, () =>
+          streamOrBuffer(answerInference.get(caller.orgId), request),
         ),
       );
     },
     // synthesized wiki text is ciphertext at rest; the read path decrypts audience-visible
     // blocks here, in-enclave, over the requesting tenant's sealed key (resolved from `ref.orgId`).
     wikiContentDecryptor,
-    shadowContentDecryptor: wikiContentDecryptor,
     // mined draft→edit prose is sealed to the requesting tenant's key, in-enclave only.
     wikiEditSealer: new EnclaveWikiEditSealer(resolveTenant),
     wikiPublicationSealer: new EnclaveWikiPublicationSealer(resolveTenant),

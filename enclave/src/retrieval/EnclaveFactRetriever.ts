@@ -202,12 +202,6 @@ export class EnclaveFactRetriever implements FactRetriever, FactExcerptReader {
   }
 
   // Ranks only the facts the caller's lens allows; the per-fact audience gate still runs on every hit.
-  async retrieveInLens(params: LensSearchParams, bodyLimit: number): Promise<LensRetrieval> {
-    return this.retrieveInLensWith(params, bodyLimit, () =>
-      this.deps.resolveAudienceAccess(params.orgId, params.userId),
-    );
-  }
-
   async retrieveInLensForAccess(
     params: LensSearchParams,
     access: AudienceAccess,

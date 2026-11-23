@@ -3,7 +3,6 @@ import type { KmsKeyringNode } from '@aws-crypto/client-node';
 import {
   SEALED_TITLE_KINDS,
   type SealedTitleKind,
-  type ShadowArm,
   type WikiCommentField,
 } from '@folklore/contracts';
 import { isLowercaseRfcUuid } from '@folklore/utils';
@@ -20,7 +19,6 @@ const WIKI_BLOCK_PURPOSE = 'wiki-block';
 const TEAM_ONBOARDING_ARTICLE_PURPOSE = 'team-onboarding-article';
 const TEAM_ONBOARDING_BLOCK_PURPOSE = 'team-onboarding-block';
 const WIKI_PAGE_STATE_PURPOSE = 'wiki-page-state';
-const WIKI_SHADOW_PURPOSE = 'wiki-shadow';
 const COLLAB_SNAPSHOT_PURPOSE = 'collab-snapshot';
 const WIKI_COMMENT_PURPOSE = 'wiki-comment';
 const WIKI_FEEDBACK_PURPOSE = 'wiki-feedback';
@@ -199,19 +197,7 @@ export interface TeamOnboardingBlockRef extends TeamOnboardingArticleRef {
 
 export type WikiPageStateRef = WikiArticleRef;
 
-// The floor is bound so a plaintext floor lowered after sealing no longer opens the envelope.
-export interface WikiShadowRef extends WikiArticleRef {
-  wikiRequestId: string;
-  arm: ShadowArm;
-  side: 'variant' | 'production';
-  sensitivityFloor: SensitivityLevel;
-}
-
-export type SealedEnvelopePurpose =
-  | 'wiki-block'
-  | 'team-onboarding-block'
-  | 'wiki-page-state'
-  | 'wiki-shadow';
+export type SealedEnvelopePurpose = 'wiki-block' | 'team-onboarding-block' | 'wiki-page-state';
 
 type SealedBlockHeader = Omit<SealedContentEnvelopeV1, 'ciphertext' | 'purpose'> & {
   purpose: SealedEnvelopePurpose;
@@ -476,26 +462,6 @@ export class EnclaveCrypto {
       expected.orgId,
       WIKI_PAGE_STATE_PURPOSE,
       this.pageStateIdentity(expected),
-    );
-  }
-
-  async sealWikiShadowEnvelope(
-    plaintext: Buffer,
-    ref: WikiShadowRef,
-  ): Promise<SealedContentEnvelopeV1> {
-    return this.sealBlockEnvelope(
-      plaintext,
-      this.sealedBlockHeader(ref.orgId, WIKI_SHADOW_PURPOSE),
-      this.shadowIdentity(ref),
-    );
-  }
-
-  async openWikiShadowEnvelope(envelope: unknown, expected: WikiShadowRef): Promise<Buffer> {
-    return this.openIdentifiedEnvelope(
-      envelope,
-      expected.orgId,
-      WIKI_SHADOW_PURPOSE,
-      this.shadowIdentity(expected),
     );
   }
 
@@ -946,16 +912,6 @@ export class EnclaveCrypto {
       orgId: ref.orgId,
       themeId: ref.themeId,
       audienceId: audienceKey(ref.audienceId),
-    };
-  }
-
-  private shadowIdentity(ref: WikiShadowRef): Record<string, string> {
-    return {
-      ...this.pageStateIdentity(ref),
-      wikiRequestId: ref.wikiRequestId,
-      arm: ref.arm,
-      side: ref.side,
-      sensitivityFloor: ref.sensitivityFloor,
     };
   }
 

@@ -55,14 +55,6 @@ export function withRetirement(
   };
 }
 
-export function repositoryRetirementKey(
-  deploymentId: string,
-  generation: string,
-  repoNodeId: string,
-): string {
-  return `${deploymentId}:${generation}:${repoNodeId}`;
-}
-
 export function erasePassKey(eraseId: string, pass: 1 | 2): string {
   return `${eraseId}:${pass}`;
 }
