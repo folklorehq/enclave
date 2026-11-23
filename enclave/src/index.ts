@@ -50,7 +50,6 @@ import {
 } from './directory/TenantEntitlementProjectionRunner.js';
 import { ControlPlaneTenantMemberIdentityLinkSource } from './identity/ControlPlaneTenantMemberIdentityLinkSource.js';
 import { MemberIdentityLinkAppliedReader } from './identity/MemberIdentityLinkAppliedReader.js';
-import { ExportedPageRefReader } from './pull/ExportedPageRefReader.js';
 import { MemberIdentityLinkEmitter } from './identity/MemberIdentityLinkEmitter.js';
 import {
   MEMBER_LINK_MAX_BACKOFF_MS,
@@ -70,7 +69,6 @@ import { ThemeSnapshotFactSource } from './workers/ThemeSnapshotFactSource.js';
 import { AnswerUsageDayCounts } from './inference/AnswerUsageDayCounts.js';
 import { AskUsageMeter } from './inference/AskUsageMeter.js';
 import { recordTokenUsage } from './inference/TokenUsageScope.js';
-import { fetchLinkPreview } from './preview/preview-client.js';
 import { HaltGate, poolHaltKey, tenantHaltKey } from './control/HaltGate.js';
 import { ActivityMonitor } from './control/ActivityMonitor.js';
 import { EnclaveFactRetriever } from './retrieval/EnclaveFactRetriever.js';
@@ -1750,7 +1748,6 @@ const entitlementProjectionRunner =
       })
     : undefined;
 entitlementProjectionRunner?.start();
-const exportedPageRefReader = new ExportedPageRefReader(() => runtimeDatabaseLease.database());
 const memberIdentityLinkEmitter = new MemberIdentityLinkEmitter({
   sqs,
   processedQueueUrl: PROCESSED_QUEUE_URL,
@@ -1846,7 +1843,6 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
     upstreamGate,
     synthesisQueueUrl: SYNTHESIS_REQUEST_QUEUE_URL,
     processedQueueUrl: PROCESSED_QUEUE_URL,
-    previewFetcher: fetchLinkPreview,
     logger,
     outputAuthenticator,
     outputIdentity: () => ({
@@ -1913,7 +1909,6 @@ const router = new TenantMessageRouter({
   jiraWebhookAuthenticator,
   recordJiraWebhookDelivery,
   mintGitHubInstallationToken,
-  exportedPageRefs: exportedPageRefReader,
   canaryProofSigner: {
     sign: (payload) => poolRuntimeAttestation.signCurrent(payload),
     sessionPublicKey: () => poolRuntimeAttestation.currentSessionPublicKey(),

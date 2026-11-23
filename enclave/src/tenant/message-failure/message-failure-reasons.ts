@@ -146,7 +146,6 @@ export const NOT_PROCESSED_REASONS = [
   'connection_response_invalid',
   'connection_integrity_failed',
   'connection_decrypt_failed',
-  'export_refs_unavailable',
   'resource_scope_unavailable',
   'cursor_store_unsealed',
 ] as const satisfies readonly PullNotProcessedReason[];

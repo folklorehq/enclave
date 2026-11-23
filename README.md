@@ -86,11 +86,6 @@ enclave/
 ingest-proxy/
   src/
     handler.ts        API Gateway Lambda — ECIES encryption of inbound webhooks
-
-preview-proxy/
-  src/
-    ssrf.ts           SSRF egress guard — public-unicast-only address allow-list
-    preview-fetch.ts  redirect-revalidating fetch for link-preview enrichment
 ```
 
 **What is not in this repository**: the EIF build configuration, product logic (knowledge synthesis, scoring, model prompts, the ingest pipeline steps), and the HNSW index format. Those are compiled into the EIF and not part of the auditable trust boundary — boot and orchestration files here may reference them by interface even though their implementations are not published.

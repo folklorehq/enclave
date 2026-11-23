@@ -45,7 +45,6 @@ import { ResourceScopeUnavailableError } from '../resource-scope/resource-scope-
 import { TenantResourceScope } from '../resource-scope/TenantResourceScope.js';
 import { errorType } from '../logging/error-fields.js';
 import { logger } from '../logger.js';
-import type { ExportedPageRefReaderPort } from '../pull/ExportedPageRefReader.js';
 
 export interface IngestMessage {
   encryption_version: 2;
@@ -137,7 +136,6 @@ export interface TenantMessageRouterDeps {
   canaryProofSigner?: CanaryProofSigner;
   canaryProofSink?: (proof: CanaryAuthorizationOutcomeProof) => Promise<void>;
   canaryAuthorizationConsumer?: CanaryAuthorizationConsumer;
-  exportedPageRefs?: ExportedPageRefReaderPort;
 }
 
 export interface CanaryProofSigner {
@@ -233,7 +231,6 @@ export class TenantMessageRouter {
         mintGitHubInstallationToken: this.deps.mintGitHubInstallationToken,
         ...(codebaseSelectionStore ? { codebaseSelectionStore } : {}),
         ...this.resourceScopeDeps(context, queueTenantId),
-        ...(this.deps.exportedPageRefs ? { exportedPageRefs: this.deps.exportedPageRefs } : {}),
         ...(options.signal ? { signal: options.signal } : {}),
       });
       if (result.outcome === 'not_processed') {

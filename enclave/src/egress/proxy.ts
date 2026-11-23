@@ -1,4 +1,4 @@
-import { EnvHttpProxyAgent, ProxyAgent, setGlobalDispatcher } from 'undici';
+import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 
 // Lock-step with the socat forwarder in enclave/entrypoint.sh and the vsock bridge in
@@ -52,15 +52,4 @@ let awsProxyAgent: HttpsProxyAgent<string> | undefined;
 // AWS SDK clients only: each request is signed on its own, so a pooled tunnel carries no tenant state.
 export function awsHttpsProxyAgent(): HttpsProxyAgent<string> {
   return (awsProxyAgent ??= new HttpsProxyAgent(EGRESS_PROXY_URL, AWS_PROXY_AGENT_OPTIONS));
-}
-
-let exportProxyDispatcher: ProxyAgent | undefined;
-
-// A fetch bound explicitly to the CONNECT egress proxy for the outbound wiki-export clients
-// — belt-and-suspenders over the global dispatcher, so the export write can never dial
-// a destination host directly and fails closed against the host allowlist.
-export function proxiedExportFetch(): typeof globalThis.fetch {
-  const dispatcher = (exportProxyDispatcher ??= new ProxyAgent(EGRESS_PROXY_URL));
-  return ((input, init) =>
-    globalThis.fetch(input, { ...init, dispatcher } as RequestInit)) as typeof globalThis.fetch;
 }

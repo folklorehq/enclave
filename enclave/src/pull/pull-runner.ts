@@ -63,7 +63,6 @@ import {
   DOCUMENT_BODY_RELEASE,
   documentBodyModeFor,
 } from './document-body-release.js';
-import type { ExportedPageRefReaderPort } from './ExportedPageRefReader.js';
 import { S3PullCursorStore } from './S3PullCursorStore.js';
 import { SingleFlight } from './SingleFlight.js';
 import { boundGitHubInstallationId } from './github-installation-binding.js';
@@ -184,7 +183,6 @@ export interface PullRunnerDeps {
   }) => Promise<{ accessToken: string; expiresAt: string }>;
   codebaseSelectionStore?: Pick<CodebaseSelectionStore, 'read'>;
   resourceScope: Pick<TenantResourceScope, 'read' | 'transitionBackfill'>;
-  exportedPageRefs?: ExportedPageRefReaderPort;
   signal?: AbortSignal;
 }
 
@@ -211,7 +209,6 @@ export type PullRunResult =
         | 'connection_response_invalid'
         | 'connection_integrity_failed'
         | 'connection_decrypt_failed'
-        | 'export_refs_unavailable'
         | 'resource_scope_unavailable'
         | 'cursor_store_unsealed';
       sourceId: string;
@@ -496,7 +493,6 @@ export async function resolveSourceToken(
 
 export interface PullBodyPolicy {
   documentBodies: DocumentBodyMode;
-  exportedPageIds?: ReadonlySet<string>;
 }
 
 export type PullConnectorBuilder = (
@@ -538,7 +534,6 @@ export function buildConnector(
         }
       : {}),
     ...(bodyPolicy ? { documentBodies: bodyPolicy.documentBodies } : {}),
-    ...(bodyPolicy?.exportedPageIds ? { exportedPageIds: bodyPolicy.exportedPageIds } : {}),
   };
   return createPullConnector(kind, deps);
 }
@@ -603,11 +598,7 @@ export async function runPull(
   if (!token) {
     return notProcessed(message, 'token_missing');
   }
-  const exportedPageIds = await loadExportedPageIds(message.kind, mode, deps);
-  if (exportedPageIds === EXPORT_REFS_UNAVAILABLE) {
-    return notProcessed(message, 'export_refs_unavailable');
-  }
-  const bodyPolicy = pullBodyPolicy(mode, exportedPageIds);
+  const bodyPolicy = pullBodyPolicy(mode);
   const connector = buildPullConnector(
     connectorBuilder,
     message.kind,
@@ -894,36 +885,8 @@ function selectionForCodeConnector(
   };
 }
 
-const EXPORT_REFS_UNAVAILABLE = 'unavailable';
-
-// Only a mode that reads bodies must fail closed: off keeps today's title-only pull, which the database never blocked.
-async function loadExportedPageIds(
-  kind: string,
-  mode: DocumentBodyMode,
-  deps: PullRunnerDeps,
-): Promise<ReadonlySet<string> | undefined | typeof EXPORT_REFS_UNAVAILABLE> {
-  if (kind !== NOTION_KIND) return undefined;
-  const ids = await readExportedPageIds(deps);
-  if (ids !== undefined) return ids;
-  return mode === 'off' ? undefined : EXPORT_REFS_UNAVAILABLE;
-}
-
-async function readExportedPageIds(deps: PullRunnerDeps): Promise<ReadonlySet<string> | undefined> {
-  if (!deps.exportedPageRefs) return undefined;
-  try {
-    const ids = await deps.exportedPageRefs.notionPageIds(deps.orgId);
-    return ids === 'database_unavailable' ? undefined : ids;
-  } catch {
-    return undefined;
-  }
-}
-
-function pullBodyPolicy(
-  mode: DocumentBodyMode,
-  exportedPageIds: ReadonlySet<string> | undefined,
-): PullBodyPolicy | undefined {
-  if (mode === 'off' && exportedPageIds === undefined) return undefined;
-  return { documentBodies: mode, ...(exportedPageIds ? { exportedPageIds } : {}) };
+function pullBodyPolicy(mode: DocumentBodyMode): PullBodyPolicy | undefined {
+  return mode === 'off' ? undefined : { documentBodies: mode };
 }
 
 function buildPullConnector(
