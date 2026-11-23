@@ -1,11 +1,11 @@
 import type { Cache, Logger } from '@folklore/core';
 
-/** Redis key the operator break-glass halt command sets/clears. */
+/** Host-wide halt flag; still read fail-closed, though no writer sets it since operators pause through the license key. */
 export function haltKey(deploymentId: string): string {
   return `control:halt:${deploymentId}`;
 }
 
-/** Redis key the billing/commercial enforcement sets/clears — separate owner from the break-glass halt. */
+/** Redis key the agent sets from license status: billing suspension, host pause and fleet stop. */
 export function licenseHaltKey(deploymentId: string): string {
   return `control:license-halt:${deploymentId}`;
 }
