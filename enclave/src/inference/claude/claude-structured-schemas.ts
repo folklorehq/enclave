@@ -11,8 +11,6 @@ export const CLAUDE_STRUCTURED_SCHEMA_DIGESTS: ReadonlyMap<string, string> = new
   ['report_visual_warrant', '40286383c4f56fd4928a123fa7219311c1db75e19b45607709e0efd6f86d8800'],
   ['report_support', '668edccaf60c0164199450ae5825638db3ff67f00d8a510d41687ea1c7f287b9'],
   ['report_page_issues', '771dfc713563581813c04e28dbd05b39b8d77e4aed82accd1d9cf473f5130238'],
-  ['report_page_check', 'ca6fca3011faece0ed194bb29f258153e47672f36118b65fe8fdfb34dd09994a'],
-  ['report_article_check', '1f2e30dd00c17d67e99eefb9408c8a9a1bd9ba2b29588a6c69b33b82a8074cab'],
   ['plan_page_outline', '68fad120b2d3e65e4581ac9817024201932e98c5ea1230b586417e90d61021fd'],
 ]);
 
