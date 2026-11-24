@@ -22,7 +22,7 @@ export interface AnthropicTransport {
   close(): Promise<void>;
 }
 
-export interface AnthropicTransportOptions {
+interface AnthropicTransportOptions {
   readonly allowedModels?: readonly string[];
   readonly caPems?: readonly string[];
   readonly proxyPort?: number;

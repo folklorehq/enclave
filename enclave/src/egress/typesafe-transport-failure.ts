@@ -5,7 +5,7 @@ import { TYPESAFE_REQUEST_REFUSED, TYPESAFE_TRANSPORT_CLOSED } from './typesafe-
 export const TYPESAFE_TLS_UNTRUSTED = 'typesafe_tls_untrusted';
 export const TYPESAFE_UPSTREAM_TIMEOUT_CAUSE = PINNED_UPSTREAM_TIMEOUT;
 
-export type TypeSafeTransportFailure =
+type TypeSafeTransportFailure =
   | typeof TYPESAFE_TLS_UNTRUSTED
   | typeof TYPESAFE_UPSTREAM_TIMEOUT_CAUSE
   | typeof TYPESAFE_REQUEST_REFUSED

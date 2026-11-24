@@ -15,7 +15,7 @@ import {
 } from '../pull/source-connections-client.js';
 import type { SourceResourceLister, SourceResourceListing } from './ports.js';
 
-export interface EnclaveSourceResourceListerDeps {
+interface EnclaveSourceResourceListerDeps {
   controlPlaneUrl: string;
   runtimeDeploymentId: string;
   agentToken: () => string;

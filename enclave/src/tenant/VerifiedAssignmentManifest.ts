@@ -36,15 +36,10 @@ export function canonicalAssignmentManifestPublicKeySpki(value: string): string 
 
 export function assignmentManifestPublicKeyForVerifiedBoot(
   bootManifest: { assignmentManifestPublicKeySpki?: string } | undefined,
-  configuredPublicKey: string,
 ): string {
   const signedPublicKey = bootManifest?.assignmentManifestPublicKeySpki;
   if (!signedPublicKey) {
     throw new Error('assignment_manifest_verifier_unavailable');
-  }
-  if (!configuredPublicKey) return signedPublicKey;
-  if (canonicalAssignmentManifestPublicKeySpki(configuredPublicKey) !== signedPublicKey) {
-    throw new Error('assignment_manifest_verifier_mismatch');
   }
   return signedPublicKey;
 }

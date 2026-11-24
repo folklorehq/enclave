@@ -26,7 +26,7 @@ const embeddingsResponseSchema = z
 
 type EmbeddingsResponse = z.infer<typeof embeddingsResponseSchema>;
 
-export interface OpenAIEmbeddingsBackendDeps {
+interface OpenAIEmbeddingsBackendDeps {
   readonly fetch: typeof globalThis.fetch;
   readonly credentials: Pick<OpenAICredentialSource, 'key' | 'invalidate'>;
   readonly identity: OpenAIEmbedRouteIdentity;

@@ -1,5 +1,4 @@
 export const THEME_SYNTHESIS_PHASES = [
-  'load_snapshot',
   'load_index',
   'decrypt',
   'embed',

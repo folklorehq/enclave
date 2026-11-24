@@ -3,7 +3,7 @@ import type { TransientRetryWindows } from './TransientInferenceRetry.js';
 
 export type InferenceLatencyProfile = 'batch' | 'interactive';
 
-export interface PublicAciOperationLimits {
+interface PublicAciOperationLimits {
   readonly requestTimeoutMs: number;
   readonly operationBudgetMs: number;
   readonly checkpointAgeMs: number;

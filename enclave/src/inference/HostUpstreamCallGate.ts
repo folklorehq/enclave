@@ -19,10 +19,10 @@ import {
 } from './upstream-observation.js';
 import { UpstreamPaceTracker } from './UpstreamPaceTracker.js';
 
-export const ORG_WINDOW_SHARE = 0.8;
-export const SYNTHESIS_RESERVED_SHARE = 0.25;
+const ORG_WINDOW_SHARE = 0.8;
+const SYNTHESIS_RESERVED_SHARE = 0.25;
 export const DEFAULT_UPSTREAM = 'default';
-export const OVERLOAD_STATUSES: ReadonlySet<number> = new Set([429, 503, 529]);
+const OVERLOAD_STATUSES: ReadonlySet<number> = new Set([429, 503, 529]);
 export const MESSAGE_ROTATION_HISTORY_LIMIT = 1_024;
 export const NSM_PASS_THROUGH_OVER_CEILING_CODE = 'nsm_pass_through_over_ceiling';
 

@@ -20,7 +20,7 @@ export interface TypeSafeTransport {
   close(): Promise<void>;
 }
 
-export interface TypeSafeTransportOptions {
+interface TypeSafeTransportOptions {
   readonly caPems?: readonly string[];
   readonly proxyPort?: number;
   readonly fetchImpl?: typeof globalThis.fetch;

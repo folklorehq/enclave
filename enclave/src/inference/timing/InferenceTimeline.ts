@@ -19,7 +19,7 @@ export interface SpanFailure {
   readonly errorCode?: string;
 }
 
-export interface FinishedSpan {
+interface FinishedSpan {
   readonly phase: InferenceSpanPhase;
   readonly model?: string;
   readonly role?: InferenceModelRole;

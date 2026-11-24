@@ -9,7 +9,7 @@ import { highWaterLogEntryV1Schema } from '@folklore/contracts';
 import { decode, encode, rfc8949EncodeOptions } from 'cborg';
 import type { DurableGenerationHighWaterVerifierPort } from './DurableGenerationHighWaterClient.js';
 
-export interface BootBoundGenerationHighWaterVerifierConfig {
+interface BootBoundGenerationHighWaterVerifierConfig {
   readonly config: GenerationHighWaterRuntimeConfigV1;
 }
 

@@ -2,7 +2,7 @@ import { GetObjectCommand, NoSuchKey, PutObjectCommand, type S3Client } from '@a
 import { logger } from '../logger.js';
 import type { EnclaveCrypto } from '../crypto/esdk.js';
 
-export interface S3PullCursorStoreDeps {
+interface S3PullCursorStoreDeps {
   s3: S3Client;
   crypto: EnclaveCrypto;
   bucket: string;
@@ -10,9 +10,9 @@ export interface S3PullCursorStoreDeps {
   deploymentId: string;
 }
 
-export type SealedCursorRead = { found: false } | { found: true; value: string };
+type SealedCursorRead = { found: false } | { found: true; value: string };
 
-export type SealedCursorState =
+type SealedCursorState =
   | { readonly state: 'present'; readonly value: string }
   | { readonly state: 'absent'; readonly value?: undefined }
   | { readonly state: 'unreadable'; readonly value?: undefined };

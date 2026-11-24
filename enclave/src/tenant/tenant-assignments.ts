@@ -1,5 +1,4 @@
 import {
-  type AssignmentManifest,
   type LegacyAssignmentKeyRecordV1,
   type LegacyAssignmentReadFloorV1,
   type NormalizedAssignmentManifestV1,
@@ -7,7 +6,6 @@ import {
   type TenantAssignment,
   type VersionedTenantAssignment,
   canonicalQueueUrlSchema,
-  parseAssignmentManifest as parseContractManifest,
   parseAssignmentManifestWire as parseContractAssignmentManifestWire,
   parseVersionedAssignmentManifest as parseContractVersionedManifest,
   tenantBucketNames,
@@ -18,10 +16,8 @@ import {
 import { isLowercaseRfcUuid } from '@folklore/utils';
 import { bareKmsKeyId } from '../sealing/kms-key-arn.js';
 
-// The assignment shape is defined ONCE in @folklore/contracts (design §4.3) so the control-plane
-// producer and this consumer cannot drift. `parseAssignmentManifest` is the runtime path for a
-// manifest delivered on the check-in channel.
-export type { TenantAssignment, AssignmentManifest };
+// The assignment shape is defined once in the shared contracts so the control-plane producer and
+// this consumer cannot drift.
 
 /** Explicit bootstrap compatibility boundary for unsigned legacy assignment sources. */
 export function toInitialStorageKeyVersion(
@@ -38,29 +34,8 @@ export function toInitialStorageKeyVersion(
 
 const SQS_URL_PATTERN = /^https:\/\/sqs\.([^.]+)\.amazonaws\.com\/(\d{12})\/([^/]+)$/;
 
-export const ASSIGNMENT_MANIFEST_RESOURCE_SHARED = 'assignment_manifest_resource_shared';
-export const ASSIGNMENT_MANIFEST_RESOURCE_NAME_MISMATCH =
-  'assignment_manifest_resource_name_mismatch';
-
-export const SHARED_POOL_ENV_ASSIGNMENTS_REFUSED = 'shared_pool_env_assignments_refused';
-
-/** A pool boots with zero tenants and refuses env assignments: its tenants come from the signed manifest only. */
-export function resolveBootAssignments(env: NodeJS.ProcessEnv): TenantAssignment[] {
-  const hasEnvSet =
-    (env['TENANT_ASSIGNMENTS']?.trim() ?? '') !== '' || (env['TENANT_ID']?.trim() ?? '') !== '';
-  if (hasEnvSet) throw new Error(SHARED_POOL_ENV_ASSIGNMENTS_REFUSED);
-  return [];
-}
-
-/** Validates a check-in-delivered assignment manifest (design §4.3) via the shared routing guard, then enforces the registry's no-duplicate-tenant invariant. */
-export function parseAssignmentManifest(
-  manifest: unknown,
-  expectedPoolId: string,
-): TenantAssignment[] {
-  const parsed = parseContractManifest(manifest, expectedPoolId);
-  assertNoDuplicates(parsed.assignments);
-  return parsed.assignments;
-}
+const ASSIGNMENT_MANIFEST_RESOURCE_SHARED = 'assignment_manifest_resource_shared';
+const ASSIGNMENT_MANIFEST_RESOURCE_NAME_MISMATCH = 'assignment_manifest_resource_name_mismatch';
 
 /** Validates a signed assignment revision before the registry receives its assignment set. */
 export function parseVersionedAssignmentManifest(

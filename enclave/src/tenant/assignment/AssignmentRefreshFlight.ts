@@ -1,5 +1,5 @@
 export type IsCurrentRefresh = () => boolean;
-export type AssignmentRefresh = (isCurrent: IsCurrentRefresh) => Promise<void>;
+type AssignmentRefresh = (isCurrent: IsCurrentRefresh) => Promise<void>;
 
 // Coalesces a burst of wake signals into at most one extra refresh per gap.
 export const ASSIGNMENT_WAKE_MIN_GAP_MS = 1_000;

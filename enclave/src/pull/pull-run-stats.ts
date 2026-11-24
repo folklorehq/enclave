@@ -6,7 +6,7 @@ import type { ProcessedFact } from '../pipeline/index.js';
 
 export type PullRunStats = PullStatsSignal;
 
-export interface PullRunStatsInput {
+interface PullRunStatsInput {
   pulled: readonly NormalizedFact[];
   admitted: readonly NormalizedFact[];
   processed: readonly ProcessedFact[];

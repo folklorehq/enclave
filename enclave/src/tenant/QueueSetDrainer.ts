@@ -63,11 +63,11 @@ const MAX_LONG_POLL_SECONDS = 20;
 const RECEIVE_BATCH = 10;
 const BATCH_TARGET = 50;
 // Equals the tenant webhook queue's maxReceiveCount, pinned by a test against its definition.
-export const PULL_FAILURE_RETRY_THRESHOLD = 3;
+const PULL_FAILURE_RETRY_THRESHOLD = 3;
 // An empty pool has no queue long-poll to pace the loop, so wait before re-checking for an assignment.
 const EMPTY_POOL_POLL_INTERVAL_MS = 5_000;
 // Equals the tenant webhook queue's VisibilityTimeout, pinned by a test against its definition.
-export const MESSAGE_VISIBILITY_TIMEOUT_SECONDS = 120;
+const MESSAGE_VISIBILITY_TIMEOUT_SECONDS = 120;
 const MESSAGE_VISIBILITY_RENEWAL_MS = 40_000;
 const INGEST_VISIBILITY_RENEWAL_FAILED = 'INGEST_VISIBILITY_RENEWAL_FAILED';
 // Above one budgeted pull chunk with every embed slow; a route still running past it is wedged.
@@ -118,7 +118,7 @@ interface PullFailureState {
   emitted: boolean;
 }
 
-export interface QueueSetDrainerDeps {
+interface QueueSetDrainerDeps {
   sqs: SQSClient;
   s3: S3Client;
   router: TenantMessageRouter;

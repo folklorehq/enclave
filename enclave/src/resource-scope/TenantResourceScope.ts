@@ -6,27 +6,27 @@ import {
   type ResourceScopeBackfill,
 } from './ResourceScopeStore.js';
 
-export interface TenantResourceScopeWrite {
+interface TenantResourceScopeWrite {
   sourceKind: string;
   expectedRevision: number;
   mode: 'all' | 'selected';
   resourceIds: readonly string[];
 }
 
-export interface TenantResourceScopeTransition {
+interface TenantResourceScopeTransition {
   sourceKind: string;
   expectedRevision: number;
   from: Exclude<ResourceScopeBackfill, 'none'>;
   to: Exclude<ResourceScopeBackfill, 'owed'>;
 }
 
-export interface TenantResourceScopePause {
+interface TenantResourceScopePause {
   sourceKind: string;
   expectedRevision: number;
   paused: boolean;
 }
 
-export interface TenantResourceScopeLocation {
+interface TenantResourceScopeLocation {
   s3: S3Client;
   orgId: string;
   scope: { crypto: EnclaveCrypto; bucket: string; deploymentId: string };

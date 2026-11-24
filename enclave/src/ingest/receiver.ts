@@ -1,6 +1,5 @@
 /** Decrypts an ingest-Lambda webhook payload via ECIES (X25519 + HKDF-SHA256 + AES-256-GCM); must match ingest-proxy/src/lambdas/handler.ts exactly. */
 import { diffieHellman, hkdfSync, createDecipheriv, createPublicKey, KeyObject } from 'crypto';
-import { canaryAuthorizationAad, type CanaryAuthorization } from '@folklore/contracts';
 
 export interface EncryptedPayload {
   ephemeralPublicKey: string; // hex
@@ -8,15 +7,12 @@ export interface EncryptedPayload {
   ciphertext: string; // hex, includes 16-byte GCM auth tag appended
 }
 
-export interface IngestAuthenticationContext {
+interface IngestAuthenticationContext {
   version: 2;
   tenantId: string;
   source: string;
   type?: string;
   eventType?: string;
-  canaryRunId?: string;
-  requestId?: string;
-  canaryAuthorization?: CanaryAuthorization;
 }
 
 const X25519_RAW_KEY_BYTES = 32;
@@ -71,12 +67,10 @@ export function decryptPayload(
     source: context.source,
     type: context.type ?? null,
     event_type: context.eventType ?? null,
-    canary_run_id: context.canaryRunId ?? null,
-    request_id: context.requestId ?? null,
+    // The ingest proxy still seals these two keys as null; they stay so the AAD bytes match.
+    canary_run_id: null,
+    request_id: null,
   };
-  if (context.canaryAuthorization) {
-    aadFields['canary_authorization'] = canaryAuthorizationAad(context.canaryAuthorization);
-  }
   decipher.setAAD(Buffer.from(JSON.stringify(aadFields), 'utf8'));
   decipher.setAuthTag(authTag);
   return Buffer.concat([decipher.update(ciphertext), decipher.final()]);

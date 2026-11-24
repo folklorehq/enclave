@@ -16,7 +16,6 @@ import {
 } from './tenant/TenantPolicySnapshotRegistry.js';
 import type { TenantContext } from './tenant/tenant-context.js';
 import {
-  resolveBootAssignments,
   parseAssignmentManifestWire,
   assertAssignmentResourceNamesMatchTenants,
   assertNoSharedResources,
@@ -36,7 +35,6 @@ import { createAssignmentReactivation } from './tenant/quiescence/assignment-rea
 import { MANIFEST_RETRY_BACKOFF_ALARM } from './tenant/assignment/ManifestRetryBackoff.js';
 import { createTenantGenerationQuiescence } from './tenant/quiescence/tenant-generation-quiescence.js';
 import { TenantMessageRouter } from './tenant/tenant-message-router.js';
-import { HttpCanaryAuthorizationConsumer } from './ingest/HttpCanaryAuthorizationConsumer.js';
 import { ControlPlaneTenantDirectorySource } from './directory/ControlPlaneTenantDirectorySource.js';
 import {
   EntitlementProjectionApplier,
@@ -65,7 +63,6 @@ import { createTenantResolver } from './tenant/tenant-resolver.js';
 import { BoxServer } from './http/BoxServer.js';
 import { HostHeadroomGauge } from './workers/HostHeadroomGauge.js';
 import { SynthesisConsumer } from './workers/SynthesisConsumer.js';
-import { ThemeSnapshotFactSource } from './workers/ThemeSnapshotFactSource.js';
 import { AnswerUsageDayCounts } from './inference/AnswerUsageDayCounts.js';
 import { AskUsageMeter } from './inference/AskUsageMeter.js';
 import { recordTokenUsage } from './inference/TokenUsageScope.js';
@@ -105,9 +102,7 @@ import {
   setInferenceTelemetry,
   setInferenceTrustPolicy,
   setPublicInferenceTrustPolicy,
-  setVerifiedInferenceReceiptSink,
 } from './inference/phala.js';
-import { currentInferenceReceiptContext } from './inference/inference-receipt-context.js';
 import { type InferenceModel } from './inference/CachedInference.js';
 import { streamOrBuffer, type StreamingInference } from './inference/generate-stream.js';
 import {
@@ -187,9 +182,7 @@ import { logger } from './logger.js';
 import { contentFreeErrorType } from '@folklore/core';
 import {
   BufferedOpsTelemetryClient,
-  inferenceReceiptProofPayload,
   RedisOpsEventChannel,
-  type InferenceReceiptProof,
   type PoolTenantUsage,
 } from '@folklore/control-plane';
 import {
@@ -201,7 +194,6 @@ import {
   poolAssignmentAckKey,
   poolAssignmentGenerationFloorKey,
   poolAssignmentsKey,
-  type CanaryAuthorizationOutcomeProof,
   type InferenceProviderId,
   type NormalizedAssignmentManifestV1,
 } from '@folklore/contracts';
@@ -277,10 +269,7 @@ import {
   verifyAssignmentManifestWire,
   type VerifiedAssignmentManifest,
 } from './tenant/VerifiedAssignmentManifest.js';
-import {
-  DEVELOPMENT_ENCLAVE_OUTPUT_KEY,
-  Ed25519EnclaveOutputAuthenticator,
-} from '@folklore/crypto';
+import { Ed25519EnclaveOutputAuthenticator } from '@folklore/crypto';
 import { EnclaveBootStatus } from './boot/EnclaveBootStatus.js';
 import { enclaveOutputSignerFailureCode } from './boot/enclave-output-signer-failure-code.js';
 import { bootModuleLoadGuard } from './boot/boot-module-load-guard.js';
@@ -312,10 +301,7 @@ const UNSUBSCRIBE_SECRET_SSM_PATH = process.env['UNSUBSCRIBE_SECRET_SSM_PATH'] ?
 // what authenticates the enclave's fetch of those encrypted connections.
 const CONTROL_PLANE_URL = process.env['CONTROL_PLANE_URL'] ?? '';
 const DEPLOYMENT_ID = process.env['DEPLOYMENT_ID'] ?? '';
-const OUTPUT_DEPLOYMENT_ID =
-  DEPLOYMENT_ID || (process.env['NODE_ENV'] === 'development' ? 'development' : '');
 const AGENT_TOKEN_SSM_PATH = process.env['AGENT_TOKEN_SSM_PATH'] ?? '';
-const OAUTH_PROVIDER_CONFIG_JSON = process.env['OAUTH_PROVIDER_CONFIG_JSON'] ?? '';
 // Break-glass halt flag lives in the shared Redis, reached over the in-enclave
 // vsock proxy. Required — the enclave refuses to boot without it (see below).
 const REDIS_URL = process.env['REDIS_URL'] ?? '';
@@ -335,7 +321,7 @@ const secretsManager = new SecretsManagerClient({ region: REGION, ...awsShortCal
 
 // A failed read stops the boot by name: logged inside the enclave, it surfaced later as an unnamed crash.
 async function loadInferenceKey(): Promise<void> {
-  if (!TEE_API_KEY_SSM_PATH || process.env['TEE_API_KEY']) return;
+  if (!TEE_API_KEY_SSM_PATH) return;
   process.env['TEE_API_KEY'] = await new InferenceApiKeyLoader(
     new AwsBootManifestSsmParameters(ssm),
   ).load(TEE_API_KEY_SSM_PATH);
@@ -358,7 +344,7 @@ async function loadUnsubscribeSecret(): Promise<void> {
 // The token's key releases it only to an attested enclave, so SSM cannot decrypt it for us; a
 // failed read stops the boot with its code, because without the token nothing reaches the control plane.
 async function loadAgentToken(): Promise<void> {
-  if (!AGENT_TOKEN_SSM_PATH || process.env['AGENT_TOKEN']) return;
+  if (!AGENT_TOKEN_SSM_PATH) return;
   process.env['AGENT_TOKEN'] = await new AgentTokenLoader(
     new AwsBootManifestSsmParameters(ssm),
     attestedRecipientDecryptor,
@@ -373,18 +359,15 @@ async function loadAgentToken(): Promise<void> {
 const POOL_ID = process.env['POOL_ID']?.trim() ?? '';
 assertPoolId(POOL_ID);
 
-const ASSIGNMENT_MANIFEST_PUBLIC_KEY = process.env['ASSIGNMENT_MANIFEST_PUBLIC_KEY'] ?? '';
-
-// Stage 2 (design §5): each assigned tenant gets its own single-CMK context, keyed in the registry
-// by tenantId so no keyed op can reach another tenant's material. The applier is the one path that
-// builds/tears down contexts — used for the boot set here and for live (re)assignment below (§4.3).
-const bootAssignments = resolveBootAssignments(process.env);
+// Each assigned tenant gets its own single-CMK context, keyed in the registry by tenantId so no
+// keyed op can reach another tenant's material. The appliers are the only path that builds and
+// tears down contexts, on every (re)assignment from the signed manifest.
 // Pool-scoped idle (§5): the wake Lambda tracks the pool, so the host reports idle under the pool path.
 const idleSsmPath = `/folklore/pool/${POOL_ID}/idle`;
 
 // Set once the boot manifest is verified, which happens after this factory is constructed but
 // before anything seals a mnemonic — hence the accessor rather than a value (audit F2). Held here
-// rather than read back off runtimeAttestation because enable/start null that handle on failure,
+// rather than read back off runtimeAttestation because a failed boot step nulls that handle,
 // and a later first boot must not read a discarded manifest as an absent one.
 let verifiedBootManifest: VerifiedBootManifest | undefined;
 type LiveTenantPolicySnapshot = TenantPolicySnapshotLike & VerifiedActivePolicySnapshotV1;
@@ -407,7 +390,6 @@ const routingTables = new RoutingTableRefresher({
   onAlarm: (alarm) => bootStatus.recordAlarm(alarm),
   onApplied: (version) => {
     logger.info('inference_routing_table_applied', { revision: version });
-    bootStatus.recordRoutingVersion(version);
   },
 });
 const claudeRoutes = new InferenceRouteResolver(routingTables);
@@ -535,7 +517,6 @@ const tenantFactory = new TenantContextFactory({
         }
       : undefined,
   activePolicySnapshotFor: (tenantId) => activePolicySnapshotFor(tenantId),
-  emitAuthors: true,
   upstreamGate: new BackgroundAwareUpstreamGate(upstreamGate, undefined, {
     onWaitStalled: () => bootStatus.recordAlarm(GATE_WAIT_STALLED_CODE),
   }),
@@ -628,7 +609,7 @@ const assignmentApplier = new TenantAssignmentApplier(
     }
   },
   undefined,
-  DEPLOYMENT_ID,
+  undefined,
   reactivateAssignment,
   async (tenantId) => {
     tenantRequests.holdWork(tenantId);
@@ -775,15 +756,7 @@ let runtimeAttestation =
       new AwsBootManifestSsmParameters(ssm),
       { recipientDecryptor: attestedRecipientDecryptor },
     ),
-    nsm: { attest: getAttestationDoc },
     s3,
-    isTenantAssigned: () => registry.size > 0,
-    isTenantApiReady: () => apiContainer !== undefined,
-    getIngestPublicKey: () => {
-      const context = registry.all()[0];
-      return context ? deriveIngestKeypair(context.masterKey).publicKeyRaw : Uint8Array.from([]);
-    },
-    getRuntimeDatabaseReceipt: () => runtimeDatabaseLease.receipt(),
     logger: logger.child({ component: 'attestation' }),
   }) ?? null;
 bootStatus.reach('attestation_configured');
@@ -794,23 +767,20 @@ runtimeAttestation = await initializeRuntimeAttestationForBoot(
     bootStatus.begin('boot_policy_load');
     verifiedBootManifest = prepared?.verifiedManifest();
     assertSharedPoolIdentity({
-      nodeEnv: process.env['NODE_ENV'],
       poolId: POOL_ID,
       verifiedOrgId: verifiedBootManifest?.orgId,
       verifiedDeploymentId: verifiedBootManifest?.deploymentId,
     });
     const bootManifest = verifiedBootManifest;
-    if (process.env['NODE_ENV'] === 'production') {
-      if (!bootManifest?.generationHighWaterRuntimeConfig) {
-        throw new Error('generation_high_water_runtime_config_missing');
-      }
+    if (!bootManifest?.generationHighWaterRuntimeConfig) {
+      throw new Error('generation_high_water_runtime_config_missing');
     }
     const activePolicyCarrier = bootManifest?.activePolicyCarrier;
     const activePolicyBootTrust = bootManifest?.activePolicyBootTrust;
     if (activePolicyCarrier && !activePolicyBootTrust) {
       throw new Error('boot_manifest_active_policy_boot_trust_unavailable');
     }
-    if (process.env['NODE_ENV'] === 'production' && !activePolicyBootTrust) {
+    if (!activePolicyBootTrust) {
       throw new Error('shared_pool_active_policy_boot_trust_unavailable');
     }
     if (bootManifest && activePolicyBootTrust) {
@@ -879,26 +849,14 @@ runtimeAttestation = await initializeRuntimeAttestationForBoot(
     const signedPolicy = verifiedBootManifest?.inferenceAttestation;
     const trustPolicy = verifiedBootManifest?.inferenceTrustPolicy;
     const providerPolicy = verifiedBootManifest?.providerInferenceTrustPolicy;
-    if (
-      process.env['NODE_ENV'] === 'production' &&
-      !signedPolicy &&
-      !trustPolicy &&
-      !providerPolicy
-    ) {
+    if (!signedPolicy && !trustPolicy && !providerPolicy) {
       throw new Error('signed_inference_trust_policy_unavailable');
     }
     if (providerPolicy) setPublicInferenceTrustPolicy(providerPolicy);
     else if (trustPolicy) setInferenceTrustPolicy(trustPolicy);
     if (signedPolicy) configureInferenceAttestation(signedPolicy);
     else if (!trustPolicy && !providerPolicy) configureLocalInferencePolicy();
-    if (process.env['NODE_ENV'] === 'production') {
-      assignmentManifestPublicKeyForVerifiedBoot(
-        verifiedBootManifest,
-        ASSIGNMENT_MANIFEST_PUBLIC_KEY,
-      );
-    }
-    bootStatus.begin('boot_assignments_apply');
-    await assignmentApplier.apply(bootAssignments);
+    assignmentManifestPublicKeyForVerifiedBoot(verifiedBootManifest);
   },
   logger.child({ component: 'attestation' }),
 );
@@ -921,7 +879,6 @@ const poolRuntimeAttestationListener = new NodeRuntimeAttestationListener(
 const poolRuntimeAttestationServer = new RuntimeAttestationServer({
   collect: (nonce) => poolRuntimeAttestation.collect(nonce),
 });
-console.log('tenant contexts assigned', { count: registry.size });
 
 bootStatus.begin('inference_key_read');
 await loadInferenceKey();
@@ -949,15 +906,12 @@ function activeQueueAssignments() {
 
 function outputAssignmentGeneration(): number {
   const generation =
-    POOL_ID && activePolicyGeneration > 0
+    activePolicyGeneration > 0
       ? activePolicyGeneration
-      : POOL_ID
-        ? policyAssignmentApplier.generation() > 0
-          ? activePolicyGeneration
-          : assignmentApplier.generation()
-        : (verifiedBootManifest?.configurationGeneration ?? 0);
+      : policyAssignmentApplier.generation() > 0
+        ? activePolicyGeneration
+        : assignmentApplier.generation();
   if (!Number.isSafeInteger(generation) || generation < 1) {
-    if (process.env['NODE_ENV'] === 'development') return 1;
     throw new Error('enclave_output_identity_unavailable');
   }
   return generation;
@@ -983,9 +937,6 @@ let recordJiraWebhookDelivery:
   | ((input: WebhookLifecycleDelivery) => Promise<'updated' | 'stale' | 'invalid_submission'>)
   | undefined;
 bootStatus.begin('oauth_ingress_setup');
-if (OAUTH_PROVIDER_CONFIG_JSON) {
-  throw new Error('oauth_ingress_disabled_untrusted_boot_manifest');
-}
 const verifiedManifest = runtimeAttestation?.verifiedManifest();
 const controlPlaneIdentity = verifiedManifest?.controlPlaneIdentity;
 const controlPlaneFetch = controlPlaneIdentity
@@ -1009,9 +960,6 @@ if (signedSpecLoader) {
 const enabledOAuthProviders =
   verifiedManifest?.oauthProviders.filter((provider) => provider.enabled) ?? [];
 const jiraOAuthProvider = enabledOAuthProviders.find((provider) => provider.kind === 'jira');
-if (process.env['OAUTH_INGRESS_REQUIRED'] === 'true' && enabledOAuthProviders.length === 0) {
-  throw new Error('oauth_ingress_manifest_providers_unavailable');
-}
 if (enabledOAuthProviders.length > 0) {
   const identity = controlPlaneIdentity;
   if (!verifiedManifest || !identity) throw new Error('oauth_control_plane_identity_unavailable');
@@ -1054,7 +1002,6 @@ if (enabledOAuthProviders.length > 0) {
 
 bootStatus.begin('halt_gate_setup');
 const boxServer = new BoxServer(undefined, {
-  httpPort: Number(process.env['ENCLAVE_HTTP_PORT'] ?? '') || undefined,
   ...(oauthIngress ? { oauthIngress: oauthIngress.fetch } : {}),
 });
 
@@ -1151,10 +1098,7 @@ async function refreshAssignments(isCurrent: IsCurrentRefresh): Promise<void> {
     }
     const verified = verifyAssignmentManifestWire(
       parsed,
-      assignmentManifestPublicKeyForVerifiedBoot(
-        verifiedBootManifest,
-        ASSIGNMENT_MANIFEST_PUBLIC_KEY,
-      ),
+      assignmentManifestPublicKeyForVerifiedBoot(verifiedBootManifest),
     );
     refusalTarget = parsed;
     assertNoSharedResources(verified.assignments);
@@ -1188,18 +1132,16 @@ async function refreshAssignments(isCurrent: IsCurrentRefresh): Promise<void> {
     if (!result.applied) return;
     if (stopIfSuperseded(isCurrent)) return;
     const policyState = isV4 && 'state' in result ? result.state : undefined;
-    if (process.env['NODE_ENV'] === 'production' && !verified.runtimeDatabase) {
+    if (!verified.runtimeDatabase) {
       throw new Error(RUNTIME_DATABASE_SIGNED_CONFIG_UNAVAILABLE);
     }
-    if (process.env['NODE_ENV'] === 'production' && verified.runtimeDatabase) {
-      const recovery = await runtimeDatabaseLease.reconcile(verified.runtimeDatabase);
-      if (recovery === 'restart-requested' || stopIfSuperseded(isCurrent)) return;
-      if (!runtimeDatabaseLease.api() && activateRuntimeDatabase) {
-        await activateRuntimeDatabase(verified.runtimeDatabase);
-      }
-      if (stopIfSuperseded(isCurrent)) return;
-      apiContainer = runtimeDatabaseLease.api();
+    const recovery = await runtimeDatabaseLease.reconcile(verified.runtimeDatabase);
+    if (recovery === 'restart-requested' || stopIfSuperseded(isCurrent)) return;
+    if (!runtimeDatabaseLease.api() && activateRuntimeDatabase) {
+      await activateRuntimeDatabase(verified.runtimeDatabase);
     }
+    if (stopIfSuperseded(isCurrent)) return;
+    apiContainer = runtimeDatabaseLease.api();
     const activeEntries = policyState?.entries;
     const activeContexts = activeEntries
       ? [...activeEntries.values()].map((entry) => entry.context)
@@ -1292,7 +1234,7 @@ async function refreshAssignments(isCurrent: IsCurrentRefresh): Promise<void> {
       activePolicyGeneration = policyState.generation;
     }
     logger.info('assignment manifest applied', unsignedAcknowledgment);
-    await residentMemorySampler?.sample();
+    await residentMemorySampler.sample();
   } catch (err) {
     if (err instanceof Error && err.message === 'assignment_manifest_stale') return;
     // Log the error NAME only, never the raw error — a message could echo manifest field values.
@@ -1340,7 +1282,7 @@ const ASSIGNMENT_REFRESH_INTERVAL_MS = 30_000;
 // the fact-index save; on timeout we proceed WITHOUT freeing a still-pinned index (shred at exit).
 const SHUTDOWN_QUIESCE_TIMEOUT_MS = 10_000;
 const assignmentRefreshTimer = setInterval(
-  () => void assignmentRefreshFlight.run().then(() => residentMemorySampler?.sample()),
+  () => void assignmentRefreshFlight.run().then(() => residentMemorySampler.sample()),
   ASSIGNMENT_REFRESH_INTERVAL_MS,
 );
 const eventLoopDelayMonitor = new EventLoopDelayMonitor(logger);
@@ -1360,32 +1302,6 @@ const opsEventChannel = new RedisOpsEventChannel(haltCache.redis, DEPLOYMENT_ID)
 const opsTelemetry = new BufferedOpsTelemetryClient(opsEventChannel);
 setInferenceTelemetry(opsTelemetry);
 const mcpCalls = buildMcpCallTelemetry({ telemetry: opsTelemetry, logger });
-setVerifiedInferenceReceiptSink(async (sessionId) => {
-  const context = currentInferenceReceiptContext();
-  if (!context) return;
-  const sessionPublicKey = await poolRuntimeAttestation.currentSessionPublicKey();
-  if (!sessionPublicKey) return;
-  const unsigned = {
-    name: 'inference.receipt_verified' as const,
-    session_id: sessionId,
-    canary_run_id: context.canary_run_id,
-    request_id: context.request_id,
-    deployment_id: DEPLOYMENT_ID,
-    attestation_session_key_sha256: sha256Hex(Buffer.from(sessionPublicKey)),
-  };
-  const payload = Buffer.from(inferenceReceiptProofPayload(unsigned), 'utf8');
-  const signed = await poolRuntimeAttestation.signCurrent(payload);
-  const proof: InferenceReceiptProof = {
-    ...unsigned,
-    signature: Buffer.from(signed.signature).toString('base64'),
-  };
-  await opsEventChannel.push(proof);
-});
-
-const canaryProofSink = async (proof: CanaryAuthorizationOutcomeProof): Promise<void> => {
-  await opsEventChannel.pushRequired({ name: 'canary.authorization_outcome_proof', ...proof });
-};
-
 // Queue emptiness alone does not mean nobody is here: members read and edit through the box API,
 // and synthesis runs long after its message is gone. This is what the drain loop's idle check
 // consults so a self-stop can't land on a live session.
@@ -1579,84 +1495,73 @@ try {
   };
   const signedRuntimeDatabase: RuntimeDatabaseConfig | undefined =
     verifiedPoolManifest?.runtimeDatabase ?? verifiedManifest?.runtimeDatabase;
-  if (process.env['NODE_ENV'] === 'production') {
-    const activate = async (config: RuntimeDatabaseConfig): Promise<void> => {
-      const recovery = await runtimeDatabaseLease.reconcile(config);
-      if (recovery === 'restart-requested') return;
-      if (runtimeDatabaseLease.api()) {
-        apiContainer = runtimeDatabaseLease.api();
-        return;
-      }
-      let candidate: ApiContainer | undefined;
-      const consumed = await new RuntimeDatabaseCredentialConsumer({
-        parameters: new SsmRuntimeDatabaseParameters(ssm),
-        recipientDecryptor: new KmsRecipientDecryptor(kms, attestedRecipients),
-        createDatabase: createRuntimeDatabaseConnection,
-        readiness: createRuntimeDatabaseReadiness(async (database) => {
-          const started = createContainer({ ...apiOptions, database });
-          candidate = started;
-          let health: 'start_failed' | 'unhealthy' = 'start_failed';
-          try {
-            await started.start();
-            health = 'unhealthy';
-            const response = await Promise.resolve().then(() => started.app.request('/health'));
-            if (response.status === 200) return 'healthy';
-          } catch {
-            // Every failure falls through to close, so a retry never meets a bound port.
-          }
-          await started.close().catch(() => undefined);
-          candidate = undefined;
-          return health;
-        }),
-      })
-        .consume(config, registry.all()[0]?.tenantId ?? config.envelope.poolDeploymentId)
-        .catch(async (error: unknown) => {
-          // A healthy candidate whose receipt then fails must not keep its ports for the retry.
-          await candidate?.close().catch(() => undefined);
-          candidate = undefined;
-          throw error;
-        });
-      if (!candidate) {
-        await consumed.database.close();
-        throw new Error(RUNTIME_DATABASE_API_UNAVAILABLE);
-      }
-      runtimeDatabaseLease.activate(config, consumed.receipt, candidate, consumed.database);
+  const activate = async (config: RuntimeDatabaseConfig): Promise<void> => {
+    const recovery = await runtimeDatabaseLease.reconcile(config);
+    if (recovery === 'restart-requested') return;
+    if (runtimeDatabaseLease.api()) {
       apiContainer = runtimeDatabaseLease.api();
-      if (apiContainer && boxServer) {
-        boxServer.attachApi(apiContainer.app.fetch, apiContainer.collabPort);
-      }
-    };
-    activateRuntimeDatabase = (config) => {
-      if (runtimeDatabaseActivation) return runtimeDatabaseActivation;
-      const activation = activate(config);
-      runtimeDatabaseActivation = activation;
-      const clearActivation = (): void => {
-        if (runtimeDatabaseActivation === activation) runtimeDatabaseActivation = undefined;
-      };
-      void activation.then(
-        () => {
-          if (runtimeDatabaseLease.api()) bootStatus.recover();
-          clearActivation();
-        },
-        (error: unknown) => {
-          bootStatus.degrade(error);
-          clearActivation();
-        },
-      );
-      return activation;
-    };
-    if (!signedRuntimeDatabase) throw new Error(RUNTIME_DATABASE_SIGNED_CONFIG_UNAVAILABLE);
-    await activateRuntimeDatabase(signedRuntimeDatabase);
-  } else {
-    const startingContainer = createContainer(apiOptions);
-    try {
-      await startingContainer.start();
-    } catch (err) {
-      await startingContainer.close().catch(() => undefined);
-      throw err;
+      return;
     }
-    apiContainer = startingContainer;
-  }
+    let candidate: ApiContainer | undefined;
+    const consumed = await new RuntimeDatabaseCredentialConsumer({
+      parameters: new SsmRuntimeDatabaseParameters(ssm),
+      recipientDecryptor: new KmsRecipientDecryptor(kms, attestedRecipients),
+      createDatabase: createRuntimeDatabaseConnection,
+      readiness: createRuntimeDatabaseReadiness(async (database) => {
+        const started = createContainer({ ...apiOptions, database });
+        candidate = started;
+        let health: 'start_failed' | 'unhealthy' = 'start_failed';
+        try {
+          await started.start();
+          health = 'unhealthy';
+          const response = await Promise.resolve().then(() => started.app.request('/health'));
+          if (response.status === 200) return 'healthy';
+        } catch {
+          // Every failure falls through to close, so a retry never meets a bound port.
+        }
+        await started.close().catch(() => undefined);
+        candidate = undefined;
+        return health;
+      }),
+    })
+      .consume(config, registry.all()[0]?.tenantId ?? config.envelope.poolDeploymentId)
+      .catch(async (error: unknown) => {
+        // A healthy candidate whose receipt then fails must not keep its ports for the retry.
+        await candidate?.close().catch(() => undefined);
+        candidate = undefined;
+        throw error;
+      });
+    if (!candidate) {
+      await consumed.database.close();
+      throw new Error(RUNTIME_DATABASE_API_UNAVAILABLE);
+    }
+    runtimeDatabaseLease.activate(config, consumed.receipt, candidate, consumed.database);
+    apiContainer = runtimeDatabaseLease.api();
+    if (apiContainer) {
+      boxServer.attachApi(apiContainer.app.fetch, apiContainer.collabPort);
+    }
+  };
+  activateRuntimeDatabase = (config) => {
+    if (runtimeDatabaseActivation) return runtimeDatabaseActivation;
+    const activation = activate(config);
+    runtimeDatabaseActivation = activation;
+    const clearActivation = (): void => {
+      if (runtimeDatabaseActivation === activation) runtimeDatabaseActivation = undefined;
+    };
+    void activation.then(
+      () => {
+        if (runtimeDatabaseLease.api()) bootStatus.recover();
+        clearActivation();
+      },
+      (error: unknown) => {
+        bootStatus.degrade(error);
+        clearActivation();
+      },
+    );
+    return activation;
+  };
+  if (!signedRuntimeDatabase) throw new Error(RUNTIME_DATABASE_SIGNED_CONFIG_UNAVAILABLE);
+  await activateRuntimeDatabase(signedRuntimeDatabase);
 } catch (err) {
   // Degraded, not silent: no container is attached, so the SPA still serves but /api/* returns 503
   // and /health reports api:unavailable, making the outage observable rather than a crash-looping boot.
@@ -1692,7 +1597,7 @@ const entitlementProjectionApplier = new EntitlementProjectionApplier({
   logger: logger.child({ component: 'entitlement_projection' }),
 });
 const entitlementProjectionRunner =
-  controlPlaneIdentity && controlPlaneFetch && DEPLOYMENT_ID
+  controlPlaneIdentity && controlPlaneFetch
     ? new TenantEntitlementProjectionRunner({
         tenants: projectionTenants,
         beginTenant: beginTenantRequest,
@@ -1718,7 +1623,7 @@ const memberIdentityLinkEmitter = new MemberIdentityLinkEmitter({
   processedQueueUrl: PROCESSED_QUEUE_URL,
   outputAuthenticator,
   outputIdentity: () => ({
-    deploymentId: OUTPUT_DEPLOYMENT_ID,
+    deploymentId: DEPLOYMENT_ID,
     assignmentGeneration: outputAssignmentGeneration(),
   }),
 });
@@ -1728,7 +1633,7 @@ const memberIdentityLinkRelay = new MemberIdentityLinkRelay({
   logger: logger.child({ component: 'member_identity_link' }),
 });
 const memberIdentityLinkRunner =
-  controlPlaneIdentity && controlPlaneFetch && DEPLOYMENT_ID && PROCESSED_QUEUE_URL
+  controlPlaneIdentity && controlPlaneFetch && PROCESSED_QUEUE_URL
     ? new TenantPeriodicRunner<ProjectionTenant, MemberLinkRelayOutcome>({
         tenants: projectionTenants,
         beginTenant: beginTenantRequest,
@@ -1788,7 +1693,6 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
     sqs,
     s3,
     resolveTenant,
-    themeFactRefs: new ThemeSnapshotFactSource(() => runtimeDatabaseLease.database()),
     processedBucket: PROCESSED_OUTPUTS_BUCKET,
     processedBucketFor: (orgId) => resolveTenant(orgId).processedOutputsBucket,
     activePolicyFreshnessFor,
@@ -1809,7 +1713,7 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
     logger,
     outputAuthenticator,
     outputIdentity: () => ({
-      deploymentId: OUTPUT_DEPLOYMENT_ID,
+      deploymentId: DEPLOYMENT_ID,
       assignmentGeneration: outputAssignmentGeneration(),
     }),
     isHaltedForTenant: async (tenantId) => {
@@ -1842,16 +1746,6 @@ async function writeIdleFlag(idle: boolean): Promise<void> {
     ); // non-fatal: the parent timer catches the next cycle
 }
 
-const canaryAuthorizationConsumer =
-  controlPlaneIdentity && controlPlaneFetch
-    ? new HttpCanaryAuthorizationConsumer(
-        controlPlaneIdentity.origin,
-        DEPLOYMENT_ID,
-        () => process.env['AGENT_TOKEN'] ?? '',
-        controlPlaneFetch,
-      )
-    : undefined;
-
 const router = new TenantMessageRouter({
   registry,
   ssm,
@@ -1872,12 +1766,6 @@ const router = new TenantMessageRouter({
   jiraWebhookAuthenticator,
   recordJiraWebhookDelivery,
   mintGitHubInstallationToken,
-  canaryProofSigner: {
-    sign: (payload) => poolRuntimeAttestation.signCurrent(payload),
-    sessionPublicKey: () => poolRuntimeAttestation.currentSessionPublicKey(),
-  },
-  canaryProofSink,
-  canaryAuthorizationConsumer,
 });
 
 // §2.2: write per-tenant pool usage to Redis after each drain cycle so the agent can
@@ -1905,7 +1793,7 @@ drainerRef.current = new QueueSetDrainer({
   rawPayloadsBucket: RAW_PAYLOADS_BUCKET,
   outputAuthenticator,
   outputIdentity: (assignmentGeneration) => ({
-    deploymentId: OUTPUT_DEPLOYMENT_ID,
+    deploymentId: DEPLOYMENT_ID,
     assignmentGeneration: assignmentGeneration ?? outputAssignmentGeneration(),
   }),
   poolHalt,
@@ -1924,7 +1812,7 @@ drainerRef.current = new QueueSetDrainer({
 async function shutdown(): Promise<void> {
   logger.info('enclave shutting down — saving hnsw indices', { count: registry.size });
   clearInterval(assignmentRefreshTimer);
-  await assignmentWakeSubscriber?.close();
+  await assignmentWakeSubscriber.close();
   eventLoopDelayMonitor.stop();
   if ((await entitlementProjectionRunner?.stop(SHUTDOWN_QUIESCE_TIMEOUT_MS)) === false)
     logger.warn('entitlement_projection_stop_timeout');
@@ -1946,17 +1834,12 @@ async function shutdown(): Promise<void> {
       reason: err instanceof Error ? err.message : String(err),
     }),
   );
-  await runtimeAttestation?.close().catch((err) =>
+  await poolRuntimeAttestationListener.close().catch((err) =>
     logger.error('shutdown: non-fatal', {
       reason: err instanceof Error ? err.message : String(err),
     }),
   );
-  await poolRuntimeAttestationListener?.close().catch((err) =>
-    logger.error('shutdown: non-fatal', {
-      reason: err instanceof Error ? err.message : String(err),
-    }),
-  );
-  await boxServer?.close().catch((err) =>
+  await boxServer.close().catch((err) =>
     logger.error('shutdown: non-fatal', {
       reason: err instanceof Error ? err.message : String(err),
     }),
@@ -1986,9 +1869,6 @@ async function shutdown(): Promise<void> {
 function createEnclaveOutputAuthenticator(): Ed25519EnclaveOutputAuthenticator {
   const key = verifiedBootManifest?.enclaveOutputKey;
   if (!key || !runtimeAttestation) {
-    if (process.env['NODE_ENV'] === 'development') {
-      return new Ed25519EnclaveOutputAuthenticator(DEVELOPMENT_ENCLAVE_OUTPUT_KEY);
-    }
     throw new Error('enclave_output_signer_unavailable');
   }
   try {

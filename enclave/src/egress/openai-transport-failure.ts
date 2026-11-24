@@ -5,7 +5,7 @@ import { PINNED_UPSTREAM_TIMEOUT, pinnedTransportFailureOf } from './pinned-tran
 export const OPENAI_TLS_UNTRUSTED = 'openai_tls_untrusted';
 export const OPENAI_UPSTREAM_TIMEOUT_CAUSE = PINNED_UPSTREAM_TIMEOUT;
 
-export type OpenAITransportFailure =
+type OpenAITransportFailure =
   | typeof OPENAI_TLS_UNTRUSTED
   | typeof OPENAI_UPSTREAM_TIMEOUT_CAUSE
   | typeof OPENAI_REQUEST_REFUSED

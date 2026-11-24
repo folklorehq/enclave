@@ -37,7 +37,7 @@ export interface JiraWebhookLifecycleInput {
   webhookCleanupRegistrationIds?: readonly string[] | null;
 }
 
-export interface JiraWebhookLifecycleServiceOptions {
+interface JiraWebhookLifecycleServiceOptions {
   clock?: () => Date;
   mode?: JiraWebhookMode;
   isEnabledForOrg?: (orgId: string) => boolean;

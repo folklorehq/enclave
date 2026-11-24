@@ -107,7 +107,6 @@ type SignedInferenceAttestation = Readonly<InferenceAttestationInput>;
 
 let _backend: TeeEndpointBackend | OpenAICompatBackend | null = null;
 let _telemetry: TelemetryClient | null = null;
-let _verifiedReceiptSink: ((sessionId: string) => void | Promise<void>) | undefined;
 let _inferenceTrustPolicy: InferenceTrustPolicyV1 | undefined;
 let _publicInferenceTrustPolicy: InferenceTrustPolicyV2 | undefined;
 let _inferenceFetch: typeof fetch | null = null;
@@ -132,12 +131,6 @@ export function inferenceModelRevision(role: InferenceModelRole): string {
 
 export function setInferenceTelemetry(client: TelemetryClient): void {
   _telemetry = client;
-}
-
-export function setVerifiedInferenceReceiptSink(
-  sink: (sessionId: string) => void | Promise<void>,
-): void {
-  _verifiedReceiptSink = sink;
 }
 
 export function setInferenceTrustPolicy(policy: unknown): void {
@@ -344,7 +337,6 @@ export function buildReceiptVerifier(
       trustPolicy,
       apiKey: apiKey(),
       telemetry: telemetryClient,
-      verifiedReceiptSink: _verifiedReceiptSink,
       fetchImpl: transport,
     });
   }

@@ -1,9 +1,6 @@
 export const CHUNK_QUEUE_MAX = 256;
 
-export type ChunkQueueFailure =
-  | 'chunk_queue_closed'
-  | 'chunk_queue_full'
-  | 'chunk_queue_no_pending_read';
+type ChunkQueueFailure = 'chunk_queue_closed' | 'chunk_queue_full' | 'chunk_queue_no_pending_read';
 
 export class ChunkQueueError extends Error {
   constructor(readonly code: ChunkQueueFailure) {

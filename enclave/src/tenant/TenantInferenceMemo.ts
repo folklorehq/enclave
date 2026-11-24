@@ -5,7 +5,7 @@ import { S3LlmCache } from '../inference/S3LlmCache.js';
 import type { TenantContext } from './tenant-context.js';
 import type { ResolveTenant } from './tenant-resolver.js';
 
-export interface TenantInferenceMemoDeps<T> {
+interface TenantInferenceMemoDeps<T> {
   s3: S3Client;
   resolveTenant: ResolveTenant;
   bucketFor: (orgId: string, tenant: TenantContext) => string;

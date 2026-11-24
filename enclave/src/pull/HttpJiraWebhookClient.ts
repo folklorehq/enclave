@@ -14,6 +14,7 @@ const JIRA_WEBHOOK_URL_PATTERN =
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DECIMAL_ID_PATTERN = /^(?:0|[1-9][0-9]*)$/;
 const MAX_REQUEST_BYTES = 64 * 1024;
+const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 512 * 1024;
 const MAX_TOKEN_BYTES = 16 * 1024;
 const MAX_URL_BYTES = 2 * 1024;
@@ -64,10 +65,7 @@ export interface JiraWebhookClientPort {
   delete(input: JiraWebhookIdsInput): Promise<void>;
 }
 
-export interface JiraWebhookClientOptions extends Pick<
-  ProviderTokenFetchOptions,
-  'fetchImpl' | 'maxRequestBytes' | 'maxResponseBytes' | 'timeoutMs'
-> {
+export interface JiraWebhookClientOptions extends Pick<ProviderTokenFetchOptions, 'fetchImpl'> {
   clock?: () => Date;
 }
 
@@ -91,16 +89,10 @@ interface JiraWebhookRequest {
 /** Performs only the fixed Jira dynamic-webhook protocol through the enclave egress proxy. */
 export class HttpJiraWebhookClient implements JiraWebhookClientPort {
   private readonly fetchImpl: typeof globalThis.fetch;
-  private readonly maxRequestBytes: number;
-  private readonly maxResponseBytes: number;
-  private readonly timeoutMs: number;
   private readonly clock: () => Date;
 
   constructor(options: JiraWebhookClientOptions = {}) {
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch;
-    this.maxRequestBytes = options.maxRequestBytes ?? MAX_REQUEST_BYTES;
-    this.maxResponseBytes = options.maxResponseBytes ?? MAX_RESPONSE_BYTES;
-    this.timeoutMs = options.timeoutMs ?? 10_000;
     this.clock = options.clock ?? (() => new Date());
   }
 
@@ -210,7 +202,7 @@ export class HttpJiraWebhookClient implements JiraWebhookClientPort {
   private async request(request: JiraWebhookRequest): Promise<unknown> {
     const endpoint = this.endpoint(this.normalizeCloudId(request.cloudId), request.suffix ?? '');
     const body = request.body === undefined ? undefined : JSON.stringify(request.body);
-    if (body && Buffer.byteLength(body, 'utf8') > this.maxRequestBytes) {
+    if (body && Buffer.byteLength(body, 'utf8') > MAX_REQUEST_BYTES) {
       throw new ProviderEgressError();
     }
     const proxy = new ProxyAgent({ uri: EGRESS_PROXY_URL });
@@ -226,7 +218,7 @@ export class HttpJiraWebhookClient implements JiraWebhookClientPort {
             ...(body ? { 'content-type': 'application/json' } : {}),
           }),
           redirect: 'manual',
-          signal: AbortSignal.timeout(this.timeoutMs),
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
           dispatcher: proxy,
           ...(body ? { body } : {}),
         } as RequestInit & { dispatcher: ProxyAgent });
@@ -272,7 +264,7 @@ export class HttpJiraWebhookClient implements JiraWebhookClientPort {
     const contentLength = response.headers.get('content-length');
     if (contentLength !== null) {
       const length = Number(contentLength);
-      if (!Number.isSafeInteger(length) || length < 0 || length > this.maxResponseBytes) {
+      if (!Number.isSafeInteger(length) || length < 0 || length > MAX_RESPONSE_BYTES) {
         throw new ProviderEgressError();
       }
     }
@@ -284,7 +276,7 @@ export class HttpJiraWebhookClient implements JiraWebhookClientPort {
       const next = await reader.read();
       if (next.done) break;
       size += next.value.byteLength;
-      if (size > this.maxResponseBytes) {
+      if (size > MAX_RESPONSE_BYTES) {
         await reader.cancel();
         throw new ProviderEgressError();
       }

@@ -26,9 +26,9 @@ const OPENAI_ORGANIZATION_HEADER = 'openai-organization';
 const OPENAI_PROJECT_HEADER = 'openai-project';
 const PROBE_INPUT = 'folklore embedding probe';
 
-export const OPENAI_CREDENTIAL_PARAMETER_ROOT = '/folklore/prod';
-export const OPENAI_CREDENTIAL_PARAMETER_SUFFIX = '/provider-inference/openai-api-key';
-export const OPENAI_CREDENTIAL_KEY_ALIAS = 'alias/folklore-prod-openai-credential';
+const OPENAI_CREDENTIAL_PARAMETER_ROOT = '/folklore/prod';
+const OPENAI_CREDENTIAL_PARAMETER_SUFFIX = '/provider-inference/openai-api-key';
+const OPENAI_CREDENTIAL_KEY_ALIAS = 'alias/folklore-prod-openai-credential';
 
 export const openaiCredentialLoadErrors: AttestedParameterReadErrors = {
   missing: 'openai_credential_missing',
@@ -184,7 +184,7 @@ export class OpenAICredentialSource {
   }
 }
 
-export type OpenAIIdentityMismatch =
+type OpenAIIdentityMismatch =
   | 'openai_organization_mismatch'
   | 'openai_project_mismatch'
   | 'openai_project_hash_required';

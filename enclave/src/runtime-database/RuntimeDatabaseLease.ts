@@ -12,7 +12,7 @@ interface RuntimeDatabaseLeaseOptions {
   requestRestart(exitCode: number): void;
 }
 
-export const RUNTIME_DATABASE_RESTART_EXIT_CODE = 75;
+const RUNTIME_DATABASE_RESTART_EXIT_CODE = 75;
 
 export class RuntimeDatabaseLease<
   TApi extends RuntimeDatabaseResource,

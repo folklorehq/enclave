@@ -29,7 +29,7 @@ import { CodeGraphShardStore, type CodeGraphShardStoreDeps } from './CodeGraphSh
 import { CodeGraphTombstoneStore, type TombstoneRead } from './CodeGraphTombstoneStore.js';
 
 // Under the 55 s the control plane waits, leaving room for the batch in flight and the final write.
-export const CODEBASE_GRAPH_ERASE_BUDGET_MS = 40_000;
+const CODEBASE_GRAPH_ERASE_BUDGET_MS = 40_000;
 const DEFAULT_ERASE_BATCH_SIZE = 64;
 const TOMBSTONE_WRITE_ATTEMPTS = 3;
 

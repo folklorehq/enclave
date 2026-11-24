@@ -29,7 +29,7 @@ export interface OperationAdmission {
   readonly remainingBudget: () => number;
 }
 
-export interface OperationAuthorityOptions {
+interface OperationAuthorityOptions {
   readonly tenantId: string;
   readonly freshness: TenantPolicyFreshnessPort;
   readonly bootEpoch: string;
@@ -37,7 +37,7 @@ export interface OperationAuthorityOptions {
   readonly providerPolicyGeneration: number;
 }
 
-export interface OperationAdmitHooks {
+interface OperationAdmitHooks {
   readonly afterRoleCheck?: (snapshot: VerifiedActivePolicySnapshotV1) => void;
 }
 

@@ -21,7 +21,7 @@ const isDecidePost = (url: URL, init?: RequestInit): boolean =>
 
 type EnabledState = Extract<TypeSafeDecisionRouteState, { kind: 'enabled' }>;
 
-export interface TypeSafeDecisionCompositionDeps {
+interface TypeSafeDecisionCompositionDeps {
   readonly state: TypeSafeDecisionRouteState;
   readonly questionSets: readonly JevQuestionSet[];
   readonly reader: () => Pick<AttestedSsmParameterReader, 'read'>;

@@ -39,7 +39,7 @@ export type BackoffObserver = (backoff: () => Promise<void>) => Promise<void>;
 
 const UNOBSERVED: BackoffObserver = (backoff) => backoff();
 
-export interface TransientInferenceRetryDeps {
+interface TransientInferenceRetryDeps {
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   random?: () => number;
   now?: () => number;

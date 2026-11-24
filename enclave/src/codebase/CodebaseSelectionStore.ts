@@ -7,7 +7,7 @@ const CODEBASE_SELECTION_FORMAT_VERSION = 1;
 const CODEBASE_SELECTION_PURPOSE = 'codebase-selection';
 const CODEBASE_SELECTION_MAX_REPOSITORIES = 500;
 
-export const repositoryRefSchema = z
+const repositoryRefSchema = z
   .object({
     id: z.number().int().positive(),
     fullName: z.string().min(1).max(512),
@@ -54,9 +54,9 @@ const codebaseSelectionWriteSchema = z.discriminatedUnion('mode', [
     .strict(),
 ]);
 
-export type RepositoryRef = z.infer<typeof repositoryRefSchema>;
+type RepositoryRef = z.infer<typeof repositoryRefSchema>;
 export type CodebaseSelection = z.infer<typeof codebaseSelectionSchema>;
-export type CodebaseSelectionWrite = z.infer<typeof codebaseSelectionWriteSchema>;
+type CodebaseSelectionWrite = z.infer<typeof codebaseSelectionWriteSchema>;
 
 export const DEFAULT_CODEBASE_SELECTION: CodebaseSelection = {
   formatVersion: CODEBASE_SELECTION_FORMAT_VERSION,
@@ -69,7 +69,7 @@ export function isCodebaseSelectionMissing(error: unknown): boolean {
   return error instanceof Error && error.message === 'codebase_selection_missing';
 }
 
-export interface CodebaseSelectionStoreDeps {
+interface CodebaseSelectionStoreDeps {
   s3: S3Client;
   bucket: string;
   crypto: EnclaveCrypto;

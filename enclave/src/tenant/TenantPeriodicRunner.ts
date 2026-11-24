@@ -3,8 +3,8 @@ import { contentFreeErrorType, type Logger } from '@folklore/core';
 const MINUTE_MS = 60_000;
 export const TENANT_RUNNER_REFRESH_MS = 15 * MINUTE_MS;
 export const TENANT_RUNNER_RETRY_MS = 2 * MINUTE_MS;
-export const TENANT_RUNNER_TICK_MS = 30_000;
-export const TENANT_RUNNER_EXPEDITE_GAP_MS = MINUTE_MS;
+const TENANT_RUNNER_TICK_MS = 30_000;
+const TENANT_RUNNER_EXPEDITE_GAP_MS = MINUTE_MS;
 export const TENANT_RUNNER_SIGNAL_TIMEOUT_MS = 5_000;
 
 const NO_SIGNAL: ReadonlyMap<string, string> = new Map();
@@ -34,7 +34,7 @@ export interface TenantRunnerEvents {
   readonly passFailed: string;
 }
 
-export interface TenantPeriodicRunnerDeps<TTenant extends PeriodicTenant, TOutcome extends string> {
+interface TenantPeriodicRunnerDeps<TTenant extends PeriodicTenant, TOutcome extends string> {
   readonly tenants: () => readonly TTenant[];
   readonly beginTenant: (tenantId: string) => Promise<(() => void) | undefined>;
   readonly runTenant: (tenant: TTenant) => Promise<TOutcome>;

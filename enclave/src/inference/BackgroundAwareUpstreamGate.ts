@@ -14,7 +14,7 @@ export class UpstreamGateWaitStalledError extends Error {
   }
 }
 
-export interface BackgroundAwareUpstreamGateOptions {
+interface BackgroundAwareUpstreamGateOptions {
   readonly maxWaitMs?: number;
   readonly onWaitStalled?: () => void;
 }

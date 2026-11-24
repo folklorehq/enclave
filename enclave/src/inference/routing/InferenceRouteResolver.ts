@@ -140,7 +140,7 @@ function assertArms(config: ClaudeRouteConfig): void {
   }
 }
 
-export function assertClaudeRouteConfig(config: ClaudeRouteConfig, routing: CompiledRouting): void {
+function assertClaudeRouteConfig(config: ClaudeRouteConfig, routing: CompiledRouting): void {
   assertIdentity(config.identity);
   assertArms(config);
   assertModelsAndTimeouts(config, routing);

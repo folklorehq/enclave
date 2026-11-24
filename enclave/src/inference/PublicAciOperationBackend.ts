@@ -20,7 +20,7 @@ import { SHORT_OPERATION_LIMITS } from './public-aci-operation-limits.js';
 
 import { createPublicDstackQuoteVerifier } from '../attestation/PublicDstackQuoteComposition.js';
 
-export interface PublicAciOperationBackendOptions {
+interface PublicAciOperationBackendOptions {
   readonly providerPolicy: unknown;
   readonly snapshot: VerifiedActivePolicySnapshotV1;
   readonly binding: VerifiedActivePolicyRoleBindingV1;

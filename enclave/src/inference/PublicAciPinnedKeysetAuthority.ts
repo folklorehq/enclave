@@ -13,7 +13,7 @@ import type { GenerationContextV1 } from '@folklore/contracts';
 import { aciPrefixedDigestSchema, digest64Schema, identifierSchema } from '@folklore/contracts';
 import { GENERATION_CONTEXT_FIELDS } from './renewal-grace.js';
 
-export interface PublicAciPinnedKeysetAuthorityOptions {
+interface PublicAciPinnedKeysetAuthorityOptions {
   readonly snapshot: VerifiedActivePolicySnapshotV1;
   readonly expectedContext: GenerationContextV1;
   readonly durable: DurableGenerationHighWaterClientPort;

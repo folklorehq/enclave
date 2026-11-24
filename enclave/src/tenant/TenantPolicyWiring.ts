@@ -18,7 +18,7 @@ import type { TenantContext } from './tenant-context.js';
 import type { TenantGenerationRegistry } from './TenantGenerationRegistry.js';
 import type { TenantPolicySnapshotRegistry } from './TenantPolicySnapshotRegistry.js';
 
-export interface TenantPolicyWiringDeps<S extends VerifiedActivePolicySnapshotV1> {
+interface TenantPolicyWiringDeps<S extends VerifiedActivePolicySnapshotV1> {
   readonly generations: TenantGenerationRegistry<TenantContext, S>;
   readonly snapshots: TenantPolicySnapshotRegistry<S, TenantContext>;
   readonly attestation: () => RuntimeEvidenceSessionPort | null | undefined;
@@ -29,7 +29,7 @@ export interface TenantPolicyWiringDeps<S extends VerifiedActivePolicySnapshotV1
   readonly onPolicyRefusal?: (code: string | undefined) => void;
 }
 
-export type AnswerInferenceBuild = (
+type AnswerInferenceBuild = (
   orgId: string,
   tenant: Pick<TenantContext, 'activePolicySnapshot'>,
   cache: LlmOperationCache,

@@ -8,7 +8,7 @@ import { guardFailureCode } from '../../boot/guard-failure-code.js';
 
 const PREWARM_FAILED_EVENT = 'boot_high_water_prewarm_failed';
 
-export interface HighWaterWarmPort {
+interface HighWaterWarmPort {
   warm(context: DurableGenerationHighWaterTransportContextV1): Promise<void>;
 }
 

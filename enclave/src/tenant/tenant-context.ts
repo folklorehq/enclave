@@ -44,8 +44,6 @@ export class TenantContext implements LlmCacheNamer {
     hnsw: HnswStore,
     pipeline: Pipeline,
     sealedContentKeyrings: SealedContentKeyringConfig,
-    readonly sealedBlobBucket = '',
-    readonly rawPayloadsBucket = '',
     readonly processedOutputsBucket = '',
     readonly deploymentId = '',
     readonly tenantDeploymentId?: string,

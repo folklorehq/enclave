@@ -12,12 +12,12 @@ export interface PinnedOriginPolicy {
   readonly closedCode: string;
 }
 
-export interface PinnedOriginTransport {
+interface PinnedOriginTransport {
   readonly fetch: typeof globalThis.fetch;
   close(): Promise<void>;
 }
 
-export interface PinnedOriginTransportInput {
+interface PinnedOriginTransportInput {
   readonly policy: PinnedOriginPolicy;
   readonly caPems: readonly string[];
   readonly proxyPort?: number;

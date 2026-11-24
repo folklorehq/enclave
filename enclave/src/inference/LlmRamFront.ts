@@ -1,10 +1,10 @@
 import { LRUCache } from 'lru-cache';
 
-export const LLM_CACHE_RAM_MAX_BYTES = 16 * 1024 * 1024;
+const LLM_CACHE_RAM_MAX_BYTES = 16 * 1024 * 1024;
 export const LLM_CACHE_RAM_IDLE_TTL_MS = 15 * 60_000;
 const UTF16_BYTES_PER_CHAR = 2;
 
-export type RamEntry = string | Float32Array;
+type RamEntry = string | Float32Array;
 
 export interface LlmRamFrontOptions {
   readonly maxBytes?: number;

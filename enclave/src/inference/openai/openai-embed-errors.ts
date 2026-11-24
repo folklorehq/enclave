@@ -2,7 +2,7 @@ import { ProviderRouteError, type ProviderRouteErrorInit } from '@folklore/infer
 
 const OPENAI_PROVIDER = 'openai';
 
-export const OPENAI_CREDENTIAL_CODES = [
+const OPENAI_CREDENTIAL_CODES = [
   'openai_credential_missing',
   'openai_credential_access_denied',
   'openai_credential_identity_invalid',
@@ -13,13 +13,13 @@ export const OPENAI_CREDENTIAL_CODES = [
   'openai_credential_rejected',
 ] as const;
 
-export const OPENAI_ROUTE_CODES = [
+const OPENAI_ROUTE_CODES = [
   'openai_embed_route_invalid',
   'embedding_provider_absent',
   'embedding_space_not_phala',
 ] as const;
 
-export const OPENAI_BACKEND_CODES = [
+const OPENAI_BACKEND_CODES = [
   'openai_embed_input_empty',
   'openai_input_too_long',
   'openai_request_invalid',
@@ -32,13 +32,13 @@ export const OPENAI_BACKEND_CODES = [
   'openai_embedding_non_finite',
 ] as const;
 
-export const OPENAI_BINDING_CODES = [
+const OPENAI_BINDING_CODES = [
   'openai_organization_mismatch',
   'openai_project_mismatch',
   'openai_project_hash_required',
 ] as const;
 
-export const OPENAI_TRANSPORT_CODES = [
+const OPENAI_TRANSPORT_CODES = [
   'openai_request_refused',
   'openai_tls_untrusted',
   'openai_tls_root_set_mismatch',
@@ -52,7 +52,7 @@ export const OPENAI_EMBED_CODES = [
   ...OPENAI_CREDENTIAL_CODES,
 ] as const;
 
-export type OpenAIEmbedCode = (typeof OPENAI_EMBED_CODES)[number];
+type OpenAIEmbedCode = (typeof OPENAI_EMBED_CODES)[number];
 
 export const OPENAI_TRANSIENT_STATUSES: ReadonlySet<number> = new Set([429, 500, 502, 503, 504]);
 

@@ -18,7 +18,7 @@ import { FirstpartyFeedError, type FirstpartyFeedErrorCode } from '@folklore/err
 
 export type FirstpartyFeedEntry = FirstpartyConnectorFeed['definitions'][number];
 
-export interface VerifiedFirstpartyDefinition {
+interface VerifiedFirstpartyDefinition {
   readonly form: 'slot';
   readonly key: FirstpartySourceKey;
   readonly definitionId: string;
@@ -28,7 +28,7 @@ export interface VerifiedFirstpartyDefinition {
   readonly signatureB64: string;
   readonly oauthClientSecretCiphertextB64: string | null;
 }
-export interface VerifiedBuiltinDefinition {
+interface VerifiedBuiltinDefinition {
   readonly form: 'builtin';
   readonly key: string;
   readonly definitionId: string;

@@ -50,7 +50,6 @@ const HNSW_REASONS = ['hnsw_blob_unreadable', 'hnsw_index_unreadable'] as const;
 const NSM_REASONS = [
   'nsm_attestation_invalid',
   'nsm_attestation_turn_abandoned',
-  'nsm_invalid_entropy_request',
   'nsm_invalid_request',
   'nsm_invalid_response',
   'nsm_pass_through_over_ceiling',
@@ -129,7 +128,6 @@ const TRUSTED_TIME_REASONS = [
   'trusted_time_drift',
   'trusted_time_expired',
   'trusted_time_reason_invalid',
-  'trusted_time_required',
   'trusted_time_sample_invalid',
   'trusted_time_unavailable',
   'trusted_time_uninitialized',
@@ -156,27 +154,17 @@ const INFERENCE_TRANSPORT_REASONS = [
   'inference_api_key_read_failed',
   'inference_api_key_unavailable',
   'inference_endpoint_identity_mismatch',
-  'inference_fetch_failed',
   'inference_origin_mismatch',
-  'inference_refused',
   'inference_spki_pin_mismatch',
   'inference_spki_unavailable',
-  'inference_timeout',
   'inference_transport_closed',
   'inference_transport_unconfigured',
 ] as const;
 
 // Fixed literals thrown as a bare Error on the inference and synthesis path.
 export const INFERENCE_PATH_REASONS = [
-  'admission_required',
-  'capacity_invalid',
   'checkpoint_not_pinned',
   'claude_route_provider_mismatch',
-  'commitment_key_required',
-  'commitment_mismatch',
-  'commitment_replay',
-  'durable_state_required',
-  'durable_state_unavailable',
   'enclave_active_policy_boot_trust_invalid',
   'enclave_active_policy_key_unavailable',
   'enclave_active_policy_kms_metadata_mismatch',
@@ -184,7 +172,6 @@ export const INFERENCE_PATH_REASONS = [
   'enclave_active_policy_signature_invalid',
   'enclave_active_policy_signer_identity_collision',
   'enclave_output_authenticator_unavailable',
-  'forward_runtime_unavailable',
   'generation_context_mismatch',
   'generation_not_pinned',
   'inference_provider_duplicate',
@@ -200,20 +187,9 @@ export const INFERENCE_PATH_REASONS = [
   'invalid_verified_active_policy_role_binding',
   'invalid_verified_active_policy_snapshot',
   'invalid_verified_boot_policy_state',
-  'journal_equivocation',
-  'journal_rollback',
   'keyset_digest_invalid',
-  'lease_binding_mismatch',
-  'lease_expired',
-  'lease_invalid',
-  'lease_replay',
-  'native_send_cancelled',
-  'native_send_failed',
-  'proof_replay',
   'provider_policy_generation_invalid',
   'public_inference_requires_policy_assignment_v4',
-  'request_wire_mismatch',
-  'restart_recovery_required',
   'routing_table_refresher_installed',
   ...ROUTING_TABLE_REFUSALS,
   'synthesis_output_identity_changed',
@@ -221,9 +197,6 @@ export const INFERENCE_PATH_REASONS = [
   'tenant_teardown_in_progress',
   'trusted_context_invalid',
   'trusted_context_mismatch',
-  'write_boundary_unverified',
-  'write_cancelled',
-  'write_replay',
 ] as const;
 
 const OPENAI_REASONS: readonly string[] = OPENAI_EMBED_CODES;
@@ -232,9 +205,6 @@ const CLAUDE_REASONS = [
   'anthropic_request_refused',
   'anthropic_tls_root_set_mismatch',
   'anthropic_transport_closed',
-  'claude_batch_identity_unset',
-  'claude_batch_request_invalid',
-  'claude_batch_response_invalid',
   'claude_batch_unavailable',
   'claude_connection_failed',
   'claude_credential_access_denied',
@@ -275,7 +245,6 @@ const CLAUDE_REASONS = [
 ] as const;
 
 const SYNTHESIS_REASONS = [
-  'batch_manifest_identity_mismatch',
   'claude_usage_tokens_invalid',
   'page_empty',
   'page_outline_invalid',
@@ -292,11 +261,6 @@ const SYNTHESIS_REASONS = [
   'synthesis_output_too_large',
   'tenant_cache_salt_zeroized',
   'theme_grouping_embedding_unavailable',
-  'theme_request_fact_source_mismatch',
-  'theme_snapshot_authority_mismatch',
-  'theme_snapshot_containers_mismatch',
-  'theme_snapshot_database_unavailable',
-  'theme_snapshot_unavailable',
   'theme_synthesis_snapshot_mismatch',
 ] as const;
 
@@ -313,11 +277,7 @@ const CONNECTOR_TRANSPORT_REASONS = [
   'spec_response_too_large',
 ] as const;
 
-const ROUTE_REASONS = [
-  'canary_authorization_invalid',
-  'message_deadline_exceeded',
-  'upstream_gate_wait_stalled',
-] as const;
+const ROUTE_REASONS = ['message_deadline_exceeded', 'upstream_gate_wait_stalled'] as const;
 
 // Node and undici connection codes; the reason is the lower-cased code, never the message.
 export const NETWORK_ERROR_CODES: ReadonlySet<string> = new Set([

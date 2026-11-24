@@ -16,7 +16,7 @@ import {
 import type { AnthropicRoute } from './anthropic-route.js';
 import { CHARS_PER_TOKEN_FLOOR, promptTokenFloor } from '../token-floor.js';
 
-export type CreatedMessage = Anthropic.Message;
+type CreatedMessage = Anthropic.Message;
 type MessageEvents = AsyncIterable<Anthropic.RawMessageStreamEvent> & {
   controller: AbortController;
 };
@@ -42,7 +42,7 @@ const SDK_LOG_LEVEL = 'off';
 const NO_RETRIES = 0;
 const END_TURNS: ReadonlySet<string> = new Set(['end_turn', 'stop_sequence']);
 
-export interface ClaudeMessagesBackendDeps {
+interface ClaudeMessagesBackendDeps {
   readonly route: AnthropicRoute;
   readonly apiKey: string;
   readonly fetch: typeof globalThis.fetch;

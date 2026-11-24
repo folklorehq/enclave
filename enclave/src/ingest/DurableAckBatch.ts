@@ -1,10 +1,10 @@
 import type { Logger } from '@folklore/core';
 
-export type DurableAckFailureStep = 'persist' | 'post_persist' | 'ack';
+type DurableAckFailureStep = 'persist' | 'post_persist' | 'ack';
 
-export type DurableAckFailureListener = (step: DurableAckFailureStep, error: unknown) => void;
+type DurableAckFailureListener = (step: DurableAckFailureStep, error: unknown) => void;
 
-export interface DurableAckItem {
+interface DurableAckItem {
   tenantId: string;
   hasUnsavedInserts(): boolean;
   persist(): Promise<void>;

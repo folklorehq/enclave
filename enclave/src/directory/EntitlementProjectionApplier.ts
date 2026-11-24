@@ -18,11 +18,11 @@ export interface ProjectionDatabase {
   readonly orm: ConstructorParameters<typeof EntitlementProjectionRepository>[0];
 }
 
-export interface EntitlementProjectionSync {
+interface EntitlementProjectionSync {
   sync(): Promise<EntitlementSyncOutcome>;
 }
 
-export interface EntitlementProjectionApplierDeps {
+interface EntitlementProjectionApplierDeps {
   readonly database: () => ProjectionDatabase | undefined;
   readonly logger: Logger;
   readonly historyWindow: Pick<TenantHistoryWindow, 'record'>;

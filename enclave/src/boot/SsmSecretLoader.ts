@@ -1,7 +1,7 @@
 import type { SsmParameterValuePort } from '../attestation/BootManifestSecretLoader.js';
 import { readFailureCode } from '../attestation/read-failure-code.js';
 
-export interface SsmSecretLoadErrors {
+interface SsmSecretLoadErrors {
   readonly read: string;
   readonly accessDenied: string;
   readonly missing: string;

@@ -18,7 +18,7 @@ export function deriveMnemonic(masterKey: Buffer): string {
   return entropyToMnemonic(masterKey.toString('hex'));
 }
 
-export interface IngestKeypair {
+interface IngestKeypair {
   privateKey: KeyObject;
   publicKey: KeyObject;
   publicKeyRaw: Buffer;

@@ -16,7 +16,7 @@ const DEDUPLICATION_ID_CHARSET = /^[A-Za-z0-9!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~
 const DEDUPLICATION_PREFIX = 'member-link';
 const IDENTITY_CHANGED = 'member_link_output_identity_changed';
 
-export interface MemberIdentityLinkEmitterDeps {
+interface MemberIdentityLinkEmitterDeps {
   readonly sqs: Pick<SQSClient, 'send'>;
   readonly processedQueueUrl: string;
   readonly outputAuthenticator: EnclaveOutputAuthenticator;

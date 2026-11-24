@@ -37,7 +37,7 @@ const emptyWebhookMetadata = {
 
 export type RawSourceConnection = EnclaveSourceConnectionProjection;
 
-export interface SourceConnectionProjection {
+interface SourceConnectionProjection {
   connections: RawSourceConnection[];
   capabilities: GitHubCodebaseCapabilityProjection[];
 }

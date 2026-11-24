@@ -10,20 +10,20 @@ export const NSM_NORMAL_MAX_WAIT_MS = 1_000;
 export const NSM_ALARM_REPEAT_MS = 60_000;
 export const NSM_TURN_REFRESH_TIMEOUT_CODE = 'nsm_turn_refresh_timeout';
 export const NSM_TURN_HOLD_PRIOR_MS = 50;
-export const NSM_TURN_HOLD_EWMA_WEIGHT = 0.1;
+const NSM_TURN_HOLD_EWMA_WEIGHT = 0.1;
 // The sample-window bound: a longer turn already failed its own window, so one stall cannot collapse the ceiling.
-export const NSM_TURN_SAMPLE_MAX_MS = 1_000;
-export const ATTESTATIONS_PER_REFRESH_READ = 2;
-export const NSM_BUDGET_MARGIN_MS = 1_000;
-export const NSM_CALL_BUDGET_MS = DEFAULT_REFRESH_TIMEOUT_MS - NSM_BUDGET_MARGIN_MS;
-export const NSM_MIN_CALL_CEILING = 4;
+const NSM_TURN_SAMPLE_MAX_MS = 1_000;
+const ATTESTATIONS_PER_REFRESH_READ = 2;
+const NSM_BUDGET_MARGIN_MS = 1_000;
+const NSM_CALL_BUDGET_MS = DEFAULT_REFRESH_TIMEOUT_MS - NSM_BUDGET_MARGIN_MS;
+const NSM_MIN_CALL_CEILING = 4;
 
 export interface AttestationCapacity {
   /** In-flight calls host-wide that still leave a two-attestation refresh read inside its timeout. */
   callCeiling(): number;
 }
 
-export interface NsmAttestationTurnstileOptions {
+interface NsmAttestationTurnstileOptions {
   readonly scope?: AttestationTurnScope;
   readonly now?: () => number;
   /** A queued turn was skipped: on the first, then at most once per NSM_ALARM_REPEAT_MS. */

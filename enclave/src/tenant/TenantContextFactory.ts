@@ -86,7 +86,6 @@ export interface TenantContextFactoryDeps {
   mintMasterKey?: MintMasterKeyFn;
   unsealMasterKey?: UnsealMasterKeyFn;
   activePolicySnapshotFor?: (tenantId: string) => ReturnType<TenantContext['activePolicySnapshot']>;
-  emitAuthors?: boolean;
   logger?: Logger;
   /** Queue-job calls wait in the host gate (up to 90 minutes, then fail); other calls only count toward its windows. */
   upstreamGate?: UpstreamCallGate;
@@ -172,7 +171,6 @@ export class TenantContextFactory {
         () => context.current?.personalIdentifierKey() ?? null,
         {
           entityKey: () => context.current?.entityKey() ?? null,
-          emitAuthors: this.deps.emitAuthors === true,
           ...(this.deps.logger === undefined ? {} : { logger: this.deps.logger }),
           resourceScope,
           ...(this.deps.ingestDecisions === undefined
@@ -191,8 +189,6 @@ export class TenantContextFactory {
         hnsw,
         pipeline,
         sealedContentKeyrings,
-        sealedBlobBucket,
-        identity.rawPayloadsBucket ?? '',
         processedBucket,
         identity.deploymentId ?? '',
         identity.tenantDeploymentId,

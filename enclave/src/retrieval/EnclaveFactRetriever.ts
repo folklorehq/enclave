@@ -79,20 +79,6 @@ export class EnclaveFactRetriever implements FactRetriever, FactExcerptReader {
     }));
   }
 
-  // By-factId, no embedding, no ANN — the review queue already names its rows. Same fail-closed
-  // order as search: tenant first, audience gate before any decrypt; unauthorized facts are absent.
-  async snippetForFactIds(params: FactSnippetParams): Promise<Map<string, string>> {
-    const { orgId, userId, factIds } = params;
-    if (factIds.length === 0) return new Map();
-
-    const tenant = this.deps.resolveTenant(orgId);
-    const [metaRows, access] = await Promise.all([
-      this.deps.loadFactMetadata(orgId, factIds),
-      this.deps.resolveAudienceAccess(orgId, userId),
-    ]);
-    return this.decryptVisible(tenant.crypto, orgId, metaRows, access, SNIPPET_MAX_CHARS);
-  }
-
   // Access is resolved fresh, never from the cache, and the batch is bounded.
   async excerptsForFactIds(params: FactExcerptParams): Promise<Map<string, string>> {
     const { orgId, userId, factIds } = params;

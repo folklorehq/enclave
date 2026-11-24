@@ -3,7 +3,7 @@ import type { SealedTitleRef } from '../crypto/esdk.js';
 import type { TenantKeyedHasher } from '../sealing/TenantKeyedHasher.js';
 
 export const SEALED_TITLE_PADDED_BYTES = 1024;
-export const SEALED_TITLE_MAC_BYTES = 32;
+const SEALED_TITLE_MAC_BYTES = 32;
 
 const LENGTH_PREFIX_BYTES = 2;
 const BODY_BYTES = SEALED_TITLE_PADDED_BYTES - SEALED_TITLE_MAC_BYTES;
@@ -17,10 +17,10 @@ const STAMPED_TITLE_OFFSET = LENGTH_PREFIX_BYTES + STAMP_BYTES;
 const MAX_STAMPED_TITLE_BYTES = BODY_BYTES - STAMPED_TITLE_OFFSET;
 const STAMPED_MAC_DOMAIN = 'folklore:sealed-title-mac:v2\0';
 
-export type TitleMac = (title: string) => Buffer;
+type TitleMac = (title: string) => Buffer;
 
 // A fallback never displaces a real title; a withdrawn title is one the enclave puts over a real title whose facts became ineligible.
-export const TITLE_STANDINGS = ['real', 'fallback', 'withdrawn'] as const;
+const TITLE_STANDINGS = ['real', 'fallback', 'withdrawn'] as const;
 export type TitleStanding = (typeof TITLE_STANDINGS)[number];
 
 /** When the enclave sealed a title and how it ranks; a plain title is a real one sealed at 0. */
@@ -29,12 +29,12 @@ export interface TitleStamp {
   standing: TitleStanding;
 }
 
-export interface OpenedTitle {
+interface OpenedTitle {
   title: string;
   stamp: TitleStamp;
 }
 
-export type StampedTitleMac = (title: string, stamp: TitleStamp) => Buffer;
+type StampedTitleMac = (title: string, stamp: TitleStamp) => Buffer;
 
 export const UNSTAMPED: TitleStamp = Object.freeze({ sealedAtMs: 0, standing: 'real' });
 

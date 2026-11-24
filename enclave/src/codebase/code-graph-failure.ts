@@ -1,6 +1,6 @@
 import { EncryptionContextMismatchError } from '../crypto/esdk.js';
 
-export type CodeGraphFailureClass = 'corrupt' | 'unavailable';
+type CodeGraphFailureClass = 'corrupt' | 'unavailable';
 
 export const CODE_GRAPH_TOMBSTONE_UNAVAILABLE = 'code_graph_tombstone_unavailable';
 export const CODE_GRAPH_ERASE_UNAVAILABLE = 'code_graph_erase_unavailable';

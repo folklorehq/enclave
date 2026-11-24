@@ -91,7 +91,7 @@ type SettledEntry =
     }
   | { readonly ok: false; readonly reason: unknown };
 
-export interface AwsDurableGenerationHighWaterTransportConfig {
+interface AwsDurableGenerationHighWaterTransportConfig {
   readonly config: GenerationHighWaterRuntimeConfigV1;
   readonly s3: Pick<S3Client, 'send'>;
   readonly dynamodb: Pick<DynamoDBClient, 'send'>;

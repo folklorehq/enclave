@@ -26,7 +26,7 @@ const ALARM_CODES: ReadonlySet<string> = new Set([
   TYPESAFE_ROOT_SET_MISMATCH,
 ]);
 
-export interface TypeSafeErrorContext {
+interface TypeSafeErrorContext {
   readonly onCredentialRejected: () => void;
   readonly onAlarm?: (code: string) => void;
 }

@@ -11,13 +11,10 @@ const LOOPBACK_ADDRESS = '127.0.0.1';
 export class NodeRuntimeAttestationListener implements RuntimeAttestationListener {
   private server?: Server;
 
-  constructor(
-    private readonly port: number,
-    private readonly hostname = LOOPBACK_ADDRESS,
-  ) {}
+  constructor(private readonly port: number) {}
 
   async listen(handler: RuntimeAttestationFetchHandler): Promise<void> {
-    const server = serve({ fetch: handler, port: this.port, hostname: this.hostname });
+    const server = serve({ fetch: handler, port: this.port, hostname: LOOPBACK_ADDRESS });
     if (!(server instanceof Server)) {
       throw new Error('refusing to start: expected an http/1.1 runtime attestation server');
     }

@@ -121,7 +121,7 @@ export interface OAuthCompositionOptions {
   logger?: Logger;
 }
 
-export interface OAuthRuntime {
+interface OAuthRuntime {
   ingress: EnclaveOAuthIngress;
   refreshOAuthCredential(input: OAuthRefreshCommand): Promise<OAuthRefreshMetadataUpdate>;
   mintGitHubInstallationToken(input: {
@@ -315,10 +315,6 @@ export function createOAuthRuntime(options: OAuthCompositionOptions): OAuthRunti
     jiraWebhookAuthenticator,
     recordJiraWebhookDelivery: (input) => persistence.recordWebhookDelivery(input),
   };
-}
-
-export function createOAuthIngress(options: OAuthCompositionOptions): EnclaveOAuthIngress {
-  return createOAuthRuntime(options).ingress;
 }
 
 function cryptoFor(context: TenantContext): EnclaveCrypto {

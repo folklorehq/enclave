@@ -11,7 +11,7 @@ const AGENT_TOKEN_MISSING = 'member_link_agent_token_missing';
 const FETCH_FAILED = 'member_link_fetch_failed';
 const RESPONSE_INVALID = 'member_link_response_invalid';
 
-export interface ControlPlaneTenantMemberIdentityLinkSourceDeps {
+interface ControlPlaneTenantMemberIdentityLinkSourceDeps {
   readonly controlPlaneUrl: string;
   readonly runtimeDeploymentId: string;
   readonly tenantDeploymentId: string;

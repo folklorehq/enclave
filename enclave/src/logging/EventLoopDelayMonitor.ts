@@ -20,11 +20,11 @@ export interface LoopDelayHistogram {
   readonly max: number;
 }
 
-export interface LoopDelayTimer {
+interface LoopDelayTimer {
   stop(): void;
 }
 
-export interface EventLoopDelayMonitorOptions {
+interface EventLoopDelayMonitorOptions {
   histogram?: LoopDelayHistogram;
   resolutionMs?: number;
   reportEveryMs?: number;

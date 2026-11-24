@@ -7,7 +7,6 @@ import {
   signedBootManifestKeysetSchema,
   type BootManifest,
   type BootManifestWireName,
-  type RuntimeDatabaseCredentialReceipt,
   type SignedBootManifestKeyset,
 } from '@folklore/contracts/enclave-attestation';
 import { ConfigurationError } from '@folklore/errors';
@@ -19,67 +18,29 @@ import type { BootManifestSecretLoaderPort } from './BootManifestCoordinator.js'
 import { BootManifestVerifier } from './BootManifestVerifier.js';
 import type { BootManifestRuntimeIdentity, VerifiedBootManifest } from './BootManifestVerifier.js';
 import { KmsSealedAttestationBootCheckpointStore } from './KmsSealedAttestationBootCheckpointStore.js';
-import { NodeRuntimeAttestationListener } from './NodeRuntimeAttestationListener.js';
-import { RuntimeAttestationService } from './RuntimeAttestationService.js';
-import type {
-  RuntimeAttestationReadiness,
-  RuntimeAttestationReadinessSnapshot,
-} from './RuntimeAttestationService.js';
-import type {
-  RuntimeAttestationListener,
-  RuntimeAttestationServerOptions,
-} from './RuntimeAttestationServer.js';
-import type { NsmAttestationPort } from '../sealing/nsm.js';
 import { verifySignedBootManifestKeyset } from '@folklore/nitro-attestation';
 import type { BootSessionState, RuntimeEvidenceSessionPort } from './ports.js';
 import { bootPrepareStepCode } from './boot-prepare-failure.js';
-
-import type { TrustedTimeBindingV1 } from '@folklore/contracts';
-import { GenerationHighWaterTrustedTimeRecordProducer } from '../gate-a/GenerationHighWaterTrustedTimeRecordProducer.js';
-import type {
-  GenerationHighWaterTrustedTimeSamplePort,
-  GenerationHighWaterTrustedTimeSignerPort,
-} from '../gate-a/GenerationHighWaterTrustedTimeRecordProducer.js';
 
 export const DEFAULT_ENCLAVE_ATTESTATION_PORT = 8101;
 const RUNTIME_ATTESTATION_PREPARE_FAILED = 'runtime_attestation_prepare_failed';
 
 type RuntimeAttestationEnv = Partial<Record<string, string | undefined>>;
 
-interface CloseableRuntimeAttestationListener extends RuntimeAttestationListener {
-  close?(): Promise<void>;
-}
-
-export interface GenerationHighWaterTrustedTimeWiringDeps {
-  binding: TrustedTimeBindingV1;
-  sampler: GenerationHighWaterTrustedTimeSamplePort;
-  signer: GenerationHighWaterTrustedTimeSignerPort;
-}
-
-export interface RuntimeAttestationCompositionDeps {
+interface RuntimeAttestationCompositionDeps {
   env: RuntimeAttestationEnv;
   secretLoader: BootManifestSecretLoaderPort;
-  nsm: NsmAttestationPort;
-  isTenantAssigned(): boolean;
-  isTenantApiReady(): boolean;
-  getIngestPublicKey?(): Uint8Array | Promise<Uint8Array>;
-  getRuntimeDatabaseReceipt?(): RuntimeDatabaseCredentialReceipt | undefined;
-  listener?: CloseableRuntimeAttestationListener;
   s3?: S3Client;
   checkpointStore?: AttestationBootCheckpointStore;
-  logger?: Pick<Logger, 'info' | 'warn'>;
-  serverOptions?: RuntimeAttestationServerOptions;
-  /** Enclave trusted-time record wiring for the vsock control channel. */
-  trustedTime?: GenerationHighWaterTrustedTimeWiringDeps;
+  logger?: Pick<Logger, 'warn'>;
 }
 
-export type RuntimeAttestationLifecycleLogger = Pick<Logger, 'error'>;
+type RuntimeAttestationLifecycleLogger = Pick<Logger, 'error'>;
 
 interface RuntimeAttestationConfig {
   signedManifest: { wire: BootManifestWireName; manifest: BootManifest; raw: unknown };
   runtimeIdentity: BootManifestRuntimeIdentity;
   pinnedKeys: { signedKeyset: SignedBootManifestKeyset };
-  port: number;
 }
 
 export class RuntimeAttestationComposition implements RuntimeEvidenceSessionPort {
@@ -92,16 +53,10 @@ export class RuntimeAttestationComposition implements RuntimeEvidenceSessionPort
     private readonly runtimeIdentity: BootManifestRuntimeIdentity,
     private readonly bootState: AttestationBootState,
     private readonly composer: AttestationBootComposer,
-    private readonly listener: CloseableRuntimeAttestationListener,
     private readonly verifier: BootManifestVerifier,
-    private readonly logger?: Pick<Logger, 'info'>,
-    trustedTime?: GenerationHighWaterTrustedTimeWiringDeps,
-  ) {
-    this.#trustedTimeWiring = trustedTime;
-  }
+  ) {}
 
   #verifiedManifest: VerifiedBootManifest | undefined;
-  readonly #trustedTimeWiring: GenerationHighWaterTrustedTimeWiringDeps | undefined;
 
   async prepare(): Promise<void> {
     this.#verifiedManifest = await this.composer.prepare(
@@ -121,62 +76,17 @@ export class RuntimeAttestationComposition implements RuntimeEvidenceSessionPort
     return this.#verifiedManifest;
   }
 
-  /** The installed recovery-root digest reported by the composition. */
-  installedRecoveryRootDigest(): string {
-    return this.verifier.installedRecoveryRootDigest();
-  }
-
-  /** UNWIRED: Trusted-time commissioning record production has no live caller. */
-  gateATrustedTimeRecordProducer(): GenerationHighWaterTrustedTimeRecordProducer {
-    if (!this.#verifiedManifest) throw new Error('runtime_attestation_not_prepared');
-    if (!this.#trustedTimeWiring) throw new Error('trusted_time_wiring_unavailable');
-    return new GenerationHighWaterTrustedTimeRecordProducer({
-      binding: this.#trustedTimeWiring.binding,
-      sampler: this.#trustedTimeWiring.sampler,
-      signer: this.#trustedTimeWiring.signer,
-    });
-  }
-
   /** Content-free boot session identity for the evidence seam. */
   bootSessionState(): BootSessionState {
     return this.verifier.bootSessionState();
-  }
-
-  bootWire(): BootManifestWireName {
-    return this.signedManifest.wire;
   }
 
   secretValue(id: string): string {
     return this.bootState.secretValue(id);
   }
 
-  async markKmsUnsealed(unseal: () => Promise<void>): Promise<void> {
-    await this.bootState.unsealWithKms(unseal);
-  }
-
   async signalKmsUnsealed(): Promise<void> {
     await this.bootState.markKmsUnsealed();
-  }
-
-  async enable(): Promise<void> {
-    await this.composer.enableRuntimeAttestation();
-  }
-
-  async start(): Promise<void> {
-    await this.composer.start(this.listener);
-    this.logger?.info('runtime attestation listener started');
-  }
-
-  signAssignmentAck(payload: Uint8Array): { publicKey: Uint8Array; signature: Uint8Array } {
-    return this.composer.sign(payload);
-  }
-
-  sessionPublicKey(): Uint8Array {
-    return this.composer.sessionPublicKey();
-  }
-
-  async close(): Promise<void> {
-    await this.listener.close?.();
   }
 }
 
@@ -194,34 +104,6 @@ export async function initializeRuntimeAttestationForBoot(
   const signaled = await signalKmsUnsealed(prepared, logger);
   if (!signaled) throw new Error('runtime_attestation_kms_signal_failed');
   return signaled;
-}
-
-export async function enableRuntimeAttestation(
-  composition: RuntimeAttestationComposition | null | undefined,
-  logger: RuntimeAttestationLifecycleLogger,
-): Promise<RuntimeAttestationComposition | null> {
-  if (!composition) return null;
-  try {
-    await composition.enable();
-    return composition;
-  } catch (error) {
-    logger.error('RUNTIME_ATTESTATION_ENABLE_FAILED', { errorName: errorName(error) });
-    return null;
-  }
-}
-
-export async function startRuntimeAttestation(
-  composition: RuntimeAttestationComposition | null | undefined,
-  logger: RuntimeAttestationLifecycleLogger,
-): Promise<RuntimeAttestationComposition | null> {
-  if (!composition) return null;
-  try {
-    await composition.start();
-    return composition;
-  } catch (error) {
-    logger.error('RUNTIME_ATTESTATION_START_FAILED', { errorName: errorName(error) });
-    return null;
-  }
 }
 
 async function prepareRuntimeAttestation(
@@ -270,27 +152,12 @@ export function createRuntimeAttestationComposition(
     new BootManifestCoordinator(verifier, deps.secretLoader),
     deps.checkpointStore ?? createPersistentCheckpointStore(config, deps.s3),
   );
-  const readiness = new CompositionReadiness(
-    bootState,
-    config.signedManifest.manifest,
-    deps.isTenantAssigned,
-    deps.isTenantApiReady,
-    deps.getIngestPublicKey,
-    deps.getRuntimeDatabaseReceipt,
-  );
-  const service = new RuntimeAttestationService(readiness, deps.nsm, {
-    now: () => new Date(),
-  });
-  const listener = deps.listener ?? new NodeRuntimeAttestationListener(config.port);
   return new RuntimeAttestationComposition(
     config.signedManifest,
     config.runtimeIdentity,
     bootState,
-    new AttestationBootComposer(bootState, service, deps.serverOptions),
-    listener,
+    new AttestationBootComposer(bootState),
     verifier,
-    deps.logger,
-    deps.trustedTime,
   );
 }
 
@@ -335,7 +202,6 @@ function readRuntimeAttestationConfig(
     signedManifest: readSignedManifest(signedManifestRaw),
     runtimeIdentity: readRuntimeIdentity(env),
     pinnedKeys: readPinnedKeys(env),
-    port: readPort(env['ENCLAVE_ATTESTATION_PORT']),
   };
 }
 
@@ -448,13 +314,6 @@ function readConfigurationGeneration(env: RuntimeAttestationEnv): number {
   return parsed;
 }
 
-function readPort(raw: string | undefined): number {
-  if (!raw) return DEFAULT_ENCLAVE_ATTESTATION_PORT;
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65_535) throw invalidConfig();
-  return parsed;
-}
-
 function readJson(raw: string | undefined): unknown {
   if (!raw) throw invalidConfig();
   try {
@@ -481,33 +340,4 @@ function invalidConfig(): ConfigurationError {
   return new ConfigurationError('runtime attestation boot config invalid', {
     component: 'enclave-attestation',
   });
-}
-
-class CompositionReadiness implements RuntimeAttestationReadiness {
-  constructor(
-    private readonly bootState: AttestationBootState,
-    private readonly manifest: BootManifest,
-    private readonly isTenantAssigned: () => boolean,
-    private readonly isTenantApiReady: () => boolean,
-    private readonly ingestPublicKey?: () => Uint8Array | Promise<Uint8Array>,
-    private readonly runtimeDatabaseReceipt?: () => RuntimeDatabaseCredentialReceipt | undefined,
-  ) {}
-
-  getIngestPublicKey(): Uint8Array | Promise<Uint8Array> {
-    if (!this.ingestPublicKey) return Uint8Array.from([]);
-    return this.ingestPublicKey();
-  }
-
-  async getReadiness(): Promise<RuntimeAttestationReadinessSnapshot> {
-    const bootReadiness = await this.bootState.getReadiness();
-    const runtimeDatabase = this.runtimeDatabaseReceipt?.();
-    return {
-      manifest: this.manifest,
-      tenantAssigned: this.isTenantAssigned(),
-      bootManifestVerified: bootReadiness.bootManifestVerified,
-      kmsUnsealed: bootReadiness.kmsUnsealed,
-      tenantApiReady: this.isTenantApiReady(),
-      ...(runtimeDatabase ? { runtimeDatabase } : {}),
-    };
-  }
 }

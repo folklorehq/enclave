@@ -8,8 +8,6 @@ export type RuntimeAttestationFetchHandler = (request: Request) => Response | Pr
 
 export interface RuntimeAttestationEvidenceCollector {
   collect(nonce: Uint8Array): Promise<EnclaveRuntimeEvidence>;
-  sign?(payload: Uint8Array): { publicKey: Uint8Array; signature: Uint8Array };
-  sessionPublicKey?(): Uint8Array;
 }
 
 export interface RuntimeAttestationListener {
@@ -37,7 +35,6 @@ type RuntimeAttestationErrorCode =
   | 'runtime_attestation_in_progress'
   | 'runtime_attestation_invalid_nonce'
   | 'runtime_attestation_invalid_request'
-  | 'runtime_attestation_manifest_changed'
   | 'runtime_attestation_not_found'
   | 'runtime_attestation_not_ready'
   | 'runtime_attestation_rate_limited'
@@ -62,7 +59,6 @@ const ERROR_STATUS: Record<RuntimeAttestationErrorCode, number> = {
   runtime_attestation_in_progress: 409,
   runtime_attestation_invalid_nonce: 400,
   runtime_attestation_invalid_request: 400,
-  runtime_attestation_manifest_changed: 503,
   runtime_attestation_not_found: 404,
   runtime_attestation_not_ready: 503,
   runtime_attestation_rate_limited: 429,

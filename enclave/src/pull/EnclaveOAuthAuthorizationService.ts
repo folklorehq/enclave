@@ -67,7 +67,7 @@ export interface MemberIdentityLinkPersistencePort {
   persist(input: MemberIdentityLinkPersistenceRecord): Promise<void>;
 }
 
-export class EnclaveOAuthRedemptionError extends OAuthRefusal {
+class EnclaveOAuthRedemptionError extends OAuthRefusal {
   constructor(underlying?: unknown) {
     super(REDEMPTION_FAILED, oauthFailureReason(underlying, REDEMPTION_FAILED));
     this.name = 'EnclaveOAuthRedemptionError';

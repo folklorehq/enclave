@@ -9,7 +9,7 @@ export type ProviderKeyManifest = Pick<
   'awsAccountId' | 'awsRegion' | 'storageKeyArn' | 'enclaveOutputKeyKmsKeyArn'
 >;
 
-export interface AttestedProviderKeySpec {
+interface AttestedProviderKeySpec {
   readonly parameterPath: string;
   readonly keyAlias: string;
   readonly keyShape: RegExp;
@@ -17,7 +17,7 @@ export interface AttestedProviderKeySpec {
   readonly unavailable: () => Error;
 }
 
-export interface AttestedProviderKeyDeps {
+interface AttestedProviderKeyDeps {
   readonly reader: Pick<AttestedSsmParameterReader, 'read'>;
   readonly manifest: () => ProviderKeyManifest | undefined;
 }

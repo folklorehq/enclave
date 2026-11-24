@@ -1,6 +1,6 @@
 import { ServiceUnavailableError } from '@folklore/errors';
 
-export type TenantRequestRelease = () => void;
+type TenantRequestRelease = () => void;
 // A tenant stays fenced, or its queue work evicted, until every holder that closed it releases it.
 export type TenantQuiescenceHolder = 'assignment' | 'halt';
 

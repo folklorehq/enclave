@@ -11,9 +11,9 @@ export const UPSTREAM_WINDOW_LIMITS: AdaptiveWindowLimits = {
   floor: 2,
   ceiling: 64,
 };
-export const OVERLOAD_DECREASE_FACTOR = 0.5;
-export const LATENCY_DECREASE_FACTOR = 0.8;
-export const PAUSE_JITTER_FRACTION = 0.1;
+const OVERLOAD_DECREASE_FACTOR = 0.5;
+const LATENCY_DECREASE_FACTOR = 0.8;
+const PAUSE_JITTER_FRACTION = 0.1;
 
 /** One upstream's concurrency window: slow start, additive growth, one multiplicative decrease per epoch. */
 export class AdaptiveUpstreamWindow {

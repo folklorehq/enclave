@@ -130,7 +130,7 @@ function getP384LeafKey(leaf: X509Certificate): KeyObject {
   return publicKey;
 }
 
-export interface CertificatePathInput {
+interface CertificatePathInput {
   leafDer: Uint8Array;
   cabundle: Uint8Array[];
   trustedRootDer: Uint8Array;

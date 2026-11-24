@@ -20,7 +20,7 @@ const AES_KEY_BYTES = 32;
 const GCM_NONCE_BYTES = 12;
 const GCM_TAG_BYTES = 16;
 
-export interface RecoverySealedBox {
+interface RecoverySealedBox {
   ephemeralPublicKey: string;
   nonce: string;
   ciphertext: string;

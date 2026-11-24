@@ -5,7 +5,7 @@ import type { ResourceScope } from './ResourceScopeStore.js';
 
 export const RESOURCE_SCOPE_CACHE_TTL_MS = 60_000;
 
-export interface ResourceScopeFilterDeps {
+interface ResourceScopeFilterDeps {
   orgId: string;
   readScope(sourceKind: string): Promise<ResourceScope>;
   now?: () => number;

@@ -59,22 +59,13 @@ export interface AttestationBootManifestCoordinatorPort {
   ): Promise<BootManifestCoordinatorResult>;
 }
 
-export interface AttestationBootClock {
+interface AttestationBootClock {
   now(): Date;
 }
-
-export type AttestationBootReadinessSnapshot = Readonly<{
-  bootManifestVerified: boolean;
-  kmsUnsealed: boolean;
-  hasInProcessSecrets: boolean;
-  inProcessGeneration: number;
-  checkpoint: AttestationBootCheckpoint | null;
-}>;
 
 export class AttestationBootState {
   #prepared: BootManifestCoordinatorResult | undefined;
   #kmsUnsealed = false;
-  #inProcessGeneration = 0;
 
   constructor(
     private readonly coordinator: AttestationBootManifestCoordinatorPort,
@@ -102,18 +93,6 @@ export class AttestationBootState {
   clear(): void {
     this.#prepared = undefined;
     this.#kmsUnsealed = false;
-    this.#inProcessGeneration += 1;
-  }
-
-  async unsealWithKms(unseal: () => Promise<void>): Promise<void> {
-    const prepared = this.#prepared;
-    if (prepared === undefined) throw this.failure(attestationBootStateErrors.notVerified);
-    try {
-      await unseal();
-    } catch {
-      throw this.failure(attestationBootStateErrors.kmsNotReady);
-    }
-    await this.markKmsUnsealed();
   }
 
   async markKmsUnsealed(): Promise<void> {
@@ -125,24 +104,6 @@ export class AttestationBootState {
 
   isKmsUnsealed(): boolean {
     return this.#prepared !== undefined && this.#kmsUnsealed;
-  }
-
-  async getReadiness(): Promise<AttestationBootReadinessSnapshot> {
-    const checkpoint = await this.readCheckpoint();
-    const prepared = this.#prepared;
-    if (prepared !== undefined) {
-      this.assertCheckpointMatchesManifest(
-        checkpoint,
-        this.checkpoint('manifest_verified', prepared.manifest),
-      );
-    }
-    return Object.freeze({
-      bootManifestVerified: prepared !== undefined,
-      kmsUnsealed: this.#kmsUnsealed,
-      hasInProcessSecrets: prepared !== undefined && prepared.secrets.length > 0,
-      inProcessGeneration: this.#inProcessGeneration,
-      checkpoint,
-    });
   }
 
   secretValue(id: string): string {
@@ -191,25 +152,6 @@ export class AttestationBootState {
       persisted.configurationGeneration === candidate.configurationGeneration &&
       persisted.manifestHash !== candidate.manifestHash
     ) {
-      throw this.failure(attestationBootStateErrors.checkpointConflict);
-    }
-  }
-
-  private assertCheckpointMatchesManifest(
-    persisted: AttestationBootCheckpoint | null,
-    candidate: AttestationBootCheckpoint,
-  ): void {
-    if (persisted === null) throw this.failure(attestationBootStateErrors.checkpointInvalid);
-    if (persisted.orgId !== candidate.orgId || persisted.deploymentId !== candidate.deploymentId) {
-      throw this.failure(attestationBootStateErrors.checkpointInvalid);
-    }
-    if (persisted.configurationGeneration > candidate.configurationGeneration) {
-      throw this.failure(attestationBootStateErrors.checkpointSuperseded);
-    }
-    if (persisted.configurationGeneration < candidate.configurationGeneration) {
-      throw this.failure(attestationBootStateErrors.checkpointSuperseded);
-    }
-    if (persisted.manifestHash !== candidate.manifestHash) {
       throw this.failure(attestationBootStateErrors.checkpointConflict);
     }
   }

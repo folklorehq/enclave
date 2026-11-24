@@ -10,7 +10,7 @@ import type { TenantPolicyOperationBackend } from '../TenantPolicyBoundInference
 import type { ProviderRoute } from './InferenceRouteResolver.js';
 
 export const INFERENCE_PROVIDER_UNREGISTERED = 'inference_provider_unregistered';
-export const INFERENCE_PROVIDER_DUPLICATE = 'inference_provider_duplicate';
+const INFERENCE_PROVIDER_DUPLICATE = 'inference_provider_duplicate';
 
 export type ProviderRouteBackendFactory = (
   binding: VerifiedActivePolicyRoleBindingV1,

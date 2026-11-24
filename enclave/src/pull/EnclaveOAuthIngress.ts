@@ -46,17 +46,15 @@ export interface EnclaveOAuthIngressHandlers {
   eraseCodebaseGraph?(input: CodebaseGraphEraseCommand): Promise<CodebaseGraphEraseResponse>;
 }
 
-export interface EnclaveOAuthIngressOptions {
+interface EnclaveOAuthIngressOptions {
   /** Deployment token loaded from SSM; callbacks never authenticate with a public URL alone. */
   authorizationToken: string;
-  maxBodyBytes?: number;
   logger?: Logger;
 }
 
 /** HTTP boundary for opaque OAuth envelopes; all redemption and persistence remain in enclave RAM. */
 export class EnclaveOAuthIngress {
   readonly app: Hono;
-  private readonly maxBodyBytes: number;
   private readonly logger: Logger | undefined;
 
   constructor(
@@ -64,10 +62,6 @@ export class EnclaveOAuthIngress {
     options: EnclaveOAuthIngressOptions,
   ) {
     if (!options.authorizationToken) throw new Error('oauth_ingress_auth_unavailable');
-    this.maxBodyBytes = options.maxBodyBytes ?? MAX_SUBMISSION_BYTES;
-    if (!Number.isSafeInteger(this.maxBodyBytes) || this.maxBodyBytes < 1) {
-      throw new Error('oauth_ingress_body_limit_invalid');
-    }
     this.authorizationToken = options.authorizationToken;
     this.logger = options.logger;
     this.app = new Hono();
@@ -208,11 +202,11 @@ export class EnclaveOAuthIngress {
     const declared = request.headers.get('content-length');
     if (declared !== null) {
       const length = Number(declared);
-      if (!Number.isSafeInteger(length) || length < 0 || length > this.maxBodyBytes) return null;
+      if (!Number.isSafeInteger(length) || length < 0 || length > MAX_SUBMISSION_BYTES) return null;
     }
     try {
       const bytes = new Uint8Array(await request.arrayBuffer());
-      if (bytes.byteLength > this.maxBodyBytes) return null;
+      if (bytes.byteLength > MAX_SUBMISSION_BYTES) return null;
       return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
     } catch {
       return null;

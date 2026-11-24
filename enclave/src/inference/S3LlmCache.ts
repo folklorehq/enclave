@@ -4,7 +4,7 @@ import type { LlmCacheNamer } from './llm-cache.js';
 import { LlmRamFront, type LlmRamFrontOptions } from './LlmRamFront.js';
 import { float32Vector, parseVector, type LlmOperationCache } from './vector-cache.js';
 
-export interface S3LlmCacheDeps {
+interface S3LlmCacheDeps {
   s3: S3Client;
   crypto: EnclaveCrypto;
   bucket: string;

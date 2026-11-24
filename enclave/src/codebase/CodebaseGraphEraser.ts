@@ -10,7 +10,7 @@ import { resolveCodeGraphConsent, UNRECORDED_TOMBSTONE_MARKER } from './CodeGrap
 import { CodebaseSelectionStore } from './CodebaseSelectionStore.js';
 import { GitHubCodebaseConnectionResolver } from './GitHubCodebaseConnectionResolver.js';
 
-export interface CodebaseGraphEraserDeps {
+interface CodebaseGraphEraserDeps {
   s3: S3Client | undefined;
   resolveTenant(orgId: string): TenantContext;
   controlPlaneUrl: string;

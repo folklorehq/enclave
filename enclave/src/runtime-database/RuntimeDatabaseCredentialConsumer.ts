@@ -38,8 +38,6 @@ const credentialSchema = z
   })
   .strict();
 
-export type { RuntimeDatabaseCredentialErrorCode };
-
 export class RuntimeDatabaseCredentialError extends Error {
   constructor(code: RuntimeDatabaseCredentialErrorCode) {
     super(code);
@@ -47,13 +45,13 @@ export class RuntimeDatabaseCredentialError extends Error {
   }
 }
 
-export interface RuntimeDatabaseParameter {
+interface RuntimeDatabaseParameter {
   name?: string;
   version?: number;
   value?: string;
 }
 
-export interface RuntimeDatabaseParameterPort {
+interface RuntimeDatabaseParameterPort {
   getExact(input: { name: string; version: number }): Promise<RuntimeDatabaseParameter>;
 }
 
@@ -61,23 +59,23 @@ export interface RuntimeDatabaseConnection {
   close(): Promise<void>;
 }
 
-export interface RecipientDecryptInput {
+interface RecipientDecryptInput {
   ciphertext: Buffer;
   keyId: string;
   encryptionContext: RuntimeDatabaseBinding;
 }
 
-export interface RuntimeDatabaseRecipientDecryptor {
+interface RuntimeDatabaseRecipientDecryptor {
   decryptForRecipient(input: RecipientDecryptInput): Promise<Buffer>;
 }
 
-export interface RuntimeDatabaseReadinessResult {
+interface RuntimeDatabaseReadinessResult {
   role: 'folklore_app';
   rls: 'enforced';
   apiHealth: 'healthy';
 }
 
-export interface RuntimeDatabaseReadinessPort<TDatabase extends RuntimeDatabaseConnection> {
+interface RuntimeDatabaseReadinessPort<TDatabase extends RuntimeDatabaseConnection> {
   verify(
     database: TDatabase,
     config: RuntimeDatabaseConfig,
@@ -92,7 +90,7 @@ interface RuntimeDatabaseCredentialConsumerDeps<TDatabase extends RuntimeDatabas
   readiness: RuntimeDatabaseReadinessPort<TDatabase>;
 }
 
-export interface ConsumedRuntimeDatabaseCredential<TDatabase extends RuntimeDatabaseConnection> {
+interface ConsumedRuntimeDatabaseCredential<TDatabase extends RuntimeDatabaseConnection> {
   database: TDatabase;
   receipt: RuntimeDatabaseCredentialReceipt;
 }

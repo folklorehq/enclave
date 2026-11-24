@@ -44,7 +44,7 @@ const AGGREGATED_PHASES: ReadonlyMap<InferenceSpanPhase, readonly [TimedSum, Tim
   ['verify_receipt', ['verifyMs', 'verifyMaxMs']],
 ]);
 
-export type SpanFailureClassifier = (error: unknown) => SpanFailure;
+type SpanFailureClassifier = (error: unknown) => SpanFailure;
 
 interface UsageLabel {
   readonly purpose: InferencePurpose | typeof UNTAGGED;

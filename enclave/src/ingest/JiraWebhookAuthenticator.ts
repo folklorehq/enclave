@@ -57,14 +57,14 @@ export interface JiraWebhookAuthenticationInput {
   webhookIdentifier: string;
 }
 
-export interface JiraWebhookAuthenticationResult {
+interface JiraWebhookAuthenticationResult {
   registrationId: string;
   webhookIdentifier: string;
   commitReplay: () => Promise<void>;
   releaseReplay: () => Promise<void>;
 }
 
-export interface JiraWebhookAuthenticatorOptions extends JiraWebhookClaimPolicy {
+interface JiraWebhookAuthenticatorOptions extends JiraWebhookClaimPolicy {
   clock?: () => Date;
   loadClientSecret: () => Promise<string>;
   reserveReplay?: (input: {

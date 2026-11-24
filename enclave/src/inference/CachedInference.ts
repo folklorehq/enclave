@@ -27,7 +27,7 @@ export interface CritiqueInference {
 
 export type SynthesisInference = InferenceModel & CritiqueInference;
 
-export interface CachedInferenceModels {
+interface CachedInferenceModels {
   embedModel: string;
   generateModel: string;
   critiqueModel: string;

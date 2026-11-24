@@ -26,7 +26,7 @@ export interface ProjectionTenant {
 
 export type TenantProjectionOutcome = EntitlementSyncOutcome | 'database_unavailable';
 
-export interface TenantEntitlementProjectionRunnerDeps {
+interface TenantEntitlementProjectionRunnerDeps {
   readonly tenants: () => readonly ProjectionTenant[];
   readonly beginTenant: (tenantId: string) => Promise<(() => void) | undefined>;
   readonly syncTenant: (tenant: ProjectionTenant) => Promise<TenantProjectionOutcome>;

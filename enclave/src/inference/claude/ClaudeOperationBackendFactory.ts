@@ -31,7 +31,7 @@ const HIGH_WATER_UNAVAILABLE = 'claude_high_water_unavailable';
 const MOVED_HEAD_PREFIX = 'active_policy_';
 const MOVED_HEAD_MESSAGES: ReadonlySet<string> = new Set(['checkpoint_not_pinned']);
 
-export interface ClaudeOperationBackendFactoryDeps {
+interface ClaudeOperationBackendFactoryDeps {
   readonly resolver: InferenceRouteResolver;
   readonly authority: OperationAuthority;
   readonly credentials: () => ClaudeCredentialSource;

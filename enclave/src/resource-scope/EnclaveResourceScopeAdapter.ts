@@ -30,7 +30,7 @@ interface TenantScopeContext {
   resourceScope?: Pick<ResourceScopeFilter, 'invalidate'>;
 }
 
-export interface EnclaveResourceScopeAdapterDeps {
+interface EnclaveResourceScopeAdapterDeps {
   s3: S3Client;
   resolveTenant(orgId: string): TenantScopeContext;
   connectors: SourceResourceLister;

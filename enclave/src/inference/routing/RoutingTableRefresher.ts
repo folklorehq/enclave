@@ -6,7 +6,7 @@ import {
 } from './RoutingTableVerifier.js';
 import { ROUTING_TABLE_EXPIRY_WARNING_MS, ROUTING_TABLE_REQUIRED } from './routing-table-policy.js';
 
-export const ROUTING_TABLE_REFRESH_MS = 300_000;
+const ROUTING_TABLE_REFRESH_MS = 300_000;
 
 const ALARM_READ_FAILED = 'inference_routing_table_read_failed';
 const ALARM_ABSENT = 'inference_routing_table_absent';
@@ -18,7 +18,7 @@ export interface RoutingTableSource {
   alarm(code: string): void;
 }
 
-export interface RoutingTableRefresherDeps {
+interface RoutingTableRefresherDeps {
   readonly onAlarm: (code: string) => void;
   readonly onApplied: (version: number) => void;
   readonly now?: () => number;

@@ -6,7 +6,7 @@ import { awsHttpsProxyAgent } from '../egress/proxy.js';
 export const AWS_SOCKET_IDLE_TIMEOUT_MS = 5_000;
 // Three times the longest SQS long poll (20 s); a one-write TLS upload to S3 also looks idle this long.
 const AWS_LONG_SOCKET_IDLE_TIMEOUT_MS = 60_000;
-export const AWS_CONNECTION_TIMEOUT_MS = 10_000;
+const AWS_CONNECTION_TIMEOUT_MS = 10_000;
 
 type AwsCredentialIdentityProvider = ReturnType<typeof fromInstanceMetadata>;
 type AwsCredentials = Awaited<ReturnType<AwsCredentialIdentityProvider>>;

@@ -4,7 +4,7 @@ const QUARANTINE_SEGMENT = 'quarantine/v1';
 const UNPARSED_SEGMENT = 'unparsed';
 const SHARD_KEY_SEGMENTS = 3;
 
-export const QUARANTINE_GENERATION = 'quarantine';
+const QUARANTINE_GENERATION = 'quarantine';
 
 export interface ParsedShardKey {
   generation: string;

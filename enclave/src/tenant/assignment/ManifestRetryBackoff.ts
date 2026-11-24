@@ -2,13 +2,13 @@ import { isFailureCodeSlug } from '@folklore/core';
 
 export const MANIFEST_RETRY_BACKOFF_ALARM = 'assignment_manifest_retry_backoff';
 
-export interface ManifestRetryBackoffOptions {
+interface ManifestRetryBackoffOptions {
   readonly baseDelayMs: number;
   readonly maxDelayMs: number;
   readonly now?: () => number;
 }
 
-export interface DeferredManifestRetry {
+interface DeferredManifestRetry {
   readonly failures: number;
   readonly refusal: unknown;
 }

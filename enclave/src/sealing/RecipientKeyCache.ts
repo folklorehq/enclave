@@ -10,7 +10,7 @@ export interface RecipientKeySource {
   acquire(): Promise<RecipientKeyPair>;
 }
 
-export interface RecipientKeyCacheOptions {
+interface RecipientKeyCacheOptions {
   generate: () => Promise<RecipientKeyPair>;
   ttlMs: number;
   refreshLeadMs: number;

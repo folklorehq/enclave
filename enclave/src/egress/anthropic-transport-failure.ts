@@ -5,7 +5,7 @@ import { PINNED_UPSTREAM_TIMEOUT, pinnedTransportFailureOf } from './pinned-tran
 export const TLS_UNTRUSTED = 'claude_tls_untrusted';
 export const UPSTREAM_TIMEOUT_CAUSE = PINNED_UPSTREAM_TIMEOUT;
 
-export type TransportFailure =
+type TransportFailure =
   | typeof TLS_UNTRUSTED
   | typeof UPSTREAM_TIMEOUT_CAUSE
   | typeof ANTHROPIC_REQUEST_REFUSED

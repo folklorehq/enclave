@@ -2,7 +2,7 @@ import type { RoutedProviderId } from '@folklore/contracts';
 import { CLAUDE_REQUEST_TOO_LARGE } from '../claude/claude-request.js';
 import { CLAUDE_TRANSIENT_STATUSES } from '../claude/claude-route-errors.js';
 
-export interface ProviderRoutePolicy {
+interface ProviderRoutePolicy {
   readonly transientStatuses: ReadonlySet<number>;
   readonly upstreamKeyPrefix: string;
   readonly cacheRouteLabel: string;

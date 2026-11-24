@@ -29,7 +29,7 @@ export interface MemberIdentityLinkAppliedReaderPort {
   ): Promise<string[] | 'database_unavailable'>;
 }
 
-export interface MemberIdentityLinkRelayDeps {
+interface MemberIdentityLinkRelayDeps {
   readonly reader: MemberIdentityLinkAppliedReaderPort;
   readonly emit: (output: MemberIdentityLinkOutput) => Promise<void>;
   readonly logger: Logger;

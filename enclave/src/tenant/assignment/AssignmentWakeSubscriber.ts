@@ -2,7 +2,7 @@ import type { RedisCache } from '@folklore/cache';
 import type { Logger } from '@folklore/core';
 import { poolAssignmentWakeChannel } from '@folklore/contracts';
 
-export interface AssignmentWakeTarget {
+interface AssignmentWakeTarget {
   wake(): void;
 }
 

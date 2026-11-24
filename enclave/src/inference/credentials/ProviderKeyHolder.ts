@@ -3,7 +3,7 @@ const HELD_AFTER_INVALIDATION_MS = 60_000;
 
 export type KeyInvalidation = 'rejected' | 'mismatch';
 
-export interface ProviderKeyHolderDeps {
+interface ProviderKeyHolderDeps {
   readonly load: () => Promise<Buffer>;
   readonly heldError: (reason: KeyInvalidation) => Error;
   readonly now?: () => number;

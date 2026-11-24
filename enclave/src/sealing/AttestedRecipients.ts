@@ -13,7 +13,7 @@ export interface AttestedRecipientSource {
   withRecipient<T>(use: (recipient: AttestedRecipient) => Promise<T>): Promise<T>;
 }
 
-export type AttestationDocumentProvider = (publicKeyDer: Buffer) => Uint8Array;
+type AttestationDocumentProvider = (publicKeyDer: Buffer) => Uint8Array;
 
 // A document is attested per call, so no KMS request reuses one; only the key pair behind it is shared.
 export class AttestedRecipients implements AttestedRecipientSource {

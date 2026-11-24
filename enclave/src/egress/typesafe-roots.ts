@@ -3,7 +3,7 @@ import { selectPinnedRootPems } from './pinned-roots.js';
 
 export const TYPESAFE_ROOT_SET_MISMATCH = 'typesafe_tls_root_set_mismatch';
 
-export const TYPESAFE_ROOT_SPKI_SHA256: readonly string[] = Object.freeze([
+const TYPESAFE_ROOT_SPKI_SHA256: readonly string[] = Object.freeze([
   '0b9fa5a59eed715c26c1020c711b4f6ec42d58b0015e14337a39dad301c5afc3',
   '0e8bb18bbeefb381be21bfc1a206d317298462ad104855f04a0542699708d3d4',
   '15eed339594b304f8cf847b477371d8d6fec61f4db2b01af589e7c53b35cae4c',

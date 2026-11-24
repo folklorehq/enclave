@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { parseRetryAfterMs } from '@folklore/utils';
 
 export const MAX_PROVIDER_PAUSE_MS = 60_000;
-export const NEAR_LIMIT_FRACTION = 0.1;
+const NEAR_LIMIT_FRACTION = 0.1;
 
 const ANTHROPIC_FAMILIES = ['requests', 'tokens', 'input-tokens', 'output-tokens'] as const;
 const OPENAI_FAMILIES = ['requests', 'tokens'] as const;
@@ -41,7 +41,7 @@ export interface UpstreamCallObserver {
   usage(promptTokens: number, completionTokens: number): void;
 }
 
-export class UpstreamObservationScope {
+class UpstreamObservationScope {
   private readonly storage = new AsyncLocalStorage<UpstreamCallObserver>();
 
   run<T>(observer: UpstreamCallObserver, fn: () => Promise<T>): Promise<T> {

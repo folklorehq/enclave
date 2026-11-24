@@ -1,7 +1,7 @@
 import type { PullDueMessage } from '../../pull/pull-runner.js';
 import type { QueueAssignment } from '../QueueSetDrainer.js';
 
-export interface PendingContinuation {
+interface PendingContinuation {
   assignment: QueueAssignment;
   message: PullDueMessage;
 }

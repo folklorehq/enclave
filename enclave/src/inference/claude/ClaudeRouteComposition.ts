@@ -16,7 +16,7 @@ import { isAnthropicRoute } from './anthropic-route.js';
 import { fitsModel } from './claude-request.js';
 import { CLAUDE_ROUTE_PROVIDER_MISMATCH, ClaudeRouteError } from './claude-route-errors.js';
 
-export interface ClaudeRouteCompositionDeps {
+interface ClaudeRouteCompositionDeps {
   readonly resolver: InferenceRouteResolver;
   readonly reader: () => Pick<AttestedSsmParameterReader, 'read'>;
   readonly manifest: () => ClaudeCredentialManifest | undefined;

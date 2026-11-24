@@ -19,7 +19,7 @@ export const HAIKU_MAX_INPUT_TOKENS = 100_000;
 
 export const CLAUDE_WRITING_PURPOSES: ReadonlySet<InferencePurpose> = INFERENCE_WRITING_PURPOSES;
 
-export interface ClaudePurposeLimit {
+interface ClaudePurposeLimit {
   readonly visibleMax: number;
   readonly cacheMark: boolean;
 }

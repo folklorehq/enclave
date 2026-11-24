@@ -10,7 +10,7 @@ export interface ExtendHeadroom {
   heapLimitBytes: number;
 }
 
-export interface SaveCostBatchingOptions {
+interface SaveCostBatchingOptions {
   clock?: () => number;
   // Past the base target a sweep extends only while this holds.
   canExtend?: () => boolean;

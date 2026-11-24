@@ -30,7 +30,7 @@ import { PolicyGenerationQuiescence } from './quiescence/PolicyGenerationQuiesce
 import type { TenantEviction } from './quiescence/tenant-generation-quiescence.js';
 import { ManifestRetryBackoff } from './assignment/ManifestRetryBackoff.js';
 
-export type BuildTenantContext = (
+type BuildTenantContext = (
   identity: TenantIdentity,
   resident?: ResidentIndexOffer,
 ) => Promise<TenantContext>;
@@ -38,12 +38,12 @@ export type TenantPolicyAssignment = VersionedTenantAssignment & {
   readonly activePolicyCarrier?: SignedActivePolicyCarrierV1;
   readonly recoveryKeyBinding?: RecoveryKeyBindingV1;
 };
-export type SignedRecoveryKeyFor = (assignment: TenantPolicyAssignment) => string | undefined;
+type SignedRecoveryKeyFor = (assignment: TenantPolicyAssignment) => string | undefined;
 export const TENANT_TEARDOWN_TIMEOUT_MS = 10_000;
 // Mirrors the control plane's tenant grant ceiling, which the enclave cannot import; the HNSW predecessor wait must outlast this many teardowns.
 export const MAX_REPLACED_CONTEXTS_PER_GENERATION = 12;
 // Covers a full queue sweep and a synthesis job's visibility window; requests stay admitted meanwhile.
-export const GENERATION_WORK_TIMEOUT_MS = 120_000;
+const GENERATION_WORK_TIMEOUT_MS = 120_000;
 const ACTIVATION_SUPERSEDED = 'assignment_generation_activation_superseded';
 // A manifest that keeps failing after pausing open tenants pauses them again every few minutes, not every refresh.
 const MANIFEST_RETRY_BASE_MS = 180_000;
@@ -53,8 +53,8 @@ const MANIFEST_RETRY_MAX_MS = 900_000;
 // Called for every replaced or dropped context before it is zeroized so co-resident subsystems can
 // synchronously detach independently-held key material. Content-free: tenant id only.
 export type OnTenantTornDown = (tenantId: string) => void | Promise<void>;
-export type OnTenantActivated = (tenantId: string) => void;
-export type OnTenantGenerationCommitted = (tenantId: string) => void;
+type OnTenantActivated = (tenantId: string) => void;
+type OnTenantGenerationCommitted = (tenantId: string) => void;
 export type OnTenantQuiescenceFailure = (
   tenantId: string,
   phase: 'generation' | 'teardown',
@@ -67,7 +67,7 @@ export class TenantTeardownHookError extends Error {
   }
 }
 
-export interface TenantPolicyAssignmentApplierOptions<TSnapshot extends TenantPolicySnapshotLike> {
+interface TenantPolicyAssignmentApplierOptions<TSnapshot extends TenantPolicySnapshotLike> {
   readonly registry: TenantRegistry;
   readonly generationRegistry: TenantGenerationRegistry<TenantContext, TSnapshot>;
   readonly snapshots: TenantPolicySnapshotRegistry<TSnapshot, TenantContext>;

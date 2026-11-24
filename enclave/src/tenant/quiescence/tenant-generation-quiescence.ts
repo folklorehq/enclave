@@ -1,6 +1,6 @@
 export type TenantEviction = (tenantId: string) => void | Promise<void>;
 
-export interface TenantGenerationQuiescenceDeps {
+interface TenantGenerationQuiescenceDeps {
   readonly fence: (tenantId: string) => Promise<void>;
   readonly holdWork: (tenantId: string) => void;
   readonly evictWork: readonly TenantEviction[];
@@ -8,7 +8,7 @@ export interface TenantGenerationQuiescenceDeps {
   readonly evictAfterDrain: TenantEviction;
 }
 
-export interface TenantGenerationQuiescence {
+interface TenantGenerationQuiescence {
   readonly quiesceWork: (tenantId: string) => Promise<void>;
   readonly quiesceRequests: (tenantId: string) => Promise<void>;
 }

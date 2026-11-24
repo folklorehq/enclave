@@ -33,25 +33,25 @@ export const resourceScopeSchema = z
 export type ResourceScope = z.infer<typeof resourceScopeSchema>;
 export type ResourceScopeBackfill = ResourceScope['backfill'];
 
-export interface ResourceScopeKey {
+interface ResourceScopeKey {
   orgId: string;
   deploymentId: string;
   sourceKind: string;
 }
 
-export type ResourceScopeWrite = ResourceScopeKey & {
+type ResourceScopeWrite = ResourceScopeKey & {
   expectedRevision: number;
   mode: 'all' | 'selected';
   resourceIds: readonly string[];
 };
 
-export type ResourceScopeBackfillTransition = ResourceScopeKey & {
+type ResourceScopeBackfillTransition = ResourceScopeKey & {
   expectedRevision: number;
   from: Exclude<ResourceScopeBackfill, 'none'>;
   to: Exclude<ResourceScopeBackfill, 'owed'>;
 };
 
-export type ResourceScopePause = ResourceScopeKey & {
+type ResourceScopePause = ResourceScopeKey & {
   expectedRevision: number;
   paused: boolean;
 };
@@ -65,7 +65,7 @@ export const DEFAULT_RESOURCE_SCOPE: ResourceScope = {
   paused: false,
 };
 
-export interface ResourceScopeStoreDeps {
+interface ResourceScopeStoreDeps {
   s3: S3Client;
   bucket: string;
   crypto: EnclaveCrypto;

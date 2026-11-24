@@ -22,13 +22,13 @@ import {
 import { ProviderKeyHolder, type KeyInvalidation } from '../credentials/ProviderKeyHolder.js';
 import { ClaudeRouteError } from './claude-route-errors.js';
 
-export const ANTHROPIC_API_VERSION = '2023-06-01';
+const ANTHROPIC_API_VERSION = '2023-06-01';
 const ANTHROPIC_ORGANIZATION_HEADER = 'anthropic-organization-id';
 const ANTHROPIC_WORKSPACE_HEADER = 'anthropic-workspace-id';
 
-export const CLAUDE_CREDENTIAL_PARAMETER_ROOT = '/folklore/prod';
-export const CLAUDE_CREDENTIAL_PARAMETER_SUFFIX = '/provider-inference/anthropic-api-key';
-export const CLAUDE_CREDENTIAL_KEY_ALIAS = 'alias/folklore-prod-anthropic-credential';
+const CLAUDE_CREDENTIAL_PARAMETER_ROOT = '/folklore/prod';
+const CLAUDE_CREDENTIAL_PARAMETER_SUFFIX = '/provider-inference/anthropic-api-key';
+const CLAUDE_CREDENTIAL_KEY_ALIAS = 'alias/folklore-prod-anthropic-credential';
 
 export const claudeCredentialLoadErrors: AttestedParameterReadErrors = {
   missing: 'claude_credential_missing',
@@ -45,7 +45,7 @@ const KEY_SHAPE = /^sk-ant-[A-Za-z0-9_-]{20,200}$/;
 const HTTP_OK = 200;
 const HTTP_UNAUTHORIZED = 401;
 const HTTP_FORBIDDEN = 403;
-export const CLAUDE_WORKSPACE_HEADER_UNEXPECTED = 'claude_workspace_header_unexpected';
+const CLAUDE_WORKSPACE_HEADER_UNEXPECTED = 'claude_workspace_header_unexpected';
 
 export type ClaudeCredentialManifest = ProviderKeyManifest;
 

@@ -12,7 +12,7 @@ export const EGRESS_PROXY_URL = `http://localhost:${EGRESS_PROXY_PORT}`;
 // `inference.phala.com` has to be in `egressHosts` (infra/src/enclave.ts).
 export const LOOPBACK_NO_PROXY = 'localhost,127.0.0.1';
 
-export interface EgressProxyConfig {
+interface EgressProxyConfig {
   httpProxy: string;
   httpsProxy: string;
   noProxy: string;

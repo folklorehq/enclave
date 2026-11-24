@@ -1,7 +1,7 @@
 import { ChunkQueue } from './ChunkQueue.js';
 import type { InferenceModel } from './CachedInference.js';
 
-export const STREAM_ABORTED_CODE = 'stream_aborted';
+const STREAM_ABORTED_CODE = 'stream_aborted';
 
 export interface GenerateStreamRequest {
   readonly prompt: string;

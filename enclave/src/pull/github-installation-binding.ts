@@ -12,7 +12,7 @@ const gitHubInstallationBindingSchema = z
   })
   .strict();
 
-export class GitHubInstallationBindingError extends Error {
+class GitHubInstallationBindingError extends Error {
   constructor() {
     super('github_installation_binding_mismatch');
     this.name = 'GitHubInstallationBindingError';

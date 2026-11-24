@@ -21,9 +21,9 @@ import { TYPESAFE_KEY_BINDING_DOMAIN } from './typesafe-decision-route-config.js
 import { TypeSafeDecisionError } from './typesafe-decision-errors.js';
 import { mapTypeSafeTransportError } from './typesafe-error-map.js';
 
-export const TYPESAFE_CREDENTIAL_PARAMETER_ROOT = '/folklore/prod';
-export const TYPESAFE_CREDENTIAL_PARAMETER_SUFFIX = '/provider-inference/typesafe-api-key';
-export const TYPESAFE_CREDENTIAL_KEY_ALIAS = 'alias/folklore-prod-typesafe-credential';
+const TYPESAFE_CREDENTIAL_PARAMETER_ROOT = '/folklore/prod';
+const TYPESAFE_CREDENTIAL_PARAMETER_SUFFIX = '/provider-inference/typesafe-api-key';
+const TYPESAFE_CREDENTIAL_KEY_ALIAS = 'alias/folklore-prod-typesafe-credential';
 
 export const typesafeCredentialLoadErrors: AttestedParameterReadErrors = {
   missing: 'typesafe_credential_missing',
@@ -45,7 +45,7 @@ export function typesafeKeyBinding(key: string): string {
   return sha256Hex(`${TYPESAFE_KEY_BINDING_DOMAIN}\n${key}`);
 }
 
-export interface TypeSafeCredentialDeps {
+interface TypeSafeCredentialDeps {
   readonly reader: Pick<AttestedSsmParameterReader, 'read'>;
   readonly manifest: () => ProviderKeyManifest | undefined;
   readonly expectedBinding: string;

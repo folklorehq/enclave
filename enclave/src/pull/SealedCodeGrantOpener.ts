@@ -6,12 +6,12 @@ import {
   type EnclaveAuthorizationCodeGrant,
 } from '@folklore/contracts/enclave';
 
-export interface SealedCodeGrantEnvelope {
+interface SealedCodeGrantEnvelope {
   encryptedCodeGrant: string;
   ciphertextSha256: string;
 }
 
-export class SealedCodeGrantOpenError extends Error {
+class SealedCodeGrantOpenError extends Error {
   constructor() {
     super('sealed_code_grant_invalid');
     this.name = 'SealedCodeGrantOpenError';

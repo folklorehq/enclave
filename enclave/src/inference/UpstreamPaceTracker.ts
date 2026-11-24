@@ -1,10 +1,10 @@
-export const PROMPT_TOKEN_WEIGHT = 0.02;
-export const LATENCY_BUCKET_SAMPLES = 96;
-export const LATENCY_RECENT_SAMPLES = 32;
-export const LATENCY_BASELINE_MIN_SAMPLES = 32;
+const PROMPT_TOKEN_WEIGHT = 0.02;
+const LATENCY_BUCKET_SAMPLES = 96;
+const LATENCY_RECENT_SAMPLES = 32;
+const LATENCY_BASELINE_MIN_SAMPLES = 32;
 export const LATENCY_BASELINE_MAX_AGE_MS = 600_000;
-export const LATENCY_SLOW_RATIO = 2;
-export const LATENCY_HOLD_RATIO = 1.5;
+const LATENCY_SLOW_RATIO = 2;
+const LATENCY_HOLD_RATIO = 1.5;
 
 export type PaceClass = 'normal' | 'hold' | 'slow';
 

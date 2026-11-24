@@ -1,7 +1,7 @@
 import { X509Certificate, createHash } from 'node:crypto';
 import { rootCertificates } from 'node:tls';
 
-export const MAX_PINNED_ROOTS = 40;
+const MAX_PINNED_ROOTS = 40;
 
 export function spkiSha256Of(pem: string): string {
   const certificate = new X509Certificate(pem);

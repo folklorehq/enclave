@@ -1,4 +1,4 @@
-export interface AssignmentReactivationDeps {
+interface AssignmentReactivationDeps {
   readonly releaseWork: (tenantId: string) => void;
   readonly isWorkHeld: (tenantId: string) => boolean;
   readonly finishWorkEviction: readonly ((tenantId: string) => void)[];

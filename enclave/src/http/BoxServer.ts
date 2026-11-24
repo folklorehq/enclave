@@ -16,7 +16,7 @@ import { MCP_PROTECTED_RESOURCE_METADATA_PATH, MCP_RESOURCE_PATH } from '@folklo
 
 type FetchHandler = (req: Request) => Response | Promise<Response>;
 
-export interface BoxServerOptions {
+interface BoxServerOptions {
   readonly httpPort?: number;
   readonly collabPort?: number;
   readonly oauthIngress?: FetchHandler;
@@ -241,7 +241,7 @@ export class BoxServer {
     return usable ? port : undefined;
   }
 
-  // #67: the collab WS stays loopback-bound, so its upgrade is relayed here, not on a second listener.
+  // The collab WS stays loopback-bound, so its upgrade is relayed here, not on a second listener.
   private handleUpgrade(req: IncomingMessage, client: Duplex, head: Buffer): void {
     if (!(client instanceof Socket)) return void client.destroy();
     if (client.destroyed) return;

@@ -1,9 +1,9 @@
 import type { Logger } from '@folklore/core';
 import type { TenantEviction } from './tenant-generation-quiescence.js';
 
-export type OnLateTenantQuiesced = (tenantId: string, attempt: number) => void;
+type OnLateTenantQuiesced = (tenantId: string, attempt: number) => void;
 
-export interface PolicyGenerationQuiescenceOptions {
+interface PolicyGenerationQuiescenceOptions {
   readonly quiesceWork: TenantEviction | undefined;
   readonly quiesceRequests: TenantEviction | undefined;
   readonly workTimeoutMs: number;

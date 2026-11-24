@@ -6,7 +6,7 @@ const TIMEOUT_CODE = /^UND_ERR_(?:CONNECT|HEADERS|BODY)_TIMEOUT$/;
 const NATIVE_TIMEOUT_NAME = 'TimeoutError';
 const MAX_CAUSE_DEPTH = 6;
 
-export interface PinnedFailureNames<T extends string> {
+interface PinnedFailureNames<T extends string> {
   readonly tlsUntrusted: T;
   readonly timeout: T;
   readonly own: ReadonlySet<T>;

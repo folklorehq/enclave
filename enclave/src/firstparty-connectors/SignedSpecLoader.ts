@@ -12,7 +12,7 @@ import {
   type VerifiedFirstpartyFeed,
 } from './FirstpartyDefinitionVerifier.js';
 
-export const SIGNED_SPEC_REFRESH_MS = 300_000;
+const SIGNED_SPEC_REFRESH_MS = 300_000;
 
 const REFRESH_FAILED = 'firstparty_feed_unavailable';
 const REVISION_ROLLBACK = 'builtin_revision_rollback';
@@ -22,15 +22,14 @@ interface InstalledSpec {
   readonly spec: ConnectorSpec;
 }
 
-export interface SignedSpecLoaderDeps {
+interface SignedSpecLoaderDeps {
   readonly feed: { load(): Promise<VerifiedFirstpartyFeed> };
   readonly logger: Logger;
-  readonly install?: (specs: ReadonlyMap<string, ConnectorSpec>) => void;
 }
 
 // Hands a built-in connector kind's signed spec to the registry once it passes the same check the
 // control plane ran. A kind that is absent, refused or unreadable keeps its compiled-in spec.
-export class SignedSpecLoader {
+class SignedSpecLoader {
   private installed: ReadonlyMap<string, InstalledSpec> = new Map();
   private inFlight: Promise<void> | undefined;
   private timer: NodeJS.Timeout | undefined;
@@ -44,15 +43,10 @@ export class SignedSpecLoader {
     return this.inFlight;
   }
 
-  start(intervalMs: number = SIGNED_SPEC_REFRESH_MS): void {
+  start(): void {
     if (this.timer !== undefined) return;
-    this.timer = setInterval(() => void this.refreshOnce(), intervalMs);
+    this.timer = setInterval(() => void this.refreshOnce(), SIGNED_SPEC_REFRESH_MS);
     this.timer.unref();
-  }
-
-  stop(): void {
-    if (this.timer !== undefined) clearInterval(this.timer);
-    this.timer = undefined;
   }
 
   private async refresh(): Promise<void> {
@@ -90,8 +84,7 @@ export class SignedSpecLoader {
   }
 
   private apply(next: ReadonlyMap<string, InstalledSpec>): void {
-    const install = this.deps.install ?? useVerifiedSpecs;
-    install(new Map([...next].map(([kind, installed]) => [kind, installed.spec])));
+    useVerifiedSpecs(new Map([...next].map(([kind, installed]) => [kind, installed.spec])));
     this.installed = next;
   }
 
@@ -105,7 +98,7 @@ export class SignedSpecLoader {
   }
 }
 
-export interface SignedSpecLoaderConfig {
+interface SignedSpecLoaderConfig {
   readonly signerPublicKeySpki: string | null;
   readonly controlPlaneUrl: string;
   readonly deploymentId: string;

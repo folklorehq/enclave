@@ -37,7 +37,7 @@ const OWNER_STRICT_KEYS = [OWNER_ACCOUNT_ID_KEY] as const;
 
 export const ASK_TURN_TITLE_SUBJECT = 'title';
 
-export const WIKI_PUBLICATION_ENVELOPE_FORMAT = 'esdk-wiki-publication-v1';
+const WIKI_PUBLICATION_ENVELOPE_FORMAT = 'esdk-wiki-publication-v1';
 
 export interface FactBodyRef {
   factId: string;
@@ -55,7 +55,7 @@ export interface CollabSnapshotRef {
 
 // Wiki comment prose is customer content, sealed bound to (org, page, field) so a body relocated
 // to another page — or an anchor excerpt swapped for a reply body — fails to decrypt.
-export interface WikiCommentRef {
+interface WikiCommentRef {
   orgId: string;
   pageId: string;
   field: WikiCommentField;
@@ -79,36 +79,36 @@ export interface SealedTitleRef {
 
 // A human-written AI-feedback correction is raw wiki prose, sealed bound to (org, block) so a
 // correction relocated to another block fails to decrypt.
-export interface WikiFeedbackRef {
+interface WikiFeedbackRef {
   orgId: string;
   blockId: string;
 }
 
 // The ESDK header is plaintext, so the binding carries the tenant-keyed name, never the input digest.
-export interface LlmCacheRef {
+interface LlmCacheRef {
   orgId: string;
   objectName: string;
 }
 
 // The `code` connector's per-repo pull cursor carries raw file paths (content-derived), so it is
 // sealed like every other tenant blob — enclave-written, enclave-read, never worker-readable.
-export interface PullCursorRef {
+interface PullCursorRef {
   orgId: string;
   sourceId: string;
 }
 
-export interface CodebaseSelectionRef {
+interface CodebaseSelectionRef {
   orgId: string;
   deploymentId: string;
 }
 
-export interface ResourceScopeRef {
+interface ResourceScopeRef {
   orgId: string;
   deploymentId: string;
   sourceKind: string;
 }
 
-export interface JiraWebhookReplayRef {
+interface JiraWebhookReplayRef {
   orgId: string;
 }
 
@@ -119,7 +119,7 @@ export interface CodeGraphNamesRef {
   shard: string;
 }
 
-export interface CodeGraphTombstoneRef {
+interface CodeGraphTombstoneRef {
   orgId: string;
 }
 
@@ -149,19 +149,19 @@ export interface WikiBlockRef extends WikiArticleRef {
 // A cross-theme team-onboarding page is derived knowledge with no owning theme, so it binds to
 // (org, team, audience) — a distinct purpose from wiki-article so a body cannot be relocated
 // between a theme page and a team page.
-export interface TeamOnboardingArticleRef {
+interface TeamOnboardingArticleRef {
   orgId: string;
   teamId: string;
   audienceId: string | null;
 }
 
-export interface TeamOnboardingBlockRef extends TeamOnboardingArticleRef {
+interface TeamOnboardingBlockRef extends TeamOnboardingArticleRef {
   blockType: string;
 }
 
 export type WikiPageStateRef = WikiArticleRef;
 
-export type SealedEnvelopePurpose = 'wiki-block' | 'team-onboarding-block' | 'wiki-page-state';
+type SealedEnvelopePurpose = 'wiki-block' | 'team-onboarding-block' | 'wiki-page-state';
 
 type SealedBlockHeader = Omit<SealedContentEnvelopeV1, 'ciphertext' | 'purpose'> & {
   purpose: SealedEnvelopePurpose;
@@ -178,7 +178,7 @@ export function singleVersionSealedContentKeyring(
   return { activeVersion: 1, keyrings: new Map([[1, keyring]]) };
 }
 
-export interface WikiPublicationSnapshotRef {
+interface WikiPublicationSnapshotRef {
   purpose: 'wiki-publication-yjs';
   orgId: string;
   pageId: string;
@@ -190,7 +190,7 @@ export interface WikiPublicationSnapshotRef {
   policyHash: string;
 }
 
-export interface WikiPublishedBlockRef {
+interface WikiPublishedBlockRef {
   purpose: 'wiki-publication-block';
   orgId: string;
   pageId: string;
@@ -345,39 +345,6 @@ export class EnclaveCrypto {
       teamId: ref.teamId,
       audienceId: audienceKey(ref.audienceId),
       purpose: TEAM_ONBOARDING_ARTICLE_PURPOSE,
-    });
-  }
-
-  decryptTeamOnboardingArticle(
-    ciphertext: Buffer,
-    expected: TeamOnboardingArticleRef,
-  ): Promise<Buffer> {
-    return this.open(ciphertext, TEAM_ONBOARDING_ARTICLE_PURPOSE, {
-      orgId: expected.orgId,
-      teamId: expected.teamId,
-      audienceId: audienceKey(expected.audienceId),
-    });
-  }
-
-  encryptTeamOnboardingBlock(plaintext: Buffer, ref: TeamOnboardingBlockRef): Promise<Buffer> {
-    return this.seal(plaintext, {
-      orgId: ref.orgId,
-      teamId: ref.teamId,
-      audienceId: audienceKey(ref.audienceId),
-      blockType: ref.blockType,
-      purpose: TEAM_ONBOARDING_BLOCK_PURPOSE,
-    });
-  }
-
-  decryptTeamOnboardingBlock(
-    ciphertext: Buffer,
-    expected: TeamOnboardingBlockRef,
-  ): Promise<Buffer> {
-    return this.open(ciphertext, TEAM_ONBOARDING_BLOCK_PURPOSE, {
-      orgId: expected.orgId,
-      teamId: expected.teamId,
-      audienceId: audienceKey(expected.audienceId),
-      blockType: expected.blockType,
     });
   }
 

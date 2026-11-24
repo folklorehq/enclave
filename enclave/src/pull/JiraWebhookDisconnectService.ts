@@ -5,7 +5,7 @@ import { ProviderRejectedError } from '../egress/provider-token-fetch.js';
 import type { JiraWebhookClientPort } from './HttpJiraWebhookClient.js';
 import type { RetiredOAuthCredentialPersistence } from './HttpOAuthCredentialPersistence.js';
 
-export interface JiraWebhookCleanupReceiptStore {
+interface JiraWebhookCleanupReceiptStore {
   hasCleanupReceipt(input: { orgId: string; cleanupKey: string }): Promise<boolean>;
   recordCleanupReceipt(input: { orgId: string; cleanupKey: string }): Promise<void>;
 }

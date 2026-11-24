@@ -1,11 +1,11 @@
 import { timingSafeEqual } from 'node:crypto';
 
-export interface StorageCanaryStore {
+interface StorageCanaryStore {
   put(bucket: string, key: string, body: Buffer): Promise<void>;
   get(bucket: string, key: string): Promise<Buffer>;
 }
 
-export interface StorageCanaryTenant {
+interface StorageCanaryTenant {
   tenantId: string;
   processedOutputsBucket: string;
   encryptStorageCanary(plaintext: Buffer, generation: number): Promise<Buffer>;

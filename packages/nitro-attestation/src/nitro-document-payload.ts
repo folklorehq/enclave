@@ -35,7 +35,7 @@ export interface NitroDocumentPayload {
   nonce: Uint8Array;
 }
 
-export interface NitroDocumentTrustPathPayload {
+interface NitroDocumentTrustPathPayload {
   certificate: Uint8Array;
   cabundle: Uint8Array[];
   timestamp: number;

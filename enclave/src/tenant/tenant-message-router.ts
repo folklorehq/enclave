@@ -1,16 +1,6 @@
 import type { SSMClient } from '@aws-sdk/client-ssm';
 import type { S3Client } from '@aws-sdk/client-s3';
-import { createHash } from 'node:crypto';
-import {
-  canaryAuthorizationOutcomeProofPayload,
-  canaryPipelineOutcomePayload,
-  canaryAuthorizationProofPayload,
-  type CanaryAuthorization,
-  type CanaryAuthorizationOutcomeProof,
-  type CanaryAuthorizationProof,
-} from '@folklore/contracts';
 import { decryptPayload, type EncryptedPayload } from '../ingest/receiver.js';
-import type { CanaryAuthorizationConsumer } from '../ingest/HttpCanaryAuthorizationConsumer.js';
 import { PipelineProcessingError, type ProcessedFact } from '../pipeline/index.js';
 import type { OAuthRefreshCommand, OAuthRefreshMetadataUpdate } from '@folklore/contracts/enclave';
 import { pullDueMessageSchema } from '@folklore/contracts/enclave';
@@ -38,7 +28,6 @@ import {
   type DecryptedSourceConnection,
   type SourceConnectionResolution,
 } from '../pull/source-connections-client.js';
-import { withInferenceReceiptContext } from '../inference/inference-receipt-context.js';
 import { boundGitHubInstallationId } from '../pull/github-installation-binding.js';
 import { CodebaseSelectionStore } from '../codebase/CodebaseSelectionStore.js';
 import { ResourceScopeUnavailableError } from '../resource-scope/resource-scope-errors.js';
@@ -55,9 +44,6 @@ export interface IngestMessage {
   ephemeralPublicKey: string;
   nonce: string;
   ciphertext: string;
-  canary_run_id?: string;
-  request_id?: string;
-  canary_authorization?: CanaryAuthorization;
 }
 
 export type RoutableMessage = IngestMessage | PullDueMessage;
@@ -81,7 +67,7 @@ export function parseRoutableMessage(input: unknown): RoutableMessage {
   throw pull.error;
 }
 
-export interface RouteOptions {
+interface RouteOptions {
   signal?: AbortSignal;
 }
 
@@ -113,7 +99,7 @@ const MESSAGE_TYPE_UNSUPPORTED = 'message_type_unsupported';
 const GITHUB_SOURCE = 'github';
 const GITHUB_BINDING_MISMATCH = 'github_installation_binding_mismatch';
 
-export interface TenantMessageRouterDeps {
+interface TenantMessageRouterDeps {
   registry: TenantRegistry;
   ssm: SSMClient;
   cursorStore?: PullRunnerDeps['cursorStore'];
@@ -133,18 +119,6 @@ export interface TenantMessageRouterDeps {
   mintGitHubInstallationToken?: (input: {
     installationId: string;
   }) => Promise<{ accessToken: string; expiresAt: string }>;
-  canaryProofSigner?: CanaryProofSigner;
-  canaryProofSink?: (proof: CanaryAuthorizationOutcomeProof) => Promise<void>;
-  canaryAuthorizationConsumer?: CanaryAuthorizationConsumer;
-}
-
-export interface CanaryProofSigner {
-  sign(
-    payload: Uint8Array,
-  ):
-    | { publicKey: Uint8Array; signature: Uint8Array }
-    | Promise<{ publicKey: Uint8Array; signature: Uint8Array }>;
-  sessionPublicKey(): Uint8Array | Promise<Uint8Array>;
 }
 
 // A message arrived on a queue owned by one tenant but its body names a different one — the two
@@ -159,13 +133,7 @@ export class CrossTenantRoutingError extends Error {
   }
 }
 
-export type TenantMessageRoutePhase =
-  | 'decrypt'
-  | 'pipeline'
-  | 'encrypt'
-  | 'store'
-  | 'embed'
-  | 'index';
+type TenantMessageRoutePhase = 'decrypt' | 'pipeline' | 'encrypt' | 'store' | 'embed' | 'index';
 
 export class TenantMessageRouteError extends Error {
   constructor(
@@ -265,7 +233,6 @@ export class TenantMessageRouter {
       ciphertext: raw.ciphertext,
     };
     if (raw.encryption_version !== 2) throw new Error('unsupported_ingest_encryption_version');
-    this.validateCanaryAuthorization(raw);
     let plaintext: Buffer;
     try {
       plaintext = decryptPayload(payload, context.ingestPrivateKey, {
@@ -274,19 +241,12 @@ export class TenantMessageRouter {
         source: raw.source,
         type: raw.type,
         eventType: raw.eventType,
-        canaryRunId: raw.canary_run_id,
-        requestId: raw.request_id,
-        canaryAuthorization: raw.canary_authorization,
       });
     } catch (error) {
       throw new TenantMessageRouteError('decrypt', errorType(error), error);
     }
-    this.validateCanaryBody(raw.canary_authorization, plaintext);
-    const canaryProof = raw.canary_authorization
-      ? await this.createCanaryProof(raw.canary_authorization)
-      : undefined;
-    // Canary bodies are synthetic and capability-bound; every real delivery must name the bound install.
-    if (raw.source === GITHUB_SOURCE && !raw.canary_authorization) {
+    // Every delivery must name the bound install.
+    if (raw.source === GITHUB_SOURCE) {
       if (!(await this.isBoundGitHubDelivery(context, plaintext))) {
         plaintext.fill(0);
         return {
@@ -306,37 +266,17 @@ export class TenantMessageRouter {
         plaintext.fill(0);
       }
     }
-    let canaryClaimed = false;
     try {
-      if (canaryProof) {
-        canaryClaimed = await this.claimCanaryAuthorization(canaryProof);
-        if (!canaryClaimed) throw new Error('canary_authorization_invalid');
-      }
-      const receiptContext =
-        raw.canary_run_id && raw.request_id
-          ? { canary_run_id: raw.canary_run_id, request_id: raw.request_id }
-          : undefined;
       let facts: ProcessedFact[];
       try {
-        facts = await withInferenceReceiptContext(receiptContext, () =>
-          context.pipeline.handle(plaintext, raw.source, raw.eventType ?? ''),
-        );
+        facts = await context.pipeline.handle(plaintext, raw.source, raw.eventType ?? '');
       } catch (error) {
         if (error instanceof PipelineProcessingError) {
           throw new TenantMessageRouteError(error.phase, error.errorType, error);
         }
         throw new TenantMessageRouteError('pipeline', errorType(error), error);
       }
-      if (canaryProof && raw.canary_authorization) {
-        const outcomeProof = await this.createCanaryOutcomeProof(raw.canary_authorization, facts);
-        const completed = await this.completeCanaryAuthorization(outcomeProof);
-        if (!completed) throw new Error('canary_authorization_invalid');
-        await this.emitCanaryProof(outcomeProof);
-      }
       return { context, facts, shouldAcknowledge: true };
-    } catch (error) {
-      if (canaryProof && canaryClaimed) await this.releaseCanaryAuthorization(canaryProof);
-      throw error;
     } finally {
       plaintext.fill(0);
     }
@@ -370,145 +310,6 @@ export class TenantMessageRouter {
       kind: raw.kind,
       ...(raw.ownerAccountId === undefined ? {} : { ownerAccountId: raw.ownerAccountId }),
       backfill: false,
-    };
-  }
-
-  private validateCanaryAuthorization(raw: IngestMessage): void {
-    const authorization = raw.canary_authorization;
-    if (!authorization) {
-      if (raw.canary_run_id || raw.request_id) throw new Error('canary_authorization_invalid');
-      return;
-    }
-    const issuedAt = Date.parse(authorization.issued_at);
-    const expiresAt = Date.parse(authorization.expires_at);
-    if (
-      raw.source !== 'github' ||
-      authorization.org_id !== raw.tenant_id ||
-      authorization.deployment_id !== this.deps.deploymentId ||
-      authorization.canary_run_id !== raw.canary_run_id ||
-      authorization.request_id !== raw.request_id ||
-      !Number.isFinite(issuedAt) ||
-      !Number.isFinite(expiresAt) ||
-      issuedAt > Date.now() ||
-      expiresAt <= Date.now() ||
-      !this.deps.canaryProofSigner ||
-      !this.deps.canaryAuthorizationConsumer
-    ) {
-      throw new Error('canary_authorization_invalid');
-    }
-  }
-
-  private async claimCanaryAuthorization(proof: CanaryAuthorizationProof): Promise<boolean> {
-    try {
-      return (await this.deps.canaryAuthorizationConsumer?.claim(proof)) === true;
-    } catch {
-      return false;
-    }
-  }
-
-  private async completeCanaryAuthorization(
-    proof: CanaryAuthorizationOutcomeProof,
-  ): Promise<boolean> {
-    try {
-      return (await this.deps.canaryAuthorizationConsumer?.complete(proof)) === true;
-    } catch {
-      return false;
-    }
-  }
-
-  private async releaseCanaryAuthorization(proof: CanaryAuthorizationProof): Promise<void> {
-    try {
-      await this.deps.canaryAuthorizationConsumer?.release(proof);
-    } catch {
-      // A failed release leaves the short claim lease to expire; it does not consume the capability.
-    }
-  }
-
-  private async emitCanaryProof(proof: CanaryAuthorizationOutcomeProof): Promise<void> {
-    try {
-      await this.deps.canaryProofSink?.(proof);
-    } catch {
-      // Durable completion is the evidence source; Redis is only a retryable delivery hint.
-    }
-  }
-
-  private validateCanaryBody(
-    authorization: CanaryAuthorization | undefined,
-    plaintext: Buffer,
-  ): void {
-    if (!authorization) return;
-    const digest = createHash('sha256').update(plaintext).digest('hex');
-    if (digest !== authorization.body_sha256) throw new Error('canary_authorization_invalid');
-  }
-
-  private async createCanaryProof(
-    authorization: CanaryAuthorization,
-  ): Promise<CanaryAuthorizationProof> {
-    const signer = this.deps.canaryProofSigner;
-    if (!signer) throw new Error('canary_authorization_invalid');
-    const publicKey = await signer.sessionPublicKey();
-    const publicKeyBase64 = Buffer.from(publicKey).toString('base64');
-    const keyDigest = createHash('sha256').update(publicKey).digest('hex');
-    if (keyDigest !== authorization.attestation_session_key_sha256) {
-      throw new Error('canary_authorization_invalid');
-    }
-    const unsigned = { ...authorization, public_key: publicKeyBase64 };
-    const signed = await signer.sign(
-      Buffer.from(
-        canaryAuthorizationProofPayload({ ...unsigned, public_key: publicKeyBase64 }),
-        'utf8',
-      ),
-    );
-    if (!Buffer.from(signed.publicKey).equals(publicKey)) {
-      throw new Error('canary_authorization_invalid');
-    }
-    return {
-      ...unsigned,
-      public_key: publicKeyBase64,
-      signature: Buffer.from(signed.signature).toString('base64'),
-    };
-  }
-
-  private async createCanaryOutcomeProof(
-    authorization: CanaryAuthorization,
-    facts: readonly ProcessedFact[],
-  ): Promise<CanaryAuthorizationOutcomeProof> {
-    const signer = this.deps.canaryProofSigner;
-    if (!signer) throw new Error('canary_authorization_invalid');
-    const publicKey = await signer.sessionPublicKey();
-    const publicKeyBase64 = Buffer.from(publicKey).toString('base64');
-    const keyDigest = createHash('sha256').update(publicKey).digest('hex');
-    if (keyDigest !== authorization.attestation_session_key_sha256) {
-      throw new Error('canary_authorization_invalid');
-    }
-    const unsigned = {
-      ...authorization,
-      public_key: publicKeyBase64,
-      status: 'succeeded' as const,
-      fact_count: facts.length,
-      outcome_sha256: createHash('sha256')
-        .update(
-          canaryPipelineOutcomePayload({
-            authorization_id: authorization.authorization_id,
-            body_sha256: authorization.body_sha256,
-            fact_count: facts.length,
-            fact_digests: facts.map((fact) => ({
-              fact_id: fact.factId,
-              body_sha256: fact.bodyHash,
-            })),
-          }),
-        )
-        .digest('hex'),
-    };
-    const signed = await signer.sign(
-      Buffer.from(canaryAuthorizationOutcomeProofPayload(unsigned), 'utf8'),
-    );
-    if (!Buffer.from(signed.publicKey).equals(publicKey)) {
-      throw new Error('canary_authorization_invalid');
-    }
-    return {
-      ...unsigned,
-      signature: Buffer.from(signed.signature).toString('base64'),
     };
   }
 

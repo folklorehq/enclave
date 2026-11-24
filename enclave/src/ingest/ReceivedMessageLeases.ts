@@ -1,7 +1,7 @@
 import type { Message } from '@aws-sdk/client-sqs';
 import { VisibilityHeartbeat, type VisibilityHeartbeatDeps } from './VisibilityHeartbeat.js';
 
-export interface ReceivedMessageLeaseSettings {
+interface ReceivedMessageLeaseSettings {
   visibilityTimeoutSeconds: number;
   renewalIntervalMs: number;
   failureCode: string;

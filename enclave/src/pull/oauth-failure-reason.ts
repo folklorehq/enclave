@@ -3,7 +3,7 @@ import { guardFailureCode } from '../boot/guard-failure-code.js';
 import { ProviderEgressError, ProviderRejectedError } from '../egress/provider-token-fetch.js';
 import { OAuthRefusal } from './OAuthRefusal.js';
 
-export const UNCLASSIFIED_REDEMPTION_REASON = 'oauth_redemption_unclassified';
+const UNCLASSIFIED_REDEMPTION_REASON = 'oauth_redemption_unclassified';
 const PROVIDER_EGRESS_REASON = 'provider_egress_failed';
 const PROVIDER_REJECTED_REASON = 'provider_rejected';
 const PROVIDER_OAUTH_ERROR_REASON = 'provider_oauth_error';

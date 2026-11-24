@@ -20,16 +20,16 @@ import { TypeSafeDecisionError } from './typesafe-decision-errors.js';
 import { mapTypeSafeStatus, mapTypeSafeTransportError } from './typesafe-error-map.js';
 import { parseJevResponse } from './jev-response.js';
 
-export const JEV_MAX_QUESTION_TOKENS = 32_000;
-export const JEV_MAX_REQUEST_TOKENS = 64_000;
-export const JEV_BYTES_PER_TOKEN_FLOOR = 3;
-export const JEV_LIMIT_HEADROOM = 0.9;
-export const JEV_DEFAULT_TIMEOUT_MS = 15_000;
+const JEV_MAX_QUESTION_TOKENS = 32_000;
+const JEV_MAX_REQUEST_TOKENS = 64_000;
+const JEV_BYTES_PER_TOKEN_FLOOR = 3;
+const JEV_LIMIT_HEADROOM = 0.9;
+const JEV_DEFAULT_TIMEOUT_MS = 15_000;
 
 const JEV_RESPONSE_BODY_MAX_BYTES = 262_144;
 const USER_AGENT = 'folklore-enclave';
 
-export interface TypeSafeDecisionBackendDeps {
+interface TypeSafeDecisionBackendDeps {
   readonly fetch: typeof globalThis.fetch;
   readonly credentials: Pick<TypeSafeCredentialSource, 'key' | 'invalidate'>;
   readonly guard: JevQuestionGuard;

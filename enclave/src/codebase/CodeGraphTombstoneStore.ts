@@ -15,7 +15,7 @@ export type TombstoneRead =
   | { kind: 'ok'; tombstone: CodeGraphTombstone; etag: string }
   | { kind: 'corrupt'; etag: string };
 
-export interface CodeGraphTombstoneStoreDeps {
+interface CodeGraphTombstoneStoreDeps {
   s3: S3Client;
   bucket: string;
   crypto: EnclaveCrypto;

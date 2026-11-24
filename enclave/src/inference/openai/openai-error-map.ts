@@ -37,7 +37,7 @@ const CONTEXT_LENGTH_CODE = 'context_length_exceeded';
 const CONTEXT_LENGTH_PREFIX = "This model's maximum context length";
 const ALARM_CODES: ReadonlySet<string> = new Set([OPENAI_TLS_UNTRUSTED, OPENAI_ROOT_SET_MISMATCH]);
 
-export interface OpenAIErrorContext {
+interface OpenAIErrorContext {
   readonly onCredentialRejected: () => void;
   readonly onAlarm?: (code: string) => void;
 }

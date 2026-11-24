@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
-export interface AttestationTurnContext {
+interface AttestationTurnContext {
   /** Pass-through calls and policy floor reads: even their checkpoints take priority turns. */
   readonly priority?: boolean;
   /** Aborted once the owning read settled: every still-queued turn of it is skipped. */

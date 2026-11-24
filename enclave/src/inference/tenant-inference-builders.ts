@@ -44,7 +44,7 @@ export interface PoolPolicyPorts {
   readonly decisionModel?: SealedDecisionModel;
 }
 
-export interface ActivePolicyPortDeps {
+interface ActivePolicyPortDeps {
   readonly activePolicyFreshnessFor?: (orgId: string) => TenantPolicyFreshnessPort | undefined;
   readonly activePolicyRuntimeEvidenceFor?: (
     orgId: string,

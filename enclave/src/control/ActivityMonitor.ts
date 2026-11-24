@@ -1,4 +1,4 @@
-export interface ActivityMonitorDeps {
+interface ActivityMonitorDeps {
   quietWindowMs: number;
   now?: () => number;
 }

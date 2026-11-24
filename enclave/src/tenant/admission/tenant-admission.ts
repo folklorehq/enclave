@@ -1,6 +1,6 @@
 import type { TenantAdmission } from '@folklore/api';
 
-export interface TenantAdmissionChecks {
+interface TenantAdmissionChecks {
   isHaltedNow: (tenantId: string) => Promise<boolean>;
   isFenced: (tenantId: string) => boolean;
 }

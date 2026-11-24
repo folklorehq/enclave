@@ -14,7 +14,7 @@ interface SettlingStream extends AsyncIterable<string> {
   readonly settled?: Promise<void>;
 }
 
-export interface AskUsageMeterDeps {
+interface AskUsageMeterDeps {
   readonly sink: AskUsageSinkPort;
   readonly logger: Logger;
   readonly days?: Pick<AnswerUsageDayCounts, 'add' | 'flushDue'>;

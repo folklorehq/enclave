@@ -2,7 +2,7 @@ import type { IndexResidencyManager } from '../hnsw/IndexResidencyManager.js';
 import type { EnclaveTitleCatalog } from './EnclaveTitleCatalog.js';
 import type { TitleIndex } from './TitleIndex.js';
 
-export interface TitleEvictionDeps {
+interface TitleEvictionDeps {
   catalog: () => Pick<EnclaveTitleCatalog, 'forgetTenant'> | undefined;
   residency: Pick<IndexResidencyManager<TitleIndex>, 'evict'>;
   graphCache: () => { evictTitleCaches(orgId: string): Promise<void> } | undefined;

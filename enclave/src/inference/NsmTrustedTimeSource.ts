@@ -7,7 +7,7 @@ import {
 import { USER_DATA_MAX_BYTES, type NsmAttestationPort } from '../sealing/nsm.js';
 import type { NsmAttestationDocumentV1, NsmTrustedTimeSourcePort } from '@folklore/inference';
 
-export interface NsmTrustedTimeSourceOptions {
+interface NsmTrustedTimeSourceOptions {
   readonly nsm: NsmAttestationPort;
   readonly publicKey?: Uint8Array;
 }

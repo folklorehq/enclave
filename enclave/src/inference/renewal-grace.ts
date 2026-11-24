@@ -8,7 +8,7 @@ import type {
   RecentGenerationHighWaterPort,
 } from './ports.js';
 
-export const RENEWAL_GRACE_MAX_LINKS = 3;
+const RENEWAL_GRACE_MAX_LINKS = 3;
 export const RENEWAL_GRACE_READ_COUNT = RENEWAL_GRACE_MAX_LINKS + 1;
 
 export const GENERATION_CONTEXT_FIELDS = [

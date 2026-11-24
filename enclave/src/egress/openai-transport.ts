@@ -20,7 +20,7 @@ export interface OpenAITransport {
   close(): Promise<void>;
 }
 
-export interface OpenAITransportOptions {
+interface OpenAITransportOptions {
   readonly caPems?: readonly string[];
   readonly proxyPort?: number;
   readonly fetchImpl?: typeof globalThis.fetch;
