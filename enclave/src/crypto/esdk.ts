@@ -24,7 +24,6 @@ const WIKI_COMMENT_PURPOSE = 'wiki-comment';
 const WIKI_FEEDBACK_PURPOSE = 'wiki-feedback';
 const ASK_TURN_PURPOSE = 'ask-turn';
 const SEALED_TITLE_PURPOSE = 'sealed-title';
-const AGENT_RUN_AUDIT_PURPOSE = 'agent-run-audit';
 const LLM_CACHE_PURPOSE = 'llm-cache';
 const OAUTH_CREDENTIAL_PURPOSE = 'oauth-credential';
 const PULL_CURSOR_PURPOSE = 'pull-cursor';
@@ -76,13 +75,6 @@ export interface SealedTitleRef {
   kind: SealedTitleKind;
   subjectId: string;
   rowId: string;
-}
-
-// An agent run's evidence ids are sealed to (org, run, user), so a row moved to another run or person fails to decrypt.
-export interface AgentRunAuditRef {
-  orgId: string;
-  runId: string;
-  userId: string;
 }
 
 // A human-written AI-feedback correction is raw wiki prose, sealed bound to (org, block) so a
@@ -488,17 +480,6 @@ export class EnclaveCrypto {
     return this.open(ciphertext, SEALED_TITLE_PURPOSE, this.sealedTitleIdentity(expected));
   }
 
-  async encryptAgentRunAudit(plaintext: Buffer, ref: AgentRunAuditRef): Promise<Buffer> {
-    return this.seal(plaintext, {
-      ...this.agentRunAuditIdentity(ref),
-      purpose: AGENT_RUN_AUDIT_PURPOSE,
-    });
-  }
-
-  async decryptAgentRunAudit(ciphertext: Buffer, expected: AgentRunAuditRef): Promise<Buffer> {
-    return this.open(ciphertext, AGENT_RUN_AUDIT_PURPOSE, this.agentRunAuditIdentity(expected));
-  }
-
   encryptWikiFeedback(plaintext: Buffer, ref: WikiFeedbackRef): Promise<Buffer> {
     return this.seal(plaintext, {
       orgId: ref.orgId,
@@ -732,13 +713,6 @@ export class EnclaveCrypto {
     if (!idsValid || !SEALED_TITLE_KINDS.includes(ref.kind))
       throw new Error('sealed_title_ref_invalid');
     return { orgId: ref.orgId, kind: ref.kind, subjectId: ref.subjectId, rowId: ref.rowId };
-  }
-
-  private agentRunAuditIdentity(ref: AgentRunAuditRef): Record<string, string> {
-    if (![ref.orgId, ref.runId, ref.userId].every(isLowercaseRfcUuid)) {
-      throw new Error('agent_run_audit_ref_invalid');
-    }
-    return { orgId: ref.orgId, runId: ref.runId, userId: ref.userId };
   }
 
   private codeGraphNamesIdentity(ref: CodeGraphNamesRef): Record<string, string> {

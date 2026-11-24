@@ -91,7 +91,6 @@ import { EnclaveTitleDigester } from './titles/EnclaveTitleDigester.js';
 import { TitleEviction } from './titles/TitleEviction.js';
 import type { TitleIndex } from './titles/TitleIndex.js';
 import {
-  EnclaveAgentRunAuditSealer,
   EnclaveAskTurnSealer,
   EnclaveWikiCommentSealer,
   EnclaveWikiFeedbackSealer,
@@ -1579,7 +1578,6 @@ try {
       titleCatalog = catalog;
       return catalog;
     },
-    agentRunAuditSealer: new EnclaveAgentRunAuditSealer(resolveTenant),
   };
   const signedRuntimeDatabase: RuntimeDatabaseConfig | undefined =
     verifiedPoolManifest?.runtimeDatabase ?? verifiedManifest?.runtimeDatabase;
