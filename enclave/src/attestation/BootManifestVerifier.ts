@@ -1,6 +1,7 @@
 import { createHash, createPublicKey, KeyObject, verify } from 'node:crypto';
 import {
   parseBootManifestWire,
+  signedBootManifestSchema,
   generationHighWaterRuntimeConfigV1Schema,
   type BootManifest,
   type BootManifestResourcePrefixes,
@@ -11,7 +12,6 @@ import {
 } from '@folklore/contracts/enclave-attestation';
 import { buildSignerPurposeSignatureMessage } from '@folklore/contracts';
 import {
-  encodeBootManifest,
   encodeBootManifestSubjectV3,
   digestCanonicalCbor,
   hashBootManifestKeyset,
@@ -127,6 +127,7 @@ export const bootManifestVerificationErrors = {
   signer: 'boot_manifest_signer_invalid',
   signature: 'boot_manifest_signature_invalid',
   identity: 'boot_manifest_identity_invalid',
+  legacyFormatRefused: 'boot_manifest_legacy_format_refused',
 } as const;
 
 export class BootManifestVerifier {
@@ -153,14 +154,14 @@ export class BootManifestVerifier {
     try {
       parsed = parseBootManifestWire(input);
     } catch {
+      // The legacy v2 envelope leaves fields the enclave consumes outside its signed bytes, so it
+      // is refused by name rather than reported as malformed.
+      if (signedBootManifestSchema.safeParse(input).success) {
+        throw new Error(bootManifestVerificationErrors.legacyFormatRefused);
+      }
       throw new Error(bootManifestVerificationErrors.invalid);
     }
-    switch (parsed.wire) {
-      case 'LegacySignedBootManifestV2':
-        return this.verifyV2(parsed, runtimeIdentity);
-      case 'SignedBootManifestV3':
-        return this.verifyV3(parsed, runtimeIdentity);
-    }
+    return this.verifyV3(parsed, runtimeIdentity);
   }
 
   verifyGenerationHighWaterRuntimeConfig(
@@ -173,49 +174,6 @@ export class BootManifestVerifier {
     const parsed = generationHighWaterRuntimeConfigV1Schema.safeParse(config);
     if (!parsed.success) throw new Error('generation_high_water_runtime_config_invalid');
     return Object.freeze(parsed.data);
-  }
-
-  private verifyV2(
-    parsed: Extract<ParsedBootManifestWire, { wire: 'LegacySignedBootManifestV2' }>,
-    runtimeIdentity: BootManifestRuntimeIdentity,
-  ): VerifiedBootManifest {
-    const key = this.#keysById.get(parsed.signed.manifest.signerKeyId);
-    if (!key || (key.status !== 'active' && key.status !== 'verification-only')) {
-      throw new Error(bootManifestVerificationErrors.signer);
-    }
-    const isValid = verify(
-      null,
-      encodeBootManifest(parsed.signed.manifest),
-      key.publicKey,
-      Buffer.from(parsed.signed.signature, 'base64'),
-    );
-    if (!isValid) throw new Error(bootManifestVerificationErrors.signature);
-    if (!this.matchesRuntimeIdentity(parsed.signed.manifest, runtimeIdentity)) {
-      throw new Error(bootManifestVerificationErrors.identity);
-    }
-    this.assertProviderPolicyPrerequisites(parsed.signed.manifest);
-    // The v2 signature (encodeBootManifest / encodeManifestFields) does NOT cover
-    // inferenceCommissioning, so a parent could graft the marker onto a valid v2 pins-only
-    // envelope and disable receipt verification. The commissioning marker is v3-only (its
-    // full-JSON subject hash covers every field); reject it on the legacy path. Fail closed.
-    if (parsed.signed.manifest.inferenceCommissioning !== undefined) {
-      throw new Error(bootManifestVerificationErrors.invalid);
-    }
-    // The v2 encoding drops binding `providers` and `evidenceFreeSessionVerifiers` too; both are v3-only.
-    if (this.carriesV3OnlyPolicyFields(parsed.signed.manifest.providerInferenceTrustPolicy)) {
-      throw new Error(bootManifestVerificationErrors.invalid);
-    }
-    return this.freezeOwnedManifest(parsed.signed.manifest);
-  }
-
-  private carriesV3OnlyPolicyFields(policy: BootManifest['providerInferenceTrustPolicy']): boolean {
-    if (policy === undefined) return false;
-    return (
-      policy.evidenceFreeSessionVerifiers !== undefined ||
-      policy.channelPolicy.acceptedBindings.some(
-        (binding) => 'providers' in binding && binding.providers !== undefined,
-      )
-    );
   }
 
   private verifyV3(
