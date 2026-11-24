@@ -28,11 +28,6 @@ class InferenceOutageStore {
     return this.storage.run({ records: [], flags: { fallbackAlarmed: false } }, fn);
   }
 
-  // Shadow arms record into a store of their own, so a shadow outage never defers production.
-  isolated<T>(fn: () => Promise<T>): Promise<T> {
-    return this.run(fn);
-  }
-
   record(entry: InferenceOutageRecord): void {
     const store = this.storage.getStore();
     if (store === undefined) return;

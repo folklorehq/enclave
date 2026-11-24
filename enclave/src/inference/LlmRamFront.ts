@@ -35,10 +35,6 @@ export class LlmRamFront {
     if (!this.lru.has(key)) LlmRamFront.zero(value);
   }
 
-  delete(key: string): boolean {
-    return this.lru.delete(key);
-  }
-
   clear(): void {
     this.lru.clear();
   }

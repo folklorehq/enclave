@@ -45,8 +45,6 @@ const DEFAULT_LOCAL_STRUCTURED_OUTPUT_MODE: LocalStructuredOutputMode = 'tool_ca
 
 const PROVIDER_SEPARATOR = '/';
 
-export const RECEIPT_POLICY = 'per-call' as const;
-
 export function familyOf(model: string): string {
   const normalized = model.trim().toLowerCase();
   const separator = normalized.indexOf(PROVIDER_SEPARATOR);
@@ -116,10 +114,6 @@ let _inferenceFetch: typeof fetch | null = null;
 let _inferencePolicy: SignedInferenceAttestation | null = null;
 let _isLocalPolicy = false;
 let _localStructuredOutputMode: LocalStructuredOutputMode | undefined;
-// Set only from the signature-verified boot manifest's inferenceCommissioning marker. This, not the
-// absence of a trust policy, is what authorizes staged (unverified) inference in production.
-let _commissioningUnverified = false;
-let _commissioningTlsSpki: readonly string[] | undefined;
 
 const TEST_ROLE_MODELS: Record<InferenceModelRole, { model: string; revision: string }> = {
   embed: { model: 'qwen/qwen3-embedding-8b', revision: 'test' },
@@ -175,7 +169,7 @@ export function setPublicInferenceTrustPolicy(policy: unknown): void {
   if (parsed.evidence.profile !== 'dstack-tdx-public-v1') {
     throw new Error('public inference trust policy requires dstack-tdx-public-v1 profile');
   }
-  if (_inferenceTrustPolicy || _inferencePolicy || _isLocalPolicy || _commissioningUnverified) {
+  if (_inferenceTrustPolicy || _inferencePolicy || _isLocalPolicy) {
     throw new Error('public inference trust policy conflicts with legacy inference policy');
   }
   if (_publicInferenceTrustPolicy) {
@@ -187,27 +181,6 @@ export function setPublicInferenceTrustPolicy(policy: unknown): void {
   _publicInferenceTrustPolicy = parsed;
   _backend = null;
   _inferenceFetch = null;
-}
-
-// Enable staged (unverified) inference from the signature-verified boot manifest's commissioning
-// marker. Production-safe because the manifest is signed and PCR-gated; refuses to run staged unless
-// the marker is present. Forbidden alongside a full trust policy (that must keep the real verifier).
-export function setInferenceCommissioning(
-  marker: { unverifiedReceipts: true; tlsSpkiSha256: readonly string[] } | undefined,
-): void {
-  if (marker === undefined) {
-    _commissioningUnverified = false;
-    _commissioningTlsSpki = undefined;
-    return;
-  }
-  if (_inferenceTrustPolicy) {
-    throw new Error('inference commissioning marker conflicts with a signed trust policy');
-  }
-  if (_publicInferenceTrustPolicy) {
-    throw new Error('inference commissioning marker conflicts with public inference trust policy');
-  }
-  _commissioningUnverified = true;
-  _commissioningTlsSpki = marker.tlsSpkiSha256;
 }
 
 export function configureInferenceAttestation(input: InferenceAttestationInput): void {
@@ -272,13 +245,6 @@ export function configureLocalInferencePolicy(env: NodeJS.ProcessEnv = process.e
     true,
   );
   _localStructuredOutputMode = structuredOutputMode;
-}
-
-export function configureInferenceAttestationForTest(input: InferenceAttestationInput): void {
-  if (process.env['NODE_ENV'] !== 'development' && process.env['NODE_ENV'] !== 'test') {
-    throw new Error('test inference attestation forbidden in production');
-  }
-  configureInferenceAttestation(input);
 }
 
 export function assertInferenceAttestationEcho(
@@ -366,23 +332,6 @@ function telemetry(): TelemetryClient {
   return (_telemetry ??= createTelemetryClient());
 }
 
-let _stagedVerificationWarned = false;
-
-// Loud, content-free, once-per-boot: records that inference receipt verification is staged OFF for a
-// commissioning tenant so the outage is observable rather than silent. Never reached in production
-// unless INFERENCE_COMMISSIONING_UNVERIFIED=1 was set explicitly (see allowsUnverifiedInference).
-function warnStagedInferenceVerification(): void {
-  if (_stagedVerificationWarned) return;
-  _stagedVerificationWarned = true;
-  const mode = process.env['NODE_ENV'] === 'production' ? 'commissioning' : 'non_production';
-  process.stderr.write(
-    `inference.receipt_verification.staged_off mode=${mode} — pinned endpoint, receipts NOT verified\n`,
-  );
-  // Relayed to the control plane via the check-in ops-event channel, so the staged-off state is
-  // observable where the enclave's own stderr is not (production has no debug-mode log reader).
-  telemetry().track('inference.receipt_verification_staged_off', 'system', { mode });
-}
-
 export function buildReceiptVerifier(
   telemetryClient: TelemetryClient = telemetry(),
   fetchImpl?: typeof fetch,
@@ -394,24 +343,10 @@ export function buildReceiptVerifier(
       baseUrl: resolveBaseUrl(),
       trustPolicy,
       apiKey: apiKey(),
-      policy: RECEIPT_POLICY,
       telemetry: telemetryClient,
       verifiedReceiptSink: _verifiedReceiptSink,
       fetchImpl: transport,
     });
-  }
-  if (isTestOnlyUnverifiedInference() && !_inferencePolicy) {
-    return {
-      ensureAttested: async () => undefined,
-      verifyReceipt: async () => undefined,
-    };
-  }
-  if (_inferencePolicy && allowsUnverifiedInference()) {
-    warnStagedInferenceVerification();
-    return {
-      ensureAttested: async () => undefined,
-      verifyReceipt: async () => undefined,
-    };
   }
   throw new Error('inference commissioning prerequisite unmet: signed trust policy unavailable');
 }
@@ -451,36 +386,21 @@ function getBackend(): TeeEndpointBackend | OpenAICompatBackend {
     return _backend;
   }
 
-  if (!_inferencePolicy || !allowsUnverifiedInference()) {
-    throw new Error('inference commissioning prerequisite unmet: signed trust policy unavailable');
+  if (_inferencePolicy && isTestOnlyUnverifiedInference()) {
+    // Test seam only (NODE_ENV=test plus INFERENCE_TEST_ALLOW_UNVERIFIED=1): no receipt verifier.
+    _backend = new OpenAICompatBackend({
+      baseUrl: resolveBaseUrl(),
+      apiKey: apiKey(),
+      embedModel: EMBED_MODEL,
+      generateModel: GENERATE_MODEL,
+      modelAllowlist: MODEL_ALLOWLIST,
+      usageSink: recordTokenUsage,
+      telemetry: telemetry(),
+    });
+    return _backend;
   }
 
-  _backend = new OpenAICompatBackend({
-    baseUrl: resolveBaseUrl(),
-    apiKey: apiKey(),
-    embedModel: EMBED_MODEL,
-    generateModel: GENERATE_MODEL,
-    modelAllowlist: MODEL_ALLOWLIST,
-    responseVerifier: buildReceiptVerifier(),
-    usageSink: recordTokenUsage,
-    telemetry: telemetry(),
-    // Even with receipt verification staged off, keep the TLS transport pinned to the real endpoint
-    // SPKI (from the signed commissioning marker) so content never egresses to an unpinned host.
-    ...(commissioningPinnedFetch() ? { fetchImpl: commissioningPinnedFetch()! } : {}),
-  });
-  return _backend;
-}
-
-// A pinned fetch for staged commissioning inference: same transport pinning as the verified path
-// (proxy + SPKI), built from the pins endpoint and the signed marker's tlsSpkiSha256.
-function commissioningPinnedFetch(): typeof fetch | undefined {
-  if (!_commissioningUnverified || !_commissioningTlsSpki || !_inferencePolicy) return undefined;
-  const url = new URL(_inferencePolicy.endpoint);
-  return (_inferenceFetch ??= createPinnedInferenceFetch({
-    origin: url.origin,
-    route: url.pathname,
-    tlsSpkiSha256: [..._commissioningTlsSpki],
-  }));
+  throw new Error('inference commissioning prerequisite unmet: signed trust policy unavailable');
 }
 
 function pinnedInferenceFetch(policy: InferenceTrustPolicyV1): typeof fetch {
@@ -517,12 +437,8 @@ export function assertInferenceConfigured(): void {
     return;
   }
 
-  // Legacy pins alone are not a trust policy: only the signed commissioning marker stages them.
-  if (
-    !_inferenceTrustPolicy &&
-    !(_inferencePolicy && allowsUnverifiedInference()) &&
-    !isTestOnlyUnverifiedInference()
-  ) {
+  // Legacy pins alone are not a trust policy.
+  if (!_inferenceTrustPolicy && !isTestOnlyUnverifiedInference()) {
     throw new Error(inferenceConfigurationErrors.trustPolicy);
   }
   if (!PROXY_PORT && !apiKey()) throw new Error(inferenceConfigurationErrors.transport);
@@ -531,7 +447,6 @@ export function assertInferenceConfigured(): void {
 
 function currentInferenceTrustPolicy(): InferenceTrustPolicyV1 {
   if (_inferenceTrustPolicy) return _inferenceTrustPolicy;
-  if (isTestOnlyUnverifiedInference()) return testOnlyTrustPolicy();
   return requireInferenceTrustPolicy();
 }
 
@@ -560,18 +475,6 @@ function roleModelName(role: InferenceModelRole): string {
   }[role];
 }
 
-function isNonProductionEnvironment(): boolean {
-  return process.env['NODE_ENV'] !== 'production';
-}
-
-// Staged (unverified) inference is permitted only when: this is a non-production env, OR the
-// signature-verified boot manifest carried the explicit inferenceCommissioning marker
-// (_commissioningUnverified). It is NEVER inferred from the absence of a trust policy — the
-// active-policy carrier path also has no trust policy, and must keep the real verifier.
-function allowsUnverifiedInference(): boolean {
-  return isNonProductionEnvironment() || _commissioningUnverified;
-}
-
 function isTestOnlyUnverifiedInference(): boolean {
   return (
     process.env['NODE_ENV'] === 'test' && process.env['INFERENCE_TEST_ALLOW_UNVERIFIED'] === '1'
@@ -583,38 +486,6 @@ function testEndpoint(): string {
   if (configured) return configured;
   if (PROXY_PORT) return `https://localhost:${PROXY_PORT}`;
   return 'https://localhost';
-}
-
-function testOnlyTrustPolicy(): InferenceTrustPolicyV1 {
-  const endpoint = new URL(testEndpoint());
-  const roleModels = TEST_ROLE_MODELS;
-  return inferenceTrustPolicyV1Schema.parse({
-    version: 1,
-    generation: 1,
-    origin: endpoint.origin,
-    route: endpoint.pathname || '/',
-    redirectOrigins: [],
-    tlsSpkiSha256: ['0'.repeat(64)],
-    workloadId: 'test-workload',
-    quoteRootDigests: ['0'.repeat(64)],
-    workloadMeasurements: ['0'.repeat(96)],
-    attestationKeys: [
-      { keyId: 'test-attestation', algorithm: 'Ed25519', publicKey: `${'A'.repeat(43)}=` },
-    ],
-    receiptKeys: [
-      { keyId: 'test-receipt', algorithm: 'Ed25519', publicKey: `${'B'.repeat(42)}A=` },
-    ],
-    permittedModels: [
-      ...new Map(
-        Object.values(TEST_ROLE_MODELS).map((model) => [`${model.model} ${model.revision}`, model]),
-      ).values(),
-    ].sort((left, right) => {
-      const leftKey = `${left.model} ${left.revision}`;
-      const rightKey = `${right.model} ${right.revision}`;
-      return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
-    }),
-    roleModels,
-  });
 }
 
 export async function embedText(text: string): Promise<number[]> {

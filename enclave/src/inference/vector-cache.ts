@@ -5,7 +5,8 @@ export interface VectorCache {
   setVector(key: string, vector: readonly number[]): Promise<void>;
 }
 
-export type LlmOperationCache = Cache & VectorCache;
+/** Content-addressed blobs are immutable, so the sealed cache has no delete. */
+export type LlmOperationCache = Omit<Cache, 'del'> & VectorCache;
 
 /** Rounds to float32, the precision the index stores, so a hit and a miss return the same vector. */
 export function float32Vector(vector: readonly number[]): number[] {

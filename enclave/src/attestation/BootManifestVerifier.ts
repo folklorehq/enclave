@@ -17,8 +17,6 @@ import {
   hashBootManifestKeyset,
   verifySignedBootManifestKeyset,
   TRUSTED_SIGNER_RECOVERY_ROOT_DIGEST,
-  recoveryRootInstallationReportV1Schema,
-  type RecoveryRootInstallationReportV1,
 } from '@folklore/nitro-attestation';
 import type { BootSessionState } from './ports.js';
 
@@ -273,26 +271,6 @@ export class BootManifestVerifier {
         .digest('hex'),
       bootEpoch: this.#keysetGeneration,
     };
-  }
-
-  /** Reader installation report for the recovery-root update gate; requires configured build identity. */
-  recoveryInstallationReport(): RecoveryRootInstallationReportV1 {
-    const buildId = process.env['ENCLAVE_ATTESTATION_BUILD_ID']?.trim();
-    const sourceCommit = process.env['ENCLAVE_ATTESTATION_SOURCE_SHA']?.trim();
-    const artifactDigest = process.env['ENCLAVE_ATTESTATION_ARTIFACT_DIGEST']?.trim();
-    if (!buildId || !sourceCommit || !artifactDigest) {
-      throw new Error('recovery_installation_build_identity_unavailable');
-    }
-    return recoveryRootInstallationReportV1Schema.parse({
-      schema: 'RecoveryRootInstallationReportV1',
-      version: 1,
-      readerId: 'enclave-boot-manifest-verifier',
-      buildId,
-      installedRootEpoch: 1,
-      installedRootDigest: TRUSTED_SIGNER_RECOVERY_ROOT_DIGEST,
-      sourceCommit,
-      artifactDigest,
-    });
   }
 
   private keysFromSignedKeyset(keyset: BootManifestKeyset): readonly PinnedBootManifestKey[] {

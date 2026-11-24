@@ -103,7 +103,6 @@ import {
   configureInferenceAttestation,
   configureLocalInferencePolicy,
   setInferenceTelemetry,
-  setInferenceCommissioning,
   setInferenceTrustPolicy,
   setPublicInferenceTrustPolicy,
   setVerifiedInferenceReceiptSink,
@@ -890,7 +889,6 @@ runtimeAttestation = await initializeRuntimeAttestationForBoot(
     }
     if (providerPolicy) setPublicInferenceTrustPolicy(providerPolicy);
     else if (trustPolicy) setInferenceTrustPolicy(trustPolicy);
-    setInferenceCommissioning(verifiedBootManifest?.inferenceCommissioning);
     if (signedPolicy) configureInferenceAttestation(signedPolicy);
     else if (!trustPolicy && !providerPolicy) configureLocalInferencePolicy();
     if (process.env['NODE_ENV'] === 'production') {

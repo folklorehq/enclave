@@ -64,12 +64,6 @@ export function buildClaudeRequest(input: ClaudeRequestInput): ClaudeRequestBody
   };
 }
 
-export type ClaudeRequestOperation = 'generate' | 'structured';
-
-export function operationOf(request: ClaudeRequestBody): ClaudeRequestOperation {
-  return request.output_config.format === undefined ? 'generate' : 'structured';
-}
-
 export function claudeThinkingEnabled(request: ClaudeRequestBody): boolean {
   return request.thinking === undefined;
 }

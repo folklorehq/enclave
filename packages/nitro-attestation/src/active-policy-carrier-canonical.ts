@@ -118,10 +118,6 @@ export function signedActivePolicyCarrierArrayV1(input: SignedActivePolicyCarrie
   ];
 }
 
-export function encodeSignedActivePolicyCarrierV1(input: SignedActivePolicyCarrierV1): Uint8Array {
-  return canonicalCbor(signedActivePolicyCarrierArrayV1(input));
-}
-
 export function digestSignedActivePolicyCarrierV1(input: SignedActivePolicyCarrierV1): string {
   return sha256Hex(
     domainSeparatedBytes(

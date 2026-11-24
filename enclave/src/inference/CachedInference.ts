@@ -39,10 +39,6 @@ export interface CachedInferenceModels {
 // Shared by the callers whose prompt templates version together.
 export const LLM_CACHE_PROMPT_VERSION = '1';
 
-// Answers cached before the citation gate could be uncited, and this cache has no TTL, so replaying
-// one would abstain forever; its own tag retires them without touching the templates above.
-export const ANSWER_CACHE_VERSION = '2';
-
 // Embedding input is raw text, never a prompt template, so it carries its own tag: a prompt bump
 // must not purge every sealed embedding in the fleet and force a full re-embed.
 const EMBED_CACHE_VERSION = '1';

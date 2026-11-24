@@ -103,19 +103,6 @@ export class S3LlmCache implements LlmOperationCache {
     });
   }
 
-  // Content-addressed blobs are immutable (same input → same output), so invalidation only clears
-  // the RAM front; the durable S3 object stays.
-  async del(...keys: string[]): Promise<number> {
-    return this.withLease(async () => {
-      this.assertOpen();
-      let deleted = 0;
-      for (const key of keys) {
-        if (this.ram.delete(this.objectKey(this.deps.namer.llmCacheName(key)))) deleted += 1;
-      }
-      return deleted;
-    });
-  }
-
   async close(): Promise<void> {
     if (this.isClosed) return;
     this.isClosed = true;

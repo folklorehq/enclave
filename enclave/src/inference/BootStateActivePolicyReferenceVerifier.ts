@@ -160,14 +160,6 @@ export function createEnclaveActivePolicyKeyVerifier(
   };
 }
 
-export function enclaveTrustedPublicKey(rawPublicKey: Uint8Array): KeyObject {
-  return createPublicKey({
-    key: Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), Buffer.from(rawPublicKey)]),
-    format: 'der',
-    type: 'spki',
-  });
-}
-
 export async function loadEnclaveActivePolicyTrust(input: {
   readonly bootTrust: ActivePolicyBootTrust;
   readonly kms: EnclaveActivePolicyKmsClient;

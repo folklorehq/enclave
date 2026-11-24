@@ -12,7 +12,6 @@ export {
   encodeActiveInferenceTrustPolicyV2AuthorizationInput,
   encodeActivePolicyAuthorizationEnvelopeV1,
   digestActivePolicyAuthorizationEnvelopeV1,
-  encodeDormantBootManifestV2CarrierManifest,
   encodeRuntimeHealthSignaturePayload,
   encodePoolRuntimeAttestationUserData,
   encodePoolRuntimeHealthSignaturePayload,
@@ -129,10 +128,8 @@ export {
   buildRecoveryRootUpdateFloorBoundSubjectV1,
   canonicalRecoveryRootUpdateSubjectBytes,
   recoveryRootUpdateAuthorizationDigest,
-  signedRecoveryRootUpdateV1Schema,
   type RecoveryRootUpdateAuthorizationPreimageV1,
   type RecoveryRootUpdateFloorBoundSubjectV1,
-  type SignedRecoveryRootUpdateV1,
 } from './signed-recovery-root-update.js';
 export {
   canonicalSignerFloorBootstrapSubjectBytes,
@@ -143,35 +140,6 @@ export {
   type SignerFloorCommitVerificationInputV2,
 } from './signer-floor-authority.js';
 export {
-  RECOVERY_FREEZE_STATE,
-  REQUIRED_RECOVERY_READER_SET,
-  evaluateRecoveryRootInstallation,
-  recoveryRootInstallationReportV1Schema,
-  type RecoveryRootInstallationEvaluation,
-  type RecoveryRootInstallationReportV1,
-} from './recovery-root-installation.js';
-export {
-  CONTROLLED_GATEWAY_BINDING_V1_DOMAIN,
-  CONTROLLED_GATEWAY_PROOF_BINDING_V1_DOMAIN,
-  MODEL_PROVENANCE_TUPLE_V1_DOMAIN,
-  PRE_FORWARD_ROUTE_PROOF_V1_DOMAIN,
-  PROVIDER_NATIVE_BINDING_V1_DOMAIN,
-  canonicalControlledGatewayBindingArrayV1,
-  canonicalControlledGatewayProofBindingArrayV1,
-  canonicalModelProvenanceTupleArrayV1,
-  canonicalProviderNativeBindingArrayV1,
-  digestControlledGatewayBindingV1,
-  digestControlledGatewayProofBindingV1,
-  digestModelProvenanceTupleV1,
-  digestPreForwardRouteProofV1,
-  digestProviderNativeBindingV1,
-  encodeControlledGatewayBindingV1,
-  encodeControlledGatewayProofBindingV1,
-  encodeModelProvenanceTupleV1,
-  encodeProviderNativeBindingV1,
-  type ControlledGatewayProofBindingV1,
-} from './model-provenance-canonical.js';
-export {
   ACTIVE_POLICY_CARRIER_PAYLOAD_V1_DOMAIN,
   SIGNED_ACTIVE_POLICY_CARRIER_V1_DOMAIN,
   activePolicyCarrierGenerationContextArrayV1,
@@ -181,7 +149,6 @@ export {
   digestActivePolicyCarrierPayloadV1,
   digestSignedActivePolicyCarrierV1,
   encodeActivePolicyCarrierPayloadV1,
-  encodeSignedActivePolicyCarrierV1,
   signedActivePolicyCarrierArrayV1,
 } from './active-policy-carrier-canonical.js';
 export {
@@ -232,7 +199,6 @@ export { generationHighWaterEntryContextV1 } from './generation-high-water-conte
 export {
   SelfSignedCertificateError,
   buildSelfSignedEcdsaCertificate,
-  buildSelfSignedEcdsaCertificateTbs,
   type SelfSignedCertificateErrorCode,
   type SelfSignedEcdsaCertificateInput,
 } from './self-signed-ecdsa-certificate.js';

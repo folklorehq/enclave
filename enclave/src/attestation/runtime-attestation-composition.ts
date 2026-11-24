@@ -31,7 +31,6 @@ import type {
 } from './RuntimeAttestationServer.js';
 import type { NsmAttestationPort } from '../sealing/nsm.js';
 import { verifySignedBootManifestKeyset } from '@folklore/nitro-attestation';
-import type { RecoveryRootInstallationReportV1 } from '@folklore/nitro-attestation';
 import type { BootSessionState, RuntimeEvidenceSessionPort } from './ports.js';
 import { bootPrepareStepCode } from './boot-prepare-failure.js';
 
@@ -125,10 +124,6 @@ export class RuntimeAttestationComposition implements RuntimeEvidenceSessionPort
   /** The installed recovery-root digest reported by the composition. */
   installedRecoveryRootDigest(): string {
     return this.verifier.installedRecoveryRootDigest();
-  }
-
-  recoveryInstallationReport(): RecoveryRootInstallationReportV1 {
-    return this.verifier.recoveryInstallationReport();
   }
 
   /** UNWIRED: Trusted-time commissioning record production has no live caller. */

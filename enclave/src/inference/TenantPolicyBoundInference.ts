@@ -172,10 +172,6 @@ export interface TenantPolicyBoundInferenceOptions {
   readonly embeddingProvider?: EmbeddingProvider;
   readonly decisionModel?: DecisionModel;
   readonly structured?: (prompt: string, tool: ToolSpec, systemPrompt?: string) => Promise<unknown>;
-  readonly onVerifiedBinding?: (
-    binding: VerifiedActivePolicyRoleBindingV1,
-    snapshot: VerifiedActivePolicySnapshotV1,
-  ) => unknown;
 }
 
 type StreamOpening =
@@ -203,19 +199,14 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
   private deadlineSnapshot: VerifiedActivePolicySnapshotV1 | undefined;
   private deadlineEpoch: number | undefined;
   private lastTrustedNow = 0;
-  private readonly options: TenantPolicyBoundInferenceOptions;
   private readonly transientRetry: TransientInferenceRetry;
 
   constructor(
     private readonly tenantId: string,
     private readonly snapshotProvider: TenantPolicySnapshotProvider,
     private readonly backend: SynthesisInference,
-    optionsOrSink:
-      | TenantPolicyBoundInferenceOptions
-      | ((binding: VerifiedActivePolicyRoleBindingV1) => unknown) = {},
+    private readonly options: TenantPolicyBoundInferenceOptions = {},
   ) {
-    this.options =
-      typeof optionsOrSink === 'function' ? { onVerifiedBinding: optionsOrSink } : optionsOrSink;
     this.assertFreshnessOptions(this.options.freshness);
     this.transientRetry = this.options.transientRetry ?? new TransientInferenceRetry();
   }
@@ -875,10 +866,6 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
     }
   }
 
-  async authorize(role: InferenceModelRole): Promise<void> {
-    await this.bindingFor(role);
-  }
-
   private async backendFor(
     binding: VerifiedActivePolicyRoleBindingV1,
     snapshot: VerifiedActivePolicySnapshotV1,
@@ -1061,7 +1048,6 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
     }
     try {
       await this.options.verifiedBindingForwarder?.(binding, snapshot);
-      await this.options.onVerifiedBinding?.(binding, snapshot);
     } catch {
       throw this.refuse(
         snapshot,

@@ -1,6 +1,5 @@
 import {
   bootManifestSchema,
-  dormantBootManifestV2CarrierManifestSchema,
   bootManifestUserDataSchema,
   enclaveHealthRecordSchema,
   type BootManifest,
@@ -391,17 +390,6 @@ export function digestActivePolicyAuthorizationEnvelopeV1(
 export function encodeBootManifest(input: BootManifest): Uint8Array {
   const manifest = bootManifestSchema.parse(input);
   return encodeManifestFields('folklore.boot-manifest.v2', manifest);
-}
-
-export function encodeDormantBootManifestV2CarrierManifest(
-  input: DormantBootManifestV2CarrierManifest,
-): Uint8Array {
-  const manifest = dormantBootManifestV2CarrierManifestSchema.parse(input);
-  const { inferenceAttestation: _legacyInferenceAttestation, ...carrierManifest } =
-    manifest as typeof manifest & {
-      inferenceAttestation?: unknown;
-    };
-  return encodeManifestFields('folklore.dormant-boot-manifest-v2-carrier.v1', carrierManifest);
 }
 
 function encodeManifestFields(

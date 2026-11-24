@@ -67,11 +67,6 @@ export class RoutingTableRefresher implements RoutingTableSource {
     this.timer.unref();
   }
 
-  stop(): void {
-    if (this.timer !== undefined) clearInterval(this.timer);
-    this.timer = undefined;
-  }
-
   private async refresh(installed: Installed): Promise<void> {
     try {
       const read = await installed.reader.read();
