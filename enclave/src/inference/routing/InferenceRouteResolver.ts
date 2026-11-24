@@ -21,11 +21,7 @@ import {
   type RouteTarget,
 } from '@folklore/contracts';
 import { isAnthropicRoute, isClaudeModelId } from '../claude/anthropic-route.js';
-import {
-  CLAUDE_ROUTE_CONFIG,
-  type ClaudeCallGraph,
-  type ClaudeRouteConfig,
-} from '../claude/claude-route-config.js';
+import { CLAUDE_ROUTE_CONFIG, type ClaudeRouteConfig } from '../claude/claude-route-config.js';
 import {
   CLAUDE_ROUTE_CONFIG_INVALID,
   ClaudeRouteConfigError,
@@ -248,10 +244,6 @@ export class InferenceRouteResolver {
 
   allowedModels(): readonly ClaudeModelId[] {
     return [...this.#config.identity.models];
-  }
-
-  callGraph(arm: InferenceArmId): ClaudeCallGraph {
-    return arm === DEFAULT_ARM ? this.#config.callGraph : this.#config.arms[arm].callGraph;
   }
 
   reviewSamplePercent(): number {
