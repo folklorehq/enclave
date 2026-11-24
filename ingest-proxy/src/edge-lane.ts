@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
 export const EDGE_LANE_BUCKETS = 16;
-export const EDGE_LANE_DOMAIN = 'folklore.edge-lane.v1';
+const EDGE_LANE_DOMAIN = 'folklore.edge-lane.v1';
 
 const JIRA_OAUTH_ENVELOPE = 'jira-oauth-envelope';
 const SOURCE_WIDE_LANE = '';

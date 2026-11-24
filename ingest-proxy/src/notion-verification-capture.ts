@@ -2,13 +2,13 @@ import { GetParameterCommand, PutParameterCommand, type SSMClient } from '@aws-s
 
 const CAPTURE_WINDOW_MS = 10 * 60 * 1000;
 
-export interface NotionVerificationCaptureConfig {
+interface NotionVerificationCaptureConfig {
   captureUntilParameter: string;
   pendingTokenParameter: string;
   kmsKeyId: string;
 }
 
-export type NotionCaptureResult = 'captured' | 'disabled' | 'occupied' | 'unavailable';
+type NotionCaptureResult = 'captured' | 'disabled' | 'occupied' | 'unavailable';
 
 export function getNotionVerificationCaptureConfig(
   env: Record<string, string | undefined> = process.env,

@@ -4,7 +4,7 @@ const AES_GCM_AUTH_TAG_BYTES = 16;
 const EPHEMERAL_PUBLIC_KEY_HEX_LENGTH = 64;
 const NONCE_HEX_LENGTH = 24;
 
-export interface EncryptedSqsMessageSizeInput {
+interface EncryptedSqsMessageSizeInput {
   tenantId: string;
   source: string;
   eventType: string;
@@ -12,7 +12,7 @@ export interface EncryptedSqsMessageSizeInput {
   messageType?: 'jira-oauth-envelope';
 }
 
-export function encryptedSqsMessageByteLength(input: EncryptedSqsMessageSizeInput): number {
+function encryptedSqsMessageByteLength(input: EncryptedSqsMessageSizeInput): number {
   const ciphertextHexLength =
     (Buffer.byteLength(input.payloadBody, 'utf8') + AES_GCM_AUTH_TAG_BYTES) * 2;
   const body = {

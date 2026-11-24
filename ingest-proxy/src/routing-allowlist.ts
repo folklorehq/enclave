@@ -3,7 +3,7 @@ import { UUID_V4_LOWERCASE_PATTERN } from './uuid-pattern.js';
 
 export type RoutingMode = 'payload' | 'url';
 
-export const ROUTING_INGEST_KEY_FIELD = 'ingestKey';
+const ROUTING_INGEST_KEY_FIELD = 'ingestKey';
 const ROUTING_INGEST_KEY_LABEL = 'ingest';
 
 export interface RoutingAllowlistEntry {

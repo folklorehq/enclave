@@ -781,7 +781,7 @@ async function sealAndEnqueue(params: {
   );
 }
 
-export interface DispatcherEvent {
+interface DispatcherEvent {
   source: string;
   body: string;
   tenantId: string;

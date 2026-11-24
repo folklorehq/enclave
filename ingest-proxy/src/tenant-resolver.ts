@@ -3,7 +3,7 @@ import type { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import type { ConnectorWebhook } from '@folklore/contracts';
 import { declaredBodyTenantKey, selectValue, WEBHOOKS } from './edge-descriptor.js';
 
-export interface TenantResolution {
+interface TenantResolution {
   orgId: string;
   resolvedFrom: 'payload' | 'jwt' | 'dynamic';
 }

@@ -20,7 +20,7 @@ const REJECTION_STATUS = {
   downstream_failed: 503,
 } as const;
 
-export type WebhookRejectionReason = keyof typeof REJECTION_STATUS;
+type WebhookRejectionReason = keyof typeof REJECTION_STATUS;
 
 const REJECTED_EVENT = 'dispatcher_webhook_rejected';
 const ACCEPTED_EVENT = 'dispatcher_webhook_accepted';
