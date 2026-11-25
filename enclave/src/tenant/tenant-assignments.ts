@@ -1,11 +1,9 @@
 import {
   type NormalizedAssignmentManifestV1,
-  type SignedAssignmentManifest,
   type TenantAssignment,
   type VersionedTenantAssignment,
   canonicalQueueUrlSchema,
   parseAssignmentManifestWire as parseContractAssignmentManifestWire,
-  parseVersionedAssignmentManifest as parseContractVersionedManifest,
   tenantBucketNames,
   tenantResourceName,
   tenantWebhookQueueName,
@@ -34,17 +32,6 @@ const SQS_URL_PATTERN = /^https:\/\/sqs\.([^.]+)\.amazonaws\.com\/(\d{12})\/([^/
 
 const ASSIGNMENT_MANIFEST_RESOURCE_SHARED = 'assignment_manifest_resource_shared';
 const ASSIGNMENT_MANIFEST_RESOURCE_NAME_MISMATCH = 'assignment_manifest_resource_name_mismatch';
-
-/** Validates a signed assignment revision before the registry receives its assignment set. */
-export function parseVersionedAssignmentManifest(
-  manifest: unknown,
-  expectedPoolId: string,
-  lastGeneration: number,
-): SignedAssignmentManifest {
-  const parsed = parseContractVersionedManifest(manifest, expectedPoolId, lastGeneration);
-  assertNoDuplicates(parsed.assignments);
-  return parsed;
-}
 
 /** Parses the signed assignment wire with the same parser as every other reader. */
 export function parseAssignmentManifestWire(
