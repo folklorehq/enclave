@@ -302,7 +302,7 @@ export function safeUsageModel(model: string): string {
   return conforms ? model : UNKNOWN_MODEL;
 }
 
-// One scope per process: the phala backend is a module singleton, so its sink cannot be handed a
+// One scope per process: provider backends share this sink, so it cannot be handed a
 // per-call accumulator — it records into whichever run is active.
 export const tokenUsageScope = new TokenUsageScope();
 

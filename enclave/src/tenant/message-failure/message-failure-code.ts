@@ -1,9 +1,6 @@
 import {
-  AciSessionVerificationError,
-  AciVerificationError,
   ActivePolicyCarrierVerificationError,
   GenerationContextFloorError,
-  OfficialAciReceiptVerificationError,
   VerifiedActivePolicySnapshotVerifierError,
 } from '@folklore/inference';
 import { AppError } from '@folklore/errors';
@@ -83,37 +80,8 @@ const ABORT_REASONS: ReadonlyMap<string, string> = new Map([
   ['AbortError', 'request_aborted'],
   ['TimeoutError', 'request_timeout'],
 ]);
-// The provider backend's own sentences under its default label; the status is a bare HTTP code.
-const PROVIDER_MESSAGE_REASONS: ReadonlyArray<readonly [RegExp, (status: string) => string]> = [
-  [
-    /^OpenAI-compatible endpoint (?:embed|generate|tool call|stream) failed: ([1-5][0-9]{2})$/,
-    (status) => `provider_http_${status}`,
-  ],
-  [
-    /^OpenAI-compatible endpoint returned no (?:embedding|content)$/,
-    () => 'provider_response_empty',
-  ],
-  [
-    /^OpenAI-compatible endpoint returned a malformed (?:embedding|chat|stream) response$/,
-    () => 'provider_response_malformed',
-  ],
-  [/^OpenAI-compatible endpoint exhausted its output tokens$/, () => 'provider_output_exhausted'],
-  [
-    /^OpenAI-compatible endpoint returned invalid structured output$/,
-    () => 'provider_structured_output_invalid',
-  ],
-  [
-    /^OpenAI-compatible endpoint returned no tool call for "[a-z][a-z0-9_]{0,63}"$/,
-    () => 'provider_tool_call_missing',
-  ],
-  [
-    /^OpenAI-compatible endpoint returned [0-9]{1,6}-dim embedding, expected [0-9]{1,6}$/,
-    () => 'provider_embedding_dimension_mismatch',
-  ],
-];
-
 // Reasons a provider call raises; the inference role they failed under is prefixed when known.
-const ROLE_TAGGED_REASON_PREFIXES = ['provider_', 'aci_'] as const;
+const ROLE_TAGGED_REASON_PREFIXES = ['provider_'] as const;
 const ROLE_TAGGED_REASONS: ReadonlySet<string> = new Set(['request_aborted', 'request_timeout']);
 
 type ErrorClass = abstract new (...args: never[]) => Error;
@@ -131,9 +99,6 @@ const FIXED_CLASS_REASONS: ReadonlyArray<readonly [ErrorClass, string]> = [
 
 // Each of these carries a code typed as a closed union; the prefix keeps the class distinguishable.
 const TYPED_CODE_PREFIXES: ReadonlyArray<readonly [ErrorClass, string]> = [
-  [AciVerificationError, 'aci'],
-  [AciSessionVerificationError, 'aci_session'],
-  [OfficialAciReceiptVerificationError, 'aci_receipt'],
   [ActivePolicyCarrierVerificationError, 'policy_carrier'],
   [GenerationContextFloorError, 'generation_floor'],
   [VerifiedActivePolicySnapshotVerifierError, 'policy_snapshot'],
@@ -291,7 +256,6 @@ function linkReason(link: unknown): string | undefined {
   if (link instanceof AppError) return known(link.code);
   return (
     messageReason(link.message) ??
-    fixedSentenceReason(link.message) ??
     networkCodeReason(link) ??
     abortReason(link) ??
     awsHttpReason(link)
@@ -307,14 +271,6 @@ function messageReason(message: unknown): string | undefined {
       ? MESSAGE_SENTENCE_REASONS.get(sentenceKey(message))
       : undefined)
   );
-}
-
-function fixedSentenceReason(message: string): string | undefined {
-  for (const [pattern, reason] of PROVIDER_MESSAGE_REASONS) {
-    const match = pattern.exec(message);
-    if (match) return reason(match[1] ?? '');
-  }
-  return undefined;
 }
 
 function networkCodeReason(error: Error): string | undefined {

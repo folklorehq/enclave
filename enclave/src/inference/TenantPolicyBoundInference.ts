@@ -27,14 +27,15 @@ import {
   type VerifiedActivePolicyRoleBindingV1,
   type VerifiedActivePolicySnapshotV1,
 } from '@folklore/inference';
-import { inferenceModel, inferenceModelRevision } from './phala.js';
+import { policyRoleModel, policyRoleModelRevision } from './provider-policy-role-models.js';
 import { inferencePurposeScope } from './InferencePurposeScope.js';
 import { float32Vector, type LlmOperationCache } from './vector-cache.js';
-import {
-  ACI_ROUTE,
-  type InferenceRoute,
-  type InferenceRouteResolver,
+import type {
+  GenerativeRole,
+  InferenceRoute,
+  InferenceRouteResolver,
 } from './routing/InferenceRouteResolver.js';
+import { ClaudeRouteConfigError } from './claude/claude-route-errors.js';
 import { PROVIDER_ROUTE_POLICY } from './routing/provider-route-policy.js';
 import {
   OPENAI_EMBED_CACHE_LABEL,
@@ -42,7 +43,6 @@ import {
 } from './openai/OpenAIEmbedRouteComposition.js';
 import { OPENAI_TRANSIENT_STATUSES, OpenAIEmbedRouteError } from './openai/openai-embed-errors.js';
 import { OPENAI_EMBED_DIMENSIONS, OPENAI_EMBED_MODEL } from './openai/openai-embed-route-state.js';
-import { ACTIVE_EMBEDDING_SPACE_IS_LEGACY } from './embedding-space.js';
 import { UNSCOPED_MESSAGE, upstreamCallScope } from './UpstreamCallScope.js';
 import type { SynthesisInference } from './CachedInference.js';
 import { ChunkQueue, ChunkQueueError } from './ChunkQueue.js';
@@ -63,10 +63,7 @@ import {
   type BackoffObserver,
   type TransientRetryWindows,
 } from './TransientInferenceRetry.js';
-import {
-  transientRetryWindows,
-  type InferenceLatencyProfile,
-} from './public-aci-operation-limits.js';
+import { transientRetryWindows, type InferenceLatencyProfile } from './operation-limits.js';
 import type { RecentGenerationHighWaterPort } from './ports.js';
 import {
   RENEWAL_GRACE_READ_COUNT,
@@ -130,7 +127,7 @@ export type TenantPolicyOperationBackend = SynthesisInference & {
 export type TenantPolicyVerifiedBindingBackendFactory = (
   binding: VerifiedActivePolicyRoleBindingV1,
   snapshot: VerifiedActivePolicySnapshotV1,
-  route?: InferenceRoute,
+  route: InferenceRoute,
 ) => Promise<TenantPolicyOperationBackend>;
 
 export interface UpstreamCallAdmission {
@@ -160,7 +157,7 @@ export interface TenantPolicyBoundInferenceOptions {
   readonly transientRetry?: TransientInferenceRetry;
   readonly latencyProfile?: InferenceLatencyProfile;
   readonly upstreamGate?: UpstreamCallGate;
-  readonly upstreamKeyFor?: (role: InferenceModelRole) => string | undefined;
+  readonly upstreamKeyFor?: (role: GenerativeRole) => string | undefined;
   readonly upstreamKeyForRoute?: (route: InferenceRoute) => string | undefined;
   readonly routeResolver?: InferenceRouteResolver;
   readonly embeddingProvider?: EmbeddingProvider;
@@ -354,55 +351,24 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
     return this.options.timer ? this.options.timer(phase, label, step) : step();
   }
 
-  // An unconfigured role has no model to key a window by; its refusal is the binding's to raise.
+  // An unconfigured role has no model to key a window by; its refusal is the call's to raise.
   private upstreamOf(role: InferenceModelRole, route?: InferenceRoute): string {
-    if (role === 'embed' && !this.isLegacyEmbeddingSpace()) return OPENAI_EMBED_CACHE_LABEL;
+    if (role === 'embed') return OPENAI_EMBED_CACHE_LABEL;
     const keyed =
-      route?.kind === 'provider' && this.options.upstreamKeyForRoute
+      route !== undefined && this.options.upstreamKeyForRoute
         ? this.options.upstreamKeyForRoute(route)
         : this.options.upstreamKeyFor?.(role);
-    if (keyed !== undefined) return keyed;
-    try {
-      return inferenceModel(role);
-    } catch {
-      return `role:${role}`;
-    }
+    return keyed ?? route?.model ?? `role:${role}`;
   }
 
+  // Embedding never reads the policy snapshot: the OpenAI route is compiled into the image.
   private async embedUnderPolicy(text: string, signal?: AbortSignal): Promise<number[]> {
-    if (!this.isLegacyEmbeddingSpace()) return this.embedOnProvider(text, signal);
-    signal?.throwIfAborted();
-    const { binding, snapshot } = await this.bindingFor('embed');
-    signal?.throwIfAborted();
-    const cache = this.operationCache;
-    const embedOnce = async () => {
-      const vector = await this.runTransient('embed', ACI_ROUTE, async () =>
-        (await this.backendFor(binding, snapshot, ACI_ROUTE)).embed(text),
-      );
-      signal?.throwIfAborted();
-      return vector;
-    };
-    if (!cache) return embedOnce();
-    const key = this.cacheKey(binding, snapshot, 'embed', text, ACI_ROUTE);
-    const hit = await this.replayVectorFrom(cache, key, binding.modelId);
-    if (hit !== null) return hit;
-    const output = float32Vector(await embedOnce());
-    await cache.setVector(key, output);
-    return output;
-  }
-
-  // Once the OpenAI route is compiled in, embedding never reads the Phala policy snapshot or falls back to it.
-  private isLegacyEmbeddingSpace(): boolean {
-    return ACTIVE_EMBEDDING_SPACE_IS_LEGACY;
-  }
-
-  private async embedOnProvider(text: string, signal?: AbortSignal): Promise<number[]> {
     const provider = this.options.embeddingProvider;
     if (provider === undefined) throw new OpenAIEmbedRouteError('embedding_provider_absent');
     const embedOnce = () =>
       this.abortedBy(
         signal,
-        this.runTransient('embed', ACI_ROUTE, () => provider.embed(text, signal), {
+        this.runTransient('embed', undefined, () => provider.embed(text, signal), {
           statuses: OPENAI_TRANSIENT_STATUSES,
           signal,
         }),
@@ -497,21 +463,10 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
         { signal },
       );
     if (!cache) return generateOnce(temperature);
-    const resolvedTemperature =
-      route.kind === 'provider'
-        ? undefined
-        : this.validateTemperature(snapshot, binding, temperature);
-    const key = this.generateCacheKey(
-      binding,
-      snapshot,
-      route,
-      prompt,
-      systemPrompt,
-      resolvedTemperature,
-    );
-    const hit = await this.operationCacheGet(key, this.modelOf(binding, route), 'generate');
+    const key = this.generateCacheKey(binding, snapshot, route, prompt, systemPrompt, undefined);
+    const hit = await this.operationCacheGet(key, route.model, 'generate');
     if (hit !== null) return hit;
-    const output = await generateOnce(resolvedTemperature);
+    const output = await generateOnce(undefined);
     signal?.throwIfAborted();
     if ((shouldCache ?? (() => true))(output)) await this.options.operationCache?.set(key, output);
     return output;
@@ -557,25 +512,9 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
     queue: ChunkQueue<string>,
   ): Promise<void> {
     assertStreamLive(request.signal);
-    if (route.kind !== 'provider') {
-      queue.push(
-        await this.generateOnRoute(
-          binding,
-          snapshot,
-          route,
-          request.prompt,
-          request.systemPrompt,
-          undefined,
-          cacheWhileLive(request),
-        ),
-      );
-      return;
-    }
     const key = this.streamCacheKey(binding, snapshot, route, request);
     const hit =
-      key === undefined
-        ? null
-        : await this.operationCacheGet(key, this.modelOf(binding, route), 'generate');
+      key === undefined ? null : await this.operationCacheGet(key, route.model, 'generate');
     if (hit !== null) {
       queue.push(hit);
       return;
@@ -714,7 +653,7 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
       }),
       route,
     );
-    const hit = await this.operationCacheGet(key, this.modelOf(binding, route), 'generate');
+    const hit = await this.operationCacheGet(key, route.model, 'generate');
     if (hit !== null) return hit;
     const output = await critiqueOnce();
     if ((shouldCache ?? (() => true))(output)) await this.options.operationCache?.set(key, output);
@@ -746,7 +685,7 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
 
   private runTransient<T>(
     role: InferenceModelRole,
-    route: InferenceRoute,
+    route: InferenceRoute | undefined,
     operation: () => Promise<T>,
     options: { readonly statuses?: ReadonlySet<number>; readonly signal?: AbortSignal } = {},
   ): Promise<T> {
@@ -755,26 +694,26 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
       this.retryWindows(role),
       this.backoffTimer(role, route),
       options.statuses ??
-        (route.kind === 'provider'
-          ? PROVIDER_ROUTE_POLICY[route.provider].transientStatuses
-          : undefined),
+        (route === undefined ? undefined : PROVIDER_ROUTE_POLICY[route.provider].transientStatuses),
       options.signal,
     );
   }
 
-  private routeFor(role: InferenceModelRole): InferenceRoute {
-    return this.options.routeResolver?.resolve(role, inferencePurposeScope.current()) ?? ACI_ROUTE;
-  }
-
-  private modelOf(binding: VerifiedActivePolicyRoleBindingV1, route: InferenceRoute): string {
-    return route.kind === 'provider' ? route.model : binding.modelId;
+  private routeFor(role: GenerativeRole): InferenceRoute {
+    // An inference composed without the resolver has no route; it refuses rather than guessing one.
+    const resolver = this.options.routeResolver;
+    if (resolver === undefined) throw new ClaudeRouteConfigError('route_unwired');
+    return resolver.resolve(role, inferencePurposeScope.current());
   }
 
   private retryWindows(role: InferenceModelRole): TransientRetryWindows {
     return transientRetryWindows(role, this.options.latencyProfile ?? 'batch');
   }
 
-  private backoffTimer(role: InferenceModelRole, route: InferenceRoute): BackoffObserver {
+  private backoffTimer(
+    role: InferenceModelRole,
+    route: InferenceRoute | undefined,
+  ): BackoffObserver {
     return (backoff) => this.timed('retry_backoff', role, backoff, route);
   }
 
@@ -782,21 +721,22 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
     phase: InferenceCallPhase,
     role: InferenceModelRole,
     step: () => Promise<T>,
-    route: InferenceRoute = this.routeFor(role),
+    route?: InferenceRoute,
   ): Promise<T> {
     const timer = this.options.timer;
     return timer ? timer(phase, this.callLabel(role, route), step) : step();
   }
 
-  // An unconfigured role has no model id to report; its refusal is the binding's to raise, not the label's.
-  private callLabel(role: InferenceModelRole, route: InferenceRoute): InferenceCallLabel {
+  // A disabled route has no model id to report; its refusal is the call's to raise, not the label's.
+  private callLabel(
+    role: InferenceModelRole,
+    route: InferenceRoute | undefined,
+  ): InferenceCallLabel {
     const label = { role, operation: INFERENCE_OPERATION_BY_ROLE[role] };
-    if (route.kind === 'provider') return { model: route.model, ...label };
-    if (role === 'embed' && !this.isLegacyEmbeddingSpace()) {
-      return { model: OPENAI_EMBED_MODEL, ...label };
-    }
+    if (role === 'embed') return { model: OPENAI_EMBED_MODEL, ...label };
+    if (route !== undefined) return { model: route.model, ...label };
     try {
-      return { model: inferenceModel(role), ...label };
+      return { model: this.routeFor(role).model, ...label };
     } catch {
       return label;
     }
@@ -833,12 +773,11 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
       operation,
       ...this.routeNamespace(route),
     });
-    return llmCacheKey(this.modelOf(binding, route), namespace, input);
+    return llmCacheKey(route.model, namespace, input);
   }
 
-  // A route that is not the policy's own adds its identity, so an entry never crosses routes.
+  // The route's identity is part of the key, so an entry never crosses routes.
   private routeNamespace(route: InferenceRoute): Record<string, unknown> {
-    if (route.kind !== 'provider') return {};
     const prefix = inferencePurposeScope.current()?.cachedSystemPrefix;
     return {
       route: PROVIDER_ROUTE_POLICY[route.provider].cacheRouteLabel,
@@ -898,19 +837,6 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
 
   private get operationCache(): LlmOperationCache | undefined {
     return this.options.backendForVerifiedBinding ? this.options.operationCache : undefined;
-  }
-
-  private validateTemperature(
-    snapshot: VerifiedActivePolicySnapshotV1,
-    binding: VerifiedActivePolicyRoleBindingV1,
-    requested: number | undefined,
-  ): number {
-    const allowed = snapshot.policy.roles[binding.role].capabilities.temperature;
-    const resolved = requested === undefined ? allowed : requested;
-    if (!Number.isFinite(resolved) || resolved !== allowed) {
-      throw new TenantPolicyBoundInferenceError('active_policy_role_binding_mismatch');
-    }
-    return resolved;
   }
 
   private async bindingFor(role: InferenceModelRole): Promise<{
@@ -1021,8 +947,8 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
       binding.orgId !== snapshot.orgId ||
       binding.deploymentId !== snapshot.deploymentId ||
       binding.role !== role ||
-      binding.modelId !== inferenceModel(role) ||
-      binding.modelRevision !== inferenceModelRevision(role) ||
+      binding.modelId !== policyRoleModel(role) ||
+      binding.modelRevision !== policyRoleModelRevision(role) ||
       !policyRole ||
       !DIGEST_PATTERN.test(binding.modelArtifactDigest) ||
       !DIGEST_PATTERN.test(binding.routeIdentityDigest) ||

@@ -19,7 +19,7 @@ import type {
 import { USER_DATA_MAX_BYTES } from '../sealing/nsm.js';
 import { AttestationTurnAbandoned } from './attestation-turn-base.js';
 import type { AttestationKind, AttestationTurn } from './NsmAttestationTurnstile.js';
-import { LONGEST_CHECKPOINT_AGE_MS } from './public-aci-operation-limits.js';
+import { LONGEST_CHECKPOINT_AGE_MS } from './operation-limits.js';
 
 interface TrustedTimeCheckpoint {
   readonly binding: TrustedTimeBindingV1;

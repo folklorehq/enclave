@@ -23,7 +23,6 @@ import { isSensitivityWithin } from '@folklore/wiki';
 import { feedLineOf } from './feed-line.js';
 import { sealedFactContent, type SealedFactContent } from './sealed-fact-content.js';
 import type { EnclaveCrypto } from '../crypto/esdk.js';
-import { embedText } from '../inference/phala.js';
 import type { TenantContext } from '../tenant/tenant-context.js';
 import type { ResolveTenant } from '../tenant/tenant-resolver.js';
 import { KeyedSemaphore } from './KeyedSemaphore.js';
@@ -40,7 +39,7 @@ export interface FactRetrieverDeps extends RetrieverDeps {
   s3: S3Client;
   processedBucket: string;
   processedBucketFor?: (orgId: string) => string;
-  embedQuery?: (orgId: string, query: string, signal?: AbortSignal) => Promise<number[]>;
+  embedQuery: (orgId: string, query: string, signal?: AbortSignal) => Promise<number[]>;
 }
 
 /** An audience-visible hit with its decrypted body, for callers (e.g. answer synthesis) that need more than a snippet. */
@@ -273,9 +272,7 @@ export class EnclaveFactRetriever implements FactRetriever, FactExcerptReader {
   }
 
   private embed(orgId: string, query: string, signal?: AbortSignal): Promise<number[]> {
-    const { embedQuery } = this.deps;
-    if (!embedQuery) return embedText(query);
-    return embedQuery(orgId, query, signal);
+    return this.deps.embedQuery(orgId, query, signal);
   }
 
   private async gateAndDecrypt(

@@ -76,7 +76,7 @@ enclave/
     ingest/
       receiver.ts     ECIES payload decryption
     http/             attestation and health endpoints served inside the enclave
-    inference/        LLM backend adapters (Phala TEE-attested GPU API)
+    inference/        LLM provider routes (Claude generation, OpenAI embeddings)
     crypto/           ESDK envelope encryption for outputs written to S3
 
   native/

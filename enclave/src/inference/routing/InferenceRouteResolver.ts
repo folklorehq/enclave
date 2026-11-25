@@ -30,21 +30,20 @@ import {
 } from '../InferencePurposeScope.js';
 import { PROVIDER_ROUTE_POLICY } from './provider-route-policy.js';
 
-export type InferenceRoute =
-  | { readonly kind: 'aci' }
-  | {
-      readonly kind: 'provider';
-      readonly provider: RoutedProviderId;
-      readonly purpose: InferencePurpose;
-      readonly model: InferenceModelId;
-      readonly effort: InferenceEffort;
-      readonly arm: InferenceArmId;
-      readonly untagged: boolean;
-    };
+export interface InferenceRoute {
+  readonly kind: 'provider';
+  readonly provider: RoutedProviderId;
+  readonly purpose: InferencePurpose;
+  readonly model: InferenceModelId;
+  readonly effort: InferenceEffort;
+  readonly arm: InferenceArmId;
+  readonly untagged: boolean;
+}
 
-export type ProviderRoute = Extract<InferenceRoute, { kind: 'provider' }>;
+export type ProviderRoute = InferenceRoute;
 
-export const ACI_ROUTE: InferenceRoute = Object.freeze({ kind: 'aci' });
+/** Every role but embed: embeddings take the compiled OpenAI route, not this table. */
+export type GenerativeRole = Exclude<InferenceModelRole, 'embed'>;
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const ARM_IDS: readonly string[] = ['B', 'R'];
@@ -52,9 +51,7 @@ const VALIDATION_ISSUED_AT_MS = 1_000_000;
 const MS_PER_SECOND = 1000;
 const COMPILED_ROUTABLE_PROVIDERS = new Set<RouteTarget['provider']>(['anthropic']);
 
-const DEFAULT_PURPOSE_BY_ROLE: Readonly<
-  Record<Exclude<InferenceModelRole, 'embed'>, InferencePurpose>
-> = {
+const DEFAULT_PURPOSE_BY_ROLE: Readonly<Record<GenerativeRole, InferencePurpose>> = {
   generate: 'wiki_article',
   critique: 'wiki_critique',
   judge: 'wiki_relevance',
@@ -147,6 +144,7 @@ export class InferenceRouteResolver {
   readonly #config: ClaudeRouteConfig;
   readonly #routing: CompiledRouting;
   readonly #invalidReason: string | undefined;
+  readonly #invalidRule: string | undefined;
 
   constructor(
     config: ClaudeRouteConfig = CLAUDE_ROUTE_CONFIG,
@@ -157,9 +155,11 @@ export class InferenceRouteResolver {
       assertClaudeRouteConfig(config, routing);
       this.#config = config;
       this.#invalidReason = undefined;
+      this.#invalidRule = undefined;
     } catch (error) {
       this.#config = disabledCopy(config);
       this.#invalidReason = error instanceof Error ? error.message : CLAUDE_ROUTE_CONFIG_INVALID;
+      this.#invalidRule = error instanceof ClaudeRouteConfigError ? error.rule : 'unknown';
     }
   }
 
@@ -172,12 +172,13 @@ export class InferenceRouteResolver {
   }
 
   // Routing is the same for every org; the page pipeline still passes its org id.
+  // A disabled or invalid route refuses the call: there is no other generation route to fall back to.
   resolve(
-    role: InferenceModelRole,
+    role: GenerativeRole,
     scope: InferencePurposeContext | undefined,
     _orgId?: string,
   ): InferenceRoute {
-    if (role === 'embed' || !this.enabled) return ACI_ROUTE;
+    if (!this.enabled) throw new ClaudeRouteConfigError(this.#invalidRule ?? 'route_disabled');
     const purpose = scope?.purpose ?? DEFAULT_PURPOSE_BY_ROLE[role];
     const arm = scope?.arm ?? DEFAULT_ARM;
     const target =
@@ -193,12 +194,12 @@ export class InferenceRouteResolver {
     };
   }
 
-  upstreamKeyFor(role: InferenceModelRole): string | undefined {
+  upstreamKeyFor(role: GenerativeRole): string | undefined {
+    if (!this.enabled) return undefined;
     return this.upstreamKeyOfRoute(this.resolve(role, inferencePurposeScope.current()));
   }
 
   upstreamKeyOfRoute(route: InferenceRoute): string | undefined {
-    if (route.kind !== 'provider') return undefined;
     if (isAnthropicRoute(route) && !this.#config.identity.models.includes(route.model)) {
       return undefined;
     }

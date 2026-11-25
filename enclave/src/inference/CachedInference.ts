@@ -1,5 +1,5 @@
 // The embed/generate surface the enclave pipeline + synthesis workers depend on, kept separate from
-// the raw phala module so it can be injected and stubbed.
+// any one provider route so it can be injected and stubbed.
 export interface InferenceModel {
   embed(text: string, signal?: AbortSignal): Promise<number[]>;
   generate(

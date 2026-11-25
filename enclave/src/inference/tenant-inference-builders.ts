@@ -1,4 +1,4 @@
-import type { InferenceModelRole, InferenceTimer, InferenceUsageSink } from '@folklore/inference';
+import type { InferenceTimer, InferenceUsageSink } from '@folklore/inference';
 import {
   TenantPolicyBoundInference,
   type TenantPolicyFreshnessPort,
@@ -11,9 +11,13 @@ import {
 import { UnboundPoolInference } from './UnboundPoolInference.js';
 import type { DecisionModel } from '@folklore/inference';
 import type { EmbeddingProvider } from './openai/OpenAIEmbedRouteComposition.js';
-import type { InferenceRoute, InferenceRouteResolver } from './routing/InferenceRouteResolver.js';
+import type {
+  GenerativeRole,
+  InferenceRoute,
+  InferenceRouteResolver,
+} from './routing/InferenceRouteResolver.js';
 import type { LlmOperationCache } from './vector-cache.js';
-import type { InferenceLatencyProfile } from './public-aci-operation-limits.js';
+import type { InferenceLatencyProfile } from './operation-limits.js';
 
 /** A decision model no site can call: only poolPolicyBoundInference below can open it, so every call is admitted per tenant. */
 export interface SealedDecisionModel {
@@ -110,7 +114,7 @@ export function poolPolicyBoundInference(input: {
       ? {}
       : {
           routeResolver: policy.routeResolver,
-          upstreamKeyFor: (role: InferenceModelRole) => policy.routeResolver?.upstreamKeyFor(role),
+          upstreamKeyFor: (role: GenerativeRole) => policy.routeResolver?.upstreamKeyFor(role),
           upstreamKeyForRoute: (route: InferenceRoute) =>
             policy.routeResolver?.upstreamKeyOfRoute(route),
         }),

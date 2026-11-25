@@ -5,7 +5,7 @@ import type { RuntimeEvidenceSessionPort } from '../attestation/ports.js';
 import type { BootBoundGenerationContext } from '../inference/BootStateActivePolicyReferenceVerifier.js';
 import type { InferenceModel } from '../inference/CachedInference.js';
 import type { StreamingInference } from '../inference/generate-stream.js';
-import type { InferenceLatencyProfile } from '../inference/public-aci-operation-limits.js';
+import type { InferenceLatencyProfile } from '../inference/operation-limits.js';
 import { expectedTenantGenerationContext } from '../inference/expected-tenant-generation-context.js';
 import { SharedPoolRuntimeEvidence } from '../inference/SharedPoolRuntimeEvidence.js';
 import type { UpstreamCallGate } from '../inference/TenantPolicyBoundInference.js';

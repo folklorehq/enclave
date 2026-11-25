@@ -90,16 +90,7 @@ import {
   EnclaveWikiFeedbackSealer,
   EnclaveWikiSnapshotSealer,
 } from './wiki/content-sealers.js';
-import {
-  assertInferenceConfigured,
-  assertPublicInferenceEmbeddingDimension,
-  assertInferenceAttestationEcho,
-  configureInferenceAttestation,
-  configureLocalInferencePolicy,
-  setInferenceTelemetry,
-  setInferenceTrustPolicy,
-  setPublicInferenceTrustPolicy,
-} from './inference/phala.js';
+import { setProviderInferenceTrustPolicy } from './inference/provider-policy-role-models.js';
 import { type InferenceModel } from './inference/CachedInference.js';
 import { streamOrBuffer, type StreamingInference } from './inference/generate-stream.js';
 import {
@@ -108,7 +99,6 @@ import {
   type TenantPolicyVerifiedBindingForwarder,
   type TenantPolicyVerifiedBindingBackendFactory,
 } from './inference/TenantPolicyBoundInference.js';
-import { createPublicAciRuntimeBackendFactory } from './inference/PublicAciRuntimeBackendFactory.js';
 import { OperationAuthority } from './inference/OperationAuthority.js';
 import { AttestedSsmParameterReader } from './attestation/AttestedSsmParameterReader.js';
 import { ClaudeRouteComposition } from './inference/claude/ClaudeRouteComposition.js';
@@ -153,10 +143,7 @@ import {
   BackgroundAwareUpstreamGate,
   GATE_WAIT_STALLED_CODE,
 } from './inference/BackgroundAwareUpstreamGate.js';
-import {
-  publicAciOperationLimits,
-  type InferenceLatencyProfile,
-} from './inference/public-aci-operation-limits.js';
+import { operationLimits, type InferenceLatencyProfile } from './inference/operation-limits.js';
 import { NsmTrustedTimeSource } from './inference/NsmTrustedTimeSource.js';
 import { installGlobalEgressDispatcher } from './egress/proxy.js';
 import {
@@ -182,7 +169,6 @@ import {
   assignmentAckPayload,
   assignmentPolicyVerificationDigest,
   assignmentAckSchema,
-  inferenceTrustPolicyV2Schema,
   assignmentStorageProofPayload,
   poolAssignmentAckKey,
   poolAssignmentGenerationFloorKey,
@@ -263,7 +249,6 @@ import { EnclaveBootStatus } from './boot/EnclaveBootStatus.js';
 import { enclaveOutputSignerFailureCode } from './boot/enclave-output-signer-failure-code.js';
 import { bootModuleLoadGuard } from './boot/boot-module-load-guard.js';
 import { assertPoolId, assertSharedPoolIdentity } from './boot/boot-mode.js';
-import { InferenceApiKeyLoader } from './boot/InferenceApiKeyLoader.js';
 import { UnsubscribeSecretLoader } from './boot/UnsubscribeSecretLoader.js';
 
 const bootStatus = new EnclaveBootStatus();
@@ -282,7 +267,6 @@ const PROCESSED_OUTPUTS_BUCKET = process.env['PROCESSED_OUTPUTS_BUCKET'] ?? '';
 const PROCESSED_QUEUE_URL = process.env['PROCESSED_QUEUE_URL'] ?? '';
 const RAW_PAYLOADS_BUCKET = process.env['RAW_PAYLOADS_BUCKET'] ?? '';
 const SYNTHESIS_REQUEST_QUEUE_URL = process.env['SYNTHESIS_REQUEST_QUEUE_URL'] ?? '';
-const TEE_API_KEY_SSM_PATH = process.env['TEE_API_KEY_SSM_PATH'] ?? '';
 const UNSUBSCRIBE_SECRET_SSM_PATH = process.env['UNSUBSCRIBE_SECRET_SSM_PATH'] ?? '';
 // pull transports run in-enclave. The control plane only ever hands back
 // ciphertext (source OAuth tokens ECIES-encrypted to this enclave's public key);
@@ -308,15 +292,7 @@ const ssm = new SSMClient({ region: REGION, ...awsShortCallTransport() });
 const kms = new KMSClient({ region: REGION, ...awsShortCallTransport() });
 const secretsManager = new SecretsManagerClient({ region: REGION, ...awsShortCallTransport() });
 
-// A failed read stops the boot by name: logged inside the enclave, it surfaced later as an unnamed crash.
-async function loadInferenceKey(): Promise<void> {
-  if (!TEE_API_KEY_SSM_PATH) return;
-  process.env['TEE_API_KEY'] = await new InferenceApiKeyLoader(
-    new AwsBootManifestSsmParameters(ssm),
-  ).load(TEE_API_KEY_SSM_PATH);
-}
-
-// Unlike the inference key, a failed read leaves the unsubscribe route off instead of stopping a pool that serves tenants.
+// A failed read leaves the unsubscribe route off instead of stopping a pool that serves tenants.
 async function loadUnsubscribeSecret(): Promise<void> {
   if (!UNSUBSCRIBE_SECRET_SSM_PATH) return;
   try {
@@ -443,38 +419,24 @@ function activePolicyBackendFor(
   tenantId: string,
   latencyProfile: InferenceLatencyProfile = 'batch',
 ): TenantPolicyVerifiedBindingBackendFactory | undefined {
-  const providerPolicy = verifiedBootManifest?.providerInferenceTrustPolicy;
-  if (!providerPolicy) return undefined;
+  if (!verifiedBootManifest?.providerInferenceTrustPolicy) return undefined;
   return async (binding, snapshot, route) => {
-    const limits = publicAciOperationLimits(binding.role, latencyProfile);
+    const limits = operationLimits(binding.role, latencyProfile);
     const freshness = activePolicyFreshnessFor(tenantId, limits.checkpointAgeMs);
     if (!freshness || !runtimeAttestation || activePolicySnapshotFor(tenantId) !== snapshot) {
       throw new Error('public_aci_runtime_authority_unavailable');
     }
-    const bootEpoch = String(runtimeAttestation.bootSessionState().bootEpoch);
-    if (route?.kind === 'provider') {
-      const authority = new OperationAuthority({
-        tenantId,
-        freshness,
-        bootEpoch,
-        latencyProfile,
-        providerPolicyGeneration: inferenceTrustPolicyV2Schema.parse(providerPolicy).generation,
-      });
-      return providerRoutes.adapterFor(route.provider).backendFactory(authority)(
-        binding,
-        snapshot,
-        route,
-      );
-    }
-    const factory = createPublicAciRuntimeBackendFactory({
-      providerPolicy,
+    const authority = new OperationAuthority({
       tenantId,
       freshness,
-      bootEpoch,
-      apiKey: process.env['TEE_API_KEY'],
+      bootEpoch: String(runtimeAttestation.bootSessionState().bootEpoch),
       latencyProfile,
     });
-    return factory(binding, snapshot);
+    return providerRoutes.adapterFor(route.provider).backendFactory(authority)(
+      binding,
+      snapshot,
+      route,
+    );
   };
 }
 
@@ -712,9 +674,6 @@ const policyAssignmentApplier = new TenantAssignmentApplier({
         deploymentId: assignment.deploymentId,
       }),
     });
-    if (verifiedBootManifest?.providerInferenceTrustPolicy) {
-      assertPublicInferenceEmbeddingDimension(snapshot);
-    }
     return snapshot;
   },
   logger,
@@ -814,10 +773,7 @@ runtimeAttestation = await initializeRuntimeAttestationForBoot(
     if (!signedPolicy && !trustPolicy && !providerPolicy) {
       throw new Error('signed_inference_trust_policy_unavailable');
     }
-    if (providerPolicy) setPublicInferenceTrustPolicy(providerPolicy);
-    else if (trustPolicy) setInferenceTrustPolicy(trustPolicy);
-    if (signedPolicy) configureInferenceAttestation(signedPolicy);
-    else if (!trustPolicy && !providerPolicy) configureLocalInferencePolicy();
+    if (providerPolicy) setProviderInferenceTrustPolicy(providerPolicy);
     assignmentManifestPublicKeyForVerifiedBoot(verifiedBootManifest);
   },
   logger.child({ component: 'attestation' }),
@@ -842,15 +798,6 @@ const poolRuntimeAttestationServer = new RuntimeAttestationServer({
   collect: (nonce) => poolRuntimeAttestation.collect(nonce),
 });
 
-bootStatus.begin('inference_key_read');
-await loadInferenceKey();
-bootStatus.begin('inference_configure');
-if (verifiedBootManifest?.providerInferenceTrustPolicy) {
-  setPublicInferenceTrustPolicy(verifiedBootManifest.providerInferenceTrustPolicy);
-} else {
-  setInferenceTrustPolicy(verifiedBootManifest?.inferenceTrustPolicy);
-}
-assertInferenceConfigured();
 bootStatus.reach('inference_configured');
 bootStatus.begin('agent_token_load');
 await loadAgentToken();
@@ -1068,8 +1015,10 @@ async function refreshAssignments(isCurrent: IsCurrentRefresh): Promise<void> {
       verified.assignments,
       verified.wire === 'SignedAssignmentManifestV4' ? verified.raw.scope : undefined,
     );
-    assertInferenceAttestationEcho(verified.inferenceAttestation, parsed.wire);
     const isV4 = parsed.wire === 'SignedAssignmentManifestV4';
+    if (verifiedBootManifest?.providerInferenceTrustPolicy && !isV4) {
+      throw new Error('public_inference_requires_policy_assignment_v4');
+    }
     if (isV4 && !liveActivePolicySnapshotVerifier) {
       throw new Error('shared_pool_active_policy_boot_trust_unavailable');
     }
@@ -1228,8 +1177,6 @@ bootStatus.begin('assignments_load');
 await assignmentRefreshFlight.run();
 bootStatus.reach('assignments_loaded');
 void tenantRequestQuiescence.runForever();
-bootStatus.begin('inference_configure');
-assertInferenceConfigured();
 bootStatus.begin('ops_telemetry_setup');
 const ASSIGNMENT_REFRESH_INTERVAL_MS = 30_000;
 // Bound how long shutdown waits for an in-flight synth to settle so a hung inference can't starve
@@ -1252,7 +1199,6 @@ assignmentWakeSubscriber.start();
 // drains into its content-free check-in.
 const opsEventChannel = new RedisOpsEventChannel(haltCache.redis, DEPLOYMENT_ID);
 const opsTelemetry = new BufferedOpsTelemetryClient(opsEventChannel);
-setInferenceTelemetry(opsTelemetry);
 const mcpCalls = buildMcpCallTelemetry({ telemetry: opsTelemetry, logger });
 // Queue emptiness alone does not mean nobody is here: members read and edit through the box API,
 // and synthesis runs long after its message is gone. This is what the drain loop's idle check

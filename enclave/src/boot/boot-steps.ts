@@ -3,8 +3,6 @@ export const ENCLAVE_BOOT_STEPS = [
   'boot_compose',
   'attestation_prepare',
   'boot_policy_load',
-  'inference_key_read',
-  'inference_configure',
   'agent_token_load',
   'output_signer_load',
   'oauth_ingress_setup',

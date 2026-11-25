@@ -13,11 +13,7 @@ const OPENAI_CREDENTIAL_CODES = [
   'openai_credential_rejected',
 ] as const;
 
-const OPENAI_ROUTE_CODES = [
-  'openai_embed_route_invalid',
-  'embedding_provider_absent',
-  'embedding_space_not_phala',
-] as const;
+const OPENAI_ROUTE_CODES = ['openai_embed_route_invalid', 'embedding_provider_absent'] as const;
 
 const OPENAI_BACKEND_CODES = [
   'openai_embed_input_empty',

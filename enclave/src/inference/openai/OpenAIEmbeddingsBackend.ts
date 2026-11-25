@@ -1,7 +1,7 @@
 import type { InferenceUsageSink } from '@folklore/inference';
 import { z } from 'zod';
 import { OPENAI_EMBEDDINGS_PATH, OPENAI_ORIGIN } from '../../egress/openai-transport.js';
-import { SHORT_OPERATION_LIMITS } from '../public-aci-operation-limits.js';
+import { SHORT_OPERATION_LIMITS } from '../operation-limits.js';
 import { OpenAIEmbedRouteError } from './openai-embed-errors.js';
 import type { OpenAIEmbedRouteIdentity } from './openai-embed-route-config.js';
 import { OPENAI_EMBED_DIMENSIONS, OPENAI_EMBED_MODEL } from './openai-embed-route-state.js';

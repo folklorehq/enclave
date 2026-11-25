@@ -11,20 +11,17 @@ import {
   assertVerifiedActivePolicyRoleBindingV1,
   assertVerifiedActivePolicySnapshotV1,
 } from '@folklore/inference';
-import { PublicAciPinnedKeysetAuthority } from './PublicAciPinnedKeysetAuthority.js';
+import { PinnedCheckpointAuthority } from './PinnedCheckpointAuthority.js';
 import type { TenantPolicyFreshnessPort } from './TenantPolicyBoundInference.js';
 import { installedSnapshotHighWater } from './renewal-grace.js';
-import {
-  publicAciOperationLimits,
-  type InferenceLatencyProfile,
-} from './public-aci-operation-limits.js';
+import { operationLimits, type InferenceLatencyProfile } from './operation-limits.js';
 
 export type PolicyRole = VerifiedActivePolicySnapshotV1['policy']['roles'][InferenceModelRole];
 
 export interface OperationAdmission {
   readonly role: PolicyRole;
   readonly trustedTimeContext: AciTrustContext;
-  readonly authority: PublicAciPinnedKeysetAuthority;
+  readonly authority: PinnedCheckpointAuthority;
   readonly trustedTime: TrustedTimeAuthorityPort;
   readonly remainingBudget: () => number;
 }
@@ -34,7 +31,6 @@ interface OperationAuthorityOptions {
   readonly freshness: TenantPolicyFreshnessPort;
   readonly bootEpoch: string;
   readonly latencyProfile?: InferenceLatencyProfile;
-  readonly providerPolicyGeneration: number;
 }
 
 interface OperationAdmitHooks {
@@ -113,7 +109,7 @@ export class OperationAuthority {
       throw new Error('public_aci_tenant_mismatch');
     const role = exactRole(binding, snapshot);
     hooks.afterRoleCheck?.(snapshot);
-    const limits = publicAciOperationLimits(binding.role, options.latencyProfile ?? 'batch');
+    const limits = operationLimits(binding.role, options.latencyProfile ?? 'batch');
     const startedAt = performance.now();
     const remainingBudget = () => {
       const remaining = Math.floor(limits.operationBudgetMs - (performance.now() - startedAt));
@@ -137,13 +133,12 @@ export class OperationAuthority {
       bootEpoch: sample.bootEpoch,
       checkpointDigest: sample.checkpointDigest,
     };
-    const authority = new PublicAciPinnedKeysetAuthority({
+    const authority = new PinnedCheckpointAuthority({
       snapshot,
       expectedContext,
       // Per-operation pin uses the same bounded renewal grace as the freshness refresh.
       durable: installedSnapshotHighWater(options.freshness.highWater, snapshot.durableCheckpoint),
       trustedTimeContext,
-      providerPolicyGeneration: options.providerPolicyGeneration,
     });
     remainingBudget();
     const trustedTime = millisecondsTrustedTime(
