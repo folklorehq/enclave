@@ -5,8 +5,8 @@ import {
   controlPlaneIdentitySchema,
   parseBootManifestWire,
   signedBootManifestKeysetSchema,
-  signedBootManifestSchema,
   type BootManifest,
+  type BootManifestWireName,
   type SignedBootManifestKeyset,
 } from '@folklore/contracts/enclave-attestation';
 import { ConfigurationError } from '@folklore/errors';
@@ -15,7 +15,7 @@ import { AttestationBootState, attestationBootStateErrors } from './AttestationB
 import type { AttestationBootCheckpointStore } from './AttestationBootState.js';
 import { BootManifestCoordinator } from './BootManifestCoordinator.js';
 import type { BootManifestSecretLoaderPort } from './BootManifestCoordinator.js';
-import { BootManifestVerifier, bootManifestVerificationErrors } from './BootManifestVerifier.js';
+import { BootManifestVerifier } from './BootManifestVerifier.js';
 import type { BootManifestRuntimeIdentity, VerifiedBootManifest } from './BootManifestVerifier.js';
 import { KmsSealedAttestationBootCheckpointStore } from './KmsSealedAttestationBootCheckpointStore.js';
 import { verifySignedBootManifestKeyset } from '@folklore/nitro-attestation';
@@ -38,14 +38,18 @@ interface RuntimeAttestationCompositionDeps {
 type RuntimeAttestationLifecycleLogger = Pick<Logger, 'error'>;
 
 interface RuntimeAttestationConfig {
-  signedManifest: { manifest: BootManifest; raw: unknown };
+  signedManifest: { wire: BootManifestWireName; manifest: BootManifest; raw: unknown };
   runtimeIdentity: BootManifestRuntimeIdentity;
   pinnedKeys: { signedKeyset: SignedBootManifestKeyset };
 }
 
 export class RuntimeAttestationComposition implements RuntimeEvidenceSessionPort {
   constructor(
-    private readonly signedManifest: { manifest: BootManifest; raw: unknown },
+    private readonly signedManifest: {
+      wire: BootManifestWireName;
+      manifest: BootManifest;
+      raw: unknown;
+    },
     private readonly runtimeIdentity: BootManifestRuntimeIdentity,
     private readonly bootState: AttestationBootState,
     private readonly composer: AttestationBootComposer,
@@ -228,20 +232,23 @@ function requiredConfigNames(env: RuntimeAttestationEnv): string[] {
   return [...names];
 }
 
-function readSignedManifest(raw: string | undefined): { manifest: BootManifest; raw: unknown } {
+function readSignedManifest(raw: string | undefined): {
+  wire: BootManifestWireName;
+  manifest: BootManifest;
+  raw: unknown;
+} {
   const parsed = readJson(raw);
+  let wire: BootManifestWireName;
   try {
-    parseBootManifestWire(parsed);
+    const result = parseBootManifestWire(parsed);
+    wire = result.wire;
   } catch {
-    if (signedBootManifestSchema.safeParse(parsed).success) {
-      throw new Error(bootManifestVerificationErrors.legacyFormatRefused);
-    }
     throw invalidConfig();
   }
   const manifest = (parsed as { manifest?: unknown }).manifest;
   const bootManifest = bootManifestSchema.safeParse(manifest);
   if (!bootManifest.success) throw invalidConfig();
-  return { manifest: bootManifest.data, raw: parsed };
+  return { wire, manifest: bootManifest.data, raw: parsed };
 }
 
 function readRuntimeIdentity(env: RuntimeAttestationEnv): BootManifestRuntimeIdentity {
