@@ -35,10 +35,6 @@ export class ClaudeRouteComposition implements ProviderRouteAdapter {
 
   constructor(private readonly deps: ClaudeRouteCompositionDeps) {}
 
-  get enabled(): boolean {
-    return this.deps.resolver.enabled;
-  }
-
   fitsModel(input: ProviderSizeInput): boolean {
     const { route } = input;
     if (!isAnthropicRoute(route)) throw new ClaudeRouteError(CLAUDE_ROUTE_PROVIDER_MISMATCH);

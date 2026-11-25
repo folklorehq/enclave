@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs';
 import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { KMSClient } from '@aws-sdk/client-kms';
@@ -24,8 +23,6 @@ import { TenantAssignmentApplier } from './tenant/TenantAssignmentApplier.js';
 import { AssignmentRefusalRecorder } from './tenant/AssignmentRefusalRecorder.js';
 import { AssignmentRefreshFlight } from './tenant/assignment/AssignmentRefreshFlight.js';
 import { AssignmentWakeSubscriber } from './tenant/assignment/AssignmentWakeSubscriber.js';
-import { PoolResidentMemorySampler } from './tenant/PoolResidentMemorySampler.js';
-import { EventLoopDelayMonitor } from './logging/EventLoopDelayMonitor.js';
 import type { IsCurrentRefresh } from './tenant/assignment/AssignmentRefreshFlight.js';
 import type { TenantPolicyAssignment } from './tenant/TenantAssignmentApplier.js';
 import { signedRecoveryKeyFor } from './sealing/recovery-key-binding.js';
@@ -137,11 +134,7 @@ import { IngestOrgBudgetBreaker } from './pipeline/ingest-decisions/accounting/I
 import { IngestTransportBreaker } from './pipeline/ingest-decisions/accounting/IngestTransportBreaker.js';
 import { JEV_QUESTION_SETS } from './workers/decisions/jev-question-sets.js';
 import { InferenceRouteResolver } from './inference/routing/InferenceRouteResolver.js';
-import { AwsRoutingParameterReader } from './inference/routing/AwsRoutingParameterReader.js';
 import { createSignedSpecLoader } from './firstparty-connectors/SignedSpecLoader.js';
-import { RoutingTableRefresher } from './inference/routing/RoutingTableRefresher.js';
-import { RoutingTableVerifier } from './inference/routing/RoutingTableVerifier.js';
-import { routingParameterArn } from './inference/routing/routing-parameter-arn.js';
 import { ProviderRouteRegistry } from './inference/routing/ProviderRouteRegistry.js';
 import { claudeCredentialLoadErrors } from './inference/claude/ClaudeCredentialSource.js';
 import { poolPolicyPortsFrom, sealDecisionModel } from './inference/tenant-inference-builders.js';
@@ -194,7 +187,6 @@ import {
   poolAssignmentAckKey,
   poolAssignmentGenerationFloorKey,
   poolAssignmentsKey,
-  type InferenceProviderId,
   type NormalizedAssignmentManifestV1,
 } from '@folklore/contracts';
 import type { RuntimeDatabaseConfig } from '@folklore/contracts/enclave-attestation';
@@ -383,13 +375,7 @@ function activePolicyRuntimeEvidenceFor(tenantId: string): TenantPolicyRuntimeEv
   return policyWiring.runtimeEvidenceFor(tenantId);
 }
 
-const routingTables = new RoutingTableRefresher({
-  onAlarm: (alarm) => bootStatus.recordAlarm(alarm),
-  onApplied: (version) => {
-    logger.info('inference_routing_table_applied', { revision: version });
-  },
-});
-const claudeRoutes = new InferenceRouteResolver(routingTables);
+const claudeRoutes = new InferenceRouteResolver();
 if (claudeRoutes.invalidReason !== undefined) bootStatus.recordAlarm(CLAUDE_ROUTE_CONFIG_INVALID);
 const tenantHistoryWindow = new TenantHistoryWindow();
 const claudeComposition = new ClaudeRouteComposition({
@@ -789,27 +775,6 @@ runtimeAttestation = await initializeRuntimeAttestationForBoot(
         bootTrust: activePolicyBootTrust,
         kms,
       });
-      routingTables.install(
-        new RoutingTableVerifier(
-          {
-            keyVerifier: activePolicyTrust.keyVerifier,
-            authorityKeyId: activePolicyTrust.authority.keyId,
-            awsAccountId: bootManifest.awsAccountId,
-            awsRegion: bootManifest.awsRegion,
-            expectedParameterArn: routingParameterArn(bootManifest),
-          },
-          new Set<InferenceProviderId>([
-            'phala',
-            ...providerRoutes
-              .providers()
-              .filter((provider) => providerRoutes.adapterFor(provider).enabled),
-          ]),
-          new Set<string>(claudeRoutes.allowedModels()),
-        ),
-        new AwsRoutingParameterReader(ssm, routingParameterArn(bootManifest)),
-      );
-      routingTables.start();
-      void routingTables.refreshOnce();
       const sharedCarrierVerifier = new ActivePolicyCarrierVerifier(activePolicyTrust.keyVerifier, {
         authority: activePolicyTrust.authority,
         carrierSigner: activePolicyTrust.carrierSigner,
@@ -1231,7 +1196,6 @@ async function refreshAssignments(isCurrent: IsCurrentRefresh): Promise<void> {
       activePolicyGeneration = policyState.generation;
     }
     logger.info('assignment manifest applied', unsignedAcknowledgment);
-    await residentMemorySampler.sample();
   } catch (err) {
     if (err instanceof Error && err.message === 'assignment_manifest_stale') return;
     // Log the error NAME only, never the raw error — a message could echo manifest field values.
@@ -1253,13 +1217,6 @@ function stopIfSuperseded(isCurrent: IsCurrentRefresh): boolean {
   return true;
 }
 
-const residentMemorySampler = new PoolResidentMemorySampler(haltCache, DEPLOYMENT_ID, {
-  meminfo: () => readFileSync('/proc/meminfo', 'utf8'),
-  rssBytes: () => process.memoryUsage().rss,
-  tenantCount: () => registry.size,
-  now: Date.now,
-});
-
 const ASSIGNMENT_REFRESH_STALL_MS = 300_000;
 const assignmentRefreshFlight = new AssignmentRefreshFlight(
   refreshAssignments,
@@ -1279,11 +1236,9 @@ const ASSIGNMENT_REFRESH_INTERVAL_MS = 30_000;
 // the fact-index save; on timeout we proceed WITHOUT freeing a still-pinned index (shred at exit).
 const SHUTDOWN_QUIESCE_TIMEOUT_MS = 10_000;
 const assignmentRefreshTimer = setInterval(
-  () => void assignmentRefreshFlight.run().then(() => residentMemorySampler.sample()),
+  () => void assignmentRefreshFlight.run(),
   ASSIGNMENT_REFRESH_INTERVAL_MS,
 );
-const eventLoopDelayMonitor = new EventLoopDelayMonitor(logger);
-eventLoopDelayMonitor.start();
 const assignmentWakeSubscriber = new AssignmentWakeSubscriber(
   haltCache.redis,
   POOL_ID,
@@ -1773,7 +1728,6 @@ async function shutdown(): Promise<void> {
   logger.info('enclave shutting down — saving hnsw indices', { count: registry.size });
   clearInterval(assignmentRefreshTimer);
   await assignmentWakeSubscriber.close();
-  eventLoopDelayMonitor.stop();
   if ((await entitlementProjectionRunner?.stop(SHUTDOWN_QUIESCE_TIMEOUT_MS)) === false)
     logger.warn('entitlement_projection_stop_timeout');
   if ((await memberIdentityLinkRunner?.stop(SHUTDOWN_QUIESCE_TIMEOUT_MS)) === false)

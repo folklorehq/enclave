@@ -75,7 +75,6 @@ export class OpenAIEmbedRouteError extends ProviderRouteError {
       provider: OPENAI_PROVIDER,
       code,
       marksSlow: false,
-      fallbackEligible: false,
       ...(status === undefined ? {} : { status }),
       ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
     };

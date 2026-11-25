@@ -10,13 +10,8 @@ import type {
   TrustedTimeReadContext,
   TrustedTimeSample,
 } from '@folklore/inference';
-import type { Logger } from '@folklore/core';
 import { ServiceUnavailableError } from '@folklore/errors';
 import { ProviderRouteError } from '@folklore/inference';
-import {
-  inferenceOutageScope,
-  type InferenceOutageRecord,
-} from './routing/inference-outage-scope.js';
 import type {
   InferenceCallLabel,
   InferenceCallPhase,
@@ -167,7 +162,6 @@ export interface TenantPolicyBoundInferenceOptions {
   readonly upstreamGate?: UpstreamCallGate;
   readonly upstreamKeyFor?: (role: InferenceModelRole) => string | undefined;
   readonly upstreamKeyForRoute?: (route: InferenceRoute) => string | undefined;
-  readonly logger?: Logger;
   readonly routeResolver?: InferenceRouteResolver;
   readonly embeddingProvider?: EmbeddingProvider;
   readonly decisionModel?: DecisionModel;
@@ -459,21 +453,20 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
     shouldCache?: (output: string) => boolean,
     signal?: AbortSignal,
   ): Promise<string> {
-    return this.withFallback(this.routeChainFor('generate'), (route) =>
-      this.admitted('generate', route, async () => {
-        const { binding, snapshot } = await this.bindingFor('generate');
-        return this.generateOnRoute(
-          binding,
-          snapshot,
-          route,
-          prompt,
-          systemPrompt,
-          temperature,
-          shouldCache,
-          signal,
-        );
-      }),
-    );
+    const route = this.routeFor('generate');
+    return this.admitted('generate', route, async () => {
+      const { binding, snapshot } = await this.bindingFor('generate');
+      return this.generateOnRoute(
+        binding,
+        snapshot,
+        route,
+        prompt,
+        systemPrompt,
+        temperature,
+        shouldCache,
+        signal,
+      );
+    });
   }
 
   private async generateOnRoute(
@@ -549,12 +542,11 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
     request: GenerateStreamRequest,
     queue: ChunkQueue<string>,
   ): Promise<void> {
-    return this.withFallback(this.routeChainFor('generate'), (route) =>
-      this.admitted('generate', route, async () => {
-        const { binding, snapshot } = await this.bindingFor('generate');
-        return this.streamOnRoute(binding, snapshot, route, request, queue);
-      }),
-    );
+    const route = this.routeFor('generate');
+    return this.admitted('generate', route, async () => {
+      const { binding, snapshot } = await this.bindingFor('generate');
+      return this.streamOnRoute(binding, snapshot, route, request, queue);
+    });
   }
 
   private async streamOnRoute(
@@ -685,12 +677,11 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
     systemPrompt?: string,
     shouldCache?: (output: string) => boolean,
   ): Promise<string> {
-    return this.withFallback(this.routeChainFor('critique'), (route) =>
-      this.admitted('critique', route, async () => {
-        const { binding, snapshot } = await this.bindingFor('critique');
-        return this.critiqueOnRoute(binding, snapshot, route, prompt, systemPrompt, shouldCache);
-      }),
-    );
+    const route = this.routeFor('critique');
+    return this.admitted('critique', route, async () => {
+      const { binding, snapshot } = await this.bindingFor('critique');
+      return this.critiqueOnRoute(binding, snapshot, route, prompt, systemPrompt, shouldCache);
+    });
   }
 
   private async critiqueOnRoute(
@@ -735,67 +726,22 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
     tool: ToolSpec,
     systemPrompt?: string,
   ): Promise<unknown> {
-    return this.withFallback(this.routeChainFor('judge'), (route) =>
-      this.admitted('judge', route, async () => {
-        const { binding, snapshot } = await this.bindingFor('judge');
-        return this.runTransient('judge', route, async () => {
-          const structured = this.options.backendForVerifiedBinding
-            ? (await this.backendFor(binding, snapshot, route)).generateStructured
-            : this.options.structured;
-          if (!structured) {
-            throw this.refuse(
-              snapshot,
-              new TenantPolicyBoundInferenceError('active_policy_snapshot_refresh_failed'),
-            );
-          }
-          return structured(prompt, tool, systemPrompt);
-        });
-      }),
-    );
-  }
-
-  private async withFallback<T>(
-    chain: readonly InferenceRoute[],
-    attempt: (route: InferenceRoute) => Promise<T>,
-  ): Promise<T> {
-    const unanswered: InferenceOutageRecord[] = [];
-    let index = 0;
-    for (;;) {
-      const route = chain[index] ?? ACI_ROUTE;
-      const next = chain[index + 1];
-      const tracked = inferenceOutageScope.attempt(() => attempt(route));
-      try {
-        const result = await tracked.result;
-        inferenceOutageScope.discard(unanswered);
-        return result;
-      } catch (error) {
-        if (
-          next === undefined ||
-          !(error instanceof ProviderRouteError && error.fallbackEligible)
-        ) {
-          throw error;
+    const route = this.routeFor('judge');
+    return this.admitted('judge', route, async () => {
+      const { binding, snapshot } = await this.bindingFor('judge');
+      return this.runTransient('judge', route, async () => {
+        const structured = this.options.backendForVerifiedBinding
+          ? (await this.backendFor(binding, snapshot, route)).generateStructured
+          : this.options.structured;
+        if (!structured) {
+          throw this.refuse(
+            snapshot,
+            new TenantPolicyBoundInferenceError('active_policy_snapshot_refresh_failed'),
+          );
         }
-        unanswered.push(...tracked.made());
-        this.noteFallback(route, next);
-        index += 1;
-      }
-    }
-  }
-
-  private noteFallback(from: InferenceRoute, to: InferenceRoute): void {
-    this.logFallback(from, to);
-    if (inferenceOutageScope.firstFallbackInMessage()) this.options.routeResolver?.noteFallback();
-  }
-
-  private logFallback(from: InferenceRoute, to: InferenceRoute): void {
-    this.options.logger?.warn('inference_route_fallback', {
-      ...(from.kind === 'provider' ? { purpose: from.purpose } : {}),
-      model: this.catalogLabel(to),
+        return structured(prompt, tool, systemPrompt);
+      });
     });
-  }
-
-  private catalogLabel(route: InferenceRoute): string {
-    return route.kind === 'provider' ? route.model : 'aci';
   }
 
   private runTransient<T>(
@@ -817,17 +763,7 @@ export class TenantPolicyBoundInference implements SynthesisInference, Streaming
   }
 
   private routeFor(role: InferenceModelRole): InferenceRoute {
-    return this.routeChainFor(role)[0] ?? ACI_ROUTE;
-  }
-
-  private routeChainFor(role: InferenceModelRole): readonly InferenceRoute[] {
-    return (
-      this.options.routeResolver?.routeChain(
-        role,
-        inferencePurposeScope.current(),
-        this.tenantId,
-      ) ?? [ACI_ROUTE]
-    );
+    return this.options.routeResolver?.resolve(role, inferencePurposeScope.current()) ?? ACI_ROUTE;
   }
 
   private modelOf(binding: VerifiedActivePolicyRoleBindingV1, route: InferenceRoute): string {

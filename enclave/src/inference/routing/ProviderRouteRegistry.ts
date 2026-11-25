@@ -27,7 +27,6 @@ export interface ProviderSizeInput {
 
 export interface ProviderRouteAdapter {
   readonly provider: RoutedProviderId;
-  readonly enabled: boolean;
   backendFactory(authority: OperationAuthority): ProviderRouteBackendFactory;
   fitsModel(input: ProviderSizeInput): boolean;
 }
@@ -53,9 +52,5 @@ export class ProviderRouteRegistry {
       throw new ProviderRouteError({ provider, code: INFERENCE_PROVIDER_UNREGISTERED });
     }
     return adapter;
-  }
-
-  providers(): readonly RoutedProviderId[] {
-    return [...this.byProvider.keys()];
   }
 }

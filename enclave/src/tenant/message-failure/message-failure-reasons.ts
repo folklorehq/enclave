@@ -131,7 +131,6 @@ const TRUSTED_TIME_REASONS = [
   'trusted_time_sample_invalid',
   'trusted_time_unavailable',
   'trusted_time_uninitialized',
-  'trusted_time_wiring_unavailable',
 ] as const;
 
 export const NOT_PROCESSED_REASONS = [
@@ -176,11 +175,6 @@ export const INFERENCE_PATH_REASONS = [
   'generation_not_pinned',
   'inference_provider_duplicate',
   'inference_provider_unregistered',
-  'inference_route_fallback',
-  'inference_routing_table_absent',
-  'inference_routing_table_expired_in_use',
-  'inference_routing_table_expiring',
-  'inference_routing_table_read_failed',
   'invalid_active_policy_role_binding',
   'invalid_active_policy_snapshot',
   'invalid_verified_active_policy_carrier',
@@ -190,7 +184,6 @@ export const INFERENCE_PATH_REASONS = [
   'keyset_digest_invalid',
   'provider_policy_generation_invalid',
   'public_inference_requires_policy_assignment_v4',
-  'routing_table_refresher_installed',
   ...ROUTING_TABLE_REFUSALS,
   'synthesis_output_identity_changed',
   'tenant_mismatch',

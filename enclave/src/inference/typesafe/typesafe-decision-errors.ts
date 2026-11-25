@@ -55,7 +55,6 @@ export class TypeSafeDecisionError extends ProviderRouteError {
       provider: TYPESAFE_PROVIDER,
       code,
       marksSlow: false,
-      fallbackEligible: false,
       ...(status === undefined ? {} : { status }),
       ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
     };

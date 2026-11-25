@@ -1,14 +1,12 @@
-import { createHash } from 'node:crypto';
 import {
   CLAUDE_ROUTE_MODEL_IDS,
   COMPILED_DEFAULT_ROUTING,
   INFERENCE_MODEL_CATALOG,
   INFERENCE_PURPOSES,
   inferenceTimeoutMs,
-  inferencePurposeNeverFallsBack,
-  mergedPurposeRoutes,
   routingTableBodyRefusal,
   type ClaudeModelId,
+  type CompiledRouteTarget,
   type CompiledRouting,
   type InferenceArmId,
   type InferenceEffort,
@@ -16,7 +14,6 @@ import {
   type InferenceModelId,
   type InferenceModelRole,
   type InferencePurpose,
-  type PurposeRoute,
   type RoutedProviderId,
   type RouteTarget,
 } from '@folklore/contracts';
@@ -31,10 +28,7 @@ import {
   inferencePurposeScope,
   type InferencePurposeContext,
 } from '../InferencePurposeScope.js';
-import { TYPESAFE_PROVIDER } from '../typesafe/typesafe-decision-route-config.js';
 import { PROVIDER_ROUTE_POLICY } from './provider-route-policy.js';
-import { routingSnapshotScope, type RoutingSnapshot } from './routing-snapshot-scope.js';
-import type { RoutingTableSource } from './RoutingTableRefresher.js';
 
 export type InferenceRoute =
   | { readonly kind: 'aci' }
@@ -54,11 +48,6 @@ export const ACI_ROUTE: InferenceRoute = Object.freeze({ kind: 'aci' });
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const ARM_IDS: readonly string[] = ['B', 'R'];
-const PHALA_PROVIDER = 'phala';
-const OPENAI_PROVIDER = 'openai';
-const OPENAI_NOT_ROUTABLE_RULE = 'openai_not_routable';
-const TYPESAFE_NOT_ROUTABLE_RULE = 'typesafe_not_routable';
-const ROUTE_FALLBACK_ALARM = 'inference_route_fallback';
 const VALIDATION_ISSUED_AT_MS = 1_000_000;
 const MS_PER_SECOND = 1000;
 const COMPILED_ROUTABLE_PROVIDERS = new Set<RouteTarget['provider']>(['anthropic']);
@@ -154,22 +143,15 @@ function disabledCopy(config: ClaudeRouteConfig): ClaudeRouteConfig {
   };
 }
 
-function sha256Hex(value: string): string {
-  return createHash('sha256').update(value).digest('hex');
-}
-
 export class InferenceRouteResolver {
-  readonly #tables: RoutingTableSource;
   readonly #config: ClaudeRouteConfig;
   readonly #routing: CompiledRouting;
   readonly #invalidReason: string | undefined;
 
   constructor(
-    tables: RoutingTableSource,
     config: ClaudeRouteConfig = CLAUDE_ROUTE_CONFIG,
     routing: CompiledRouting = COMPILED_DEFAULT_ROUTING,
   ) {
-    this.#tables = tables;
     this.#routing = routing;
     try {
       assertClaudeRouteConfig(config, routing);
@@ -189,41 +171,30 @@ export class InferenceRouteResolver {
     return this.#invalidReason;
   }
 
-  snapshotFor(orgId: string): RoutingSnapshot {
-    const table = this.enabled ? this.#tables.current()?.table : undefined;
-    return {
-      orgId,
-      version: table?.version ?? 0,
-      purposes: mergedPurposeRoutes(table, sha256Hex(orgId), this.#routing),
-    };
-  }
-
+  // Routing is the same for every org; the page pipeline still passes its org id.
   resolve(
     role: InferenceModelRole,
     scope: InferencePurposeContext | undefined,
-    orgId: string,
+    _orgId?: string,
   ): InferenceRoute {
-    return this.routeChain(role, scope, orgId)[0] ?? ACI_ROUTE;
-  }
-
-  routeChain(
-    role: InferenceModelRole,
-    scope: InferencePurposeContext | undefined,
-    orgId: string,
-  ): readonly InferenceRoute[] {
-    if (role === 'embed' || !this.enabled) return [ACI_ROUTE];
+    if (role === 'embed' || !this.enabled) return ACI_ROUTE;
     const purpose = scope?.purpose ?? DEFAULT_PURPOSE_BY_ROLE[role];
     const arm = scope?.arm ?? DEFAULT_ARM;
-    const untagged = scope === undefined;
-    const targets = this.targetsFor(purpose, arm, orgId);
-    const routes = targets.map((target) =>
-      InferenceRouteResolver.routeFor(target, purpose, arm, untagged),
-    );
-    return InferenceRouteResolver.withoutRepeatedAci(routes);
+    const target =
+      arm === DEFAULT_ARM ? this.#routing.purposes[purpose] : this.armTarget(purpose, arm);
+    return {
+      kind: 'provider',
+      provider: target.provider,
+      purpose,
+      model: target.model,
+      effort: target.effort,
+      arm,
+      untagged: scope === undefined,
+    };
   }
 
-  upstreamKeyFor(role: InferenceModelRole, orgId: string): string | undefined {
-    return this.upstreamKeyOfRoute(this.resolve(role, inferencePurposeScope.current(), orgId));
+  upstreamKeyFor(role: InferenceModelRole): string | undefined {
+    return this.upstreamKeyOfRoute(this.resolve(role, inferencePurposeScope.current()));
   }
 
   upstreamKeyOfRoute(route: InferenceRoute): string | undefined {
@@ -250,54 +221,12 @@ export class InferenceRouteResolver {
     return this.#config.reviewSamplePercent;
   }
 
-  noteFallback(): void {
-    if (this.enabled) this.#tables.alarm(ROUTE_FALLBACK_ALARM);
-  }
-
-  private static withoutRepeatedAci(routes: readonly InferenceRoute[]): readonly InferenceRoute[] {
-    const firstAci = routes.findIndex((route) => route.kind === 'aci');
-    return routes.filter((route, index) => route.kind !== 'aci' || index === firstAci);
-  }
-
-  private targetsFor(
+  private armTarget(
     purpose: InferencePurpose,
-    arm: InferenceArmId,
-    orgId: string,
-  ): readonly RouteTarget[] {
-    if (arm !== DEFAULT_ARM) return [this.armTarget(purpose, arm)];
-    const snapshot = routingSnapshotScope.current();
-    const purposes =
-      snapshot?.orgId === orgId ? snapshot.purposes : this.snapshotFor(orgId).purposes;
-    const route: PurposeRoute = purposes[purpose];
-    return inferencePurposeNeverFallsBack(purpose) ? [route] : [route, ...route.fallbacks];
-  }
-
-  private armTarget(purpose: InferencePurpose, arm: Exclude<InferenceArmId, 'D'>): RouteTarget {
+    arm: Exclude<InferenceArmId, 'D'>,
+  ): CompiledRouteTarget {
     const armRoute = this.#config.arms[arm].purposes[purpose];
     if (armRoute !== undefined) return { provider: 'anthropic', ...armRoute };
     return this.#routing.purposes[purpose];
-  }
-
-  private static routeFor(
-    target: RouteTarget,
-    purpose: InferencePurpose,
-    arm: InferenceArmId,
-    untagged: boolean,
-  ): InferenceRoute {
-    if (target.provider === PHALA_PROVIDER) return ACI_ROUTE;
-    if (target.provider === OPENAI_PROVIDER)
-      throw new ClaudeRouteConfigError(OPENAI_NOT_ROUTABLE_RULE);
-    if (target.provider === TYPESAFE_PROVIDER) {
-      throw new ClaudeRouteConfigError(TYPESAFE_NOT_ROUTABLE_RULE);
-    }
-    return {
-      kind: 'provider',
-      provider: target.provider,
-      purpose,
-      model: target.model as InferenceModelId,
-      effort: target.effort,
-      arm,
-      untagged,
-    };
   }
 }

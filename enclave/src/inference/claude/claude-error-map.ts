@@ -86,11 +86,11 @@ function fromStreamEvent(error: APIError): ClaudeRouteError | undefined {
   if (typeof error.status === 'number') return undefined;
   switch (error.type) {
     case 'overloaded_error':
-      return new ClaudeRouteError('claude_overloaded', HTTP_OVERLOADED_STATUS, undefined, true);
+      return new ClaudeRouteError('claude_overloaded', HTTP_OVERLOADED_STATUS);
     case 'rate_limit_error':
       return rateLimited(error);
     case 'api_error':
-      return new ClaudeRouteError('claude_upstream_error', undefined, undefined, true);
+      return new ClaudeRouteError('claude_upstream_error');
     default:
       return undefined;
   }
@@ -108,9 +108,9 @@ function fromStatus(error: APIError, context: ClaudeErrorContext): ClaudeRouteEr
     return new ClaudeRouteError('claude_credential_rejected');
   }
   if (HTTP_OVERLOADED_STATUSES.has(status))
-    return new ClaudeRouteError('claude_overloaded', status, undefined, true);
+    return new ClaudeRouteError('claude_overloaded', status);
   if (status >= SERVER_ERROR_FLOOR) {
-    return new ClaudeRouteError('claude_upstream_error', undefined, undefined, true);
+    return new ClaudeRouteError('claude_upstream_error');
   }
   return status >= CLIENT_ERROR_FLOOR
     ? new ClaudeRouteError(CLAUDE_REQUEST_INVALID)
@@ -125,7 +125,7 @@ function rateLimited(error: APIError): ClaudeRouteError {
     Date.now(),
     MAX_RETRY_AFTER_MS,
   );
-  return new ClaudeRouteError('claude_rate_limited', HTTP_TOO_MANY_REQUESTS, retryAfterMs, true);
+  return new ClaudeRouteError('claude_rate_limited', HTTP_TOO_MANY_REQUESTS, retryAfterMs);
 }
 
 function limitReached(code: string): ClaudeRouteError {

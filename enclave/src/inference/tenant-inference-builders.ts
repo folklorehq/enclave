@@ -14,7 +14,6 @@ import { UnboundPoolInference } from './UnboundPoolInference.js';
 import type { DecisionModel } from '@folklore/inference';
 import type { EmbeddingProvider } from './openai/OpenAIEmbedRouteComposition.js';
 import type { InferenceRoute, InferenceRouteResolver } from './routing/InferenceRouteResolver.js';
-import { logger } from '../logger.js';
 import type { LlmOperationCache } from './vector-cache.js';
 import type { InferenceLatencyProfile } from './public-aci-operation-limits.js';
 
@@ -93,7 +92,6 @@ export function poolPolicyBoundInference(input: {
 }): TenantPolicyBoundInference {
   const { orgId, policy } = input;
   return new TenantPolicyBoundInference(orgId, input.snapshot, new UnboundPoolInference(), {
-    logger,
     freshnessProvider: () => policy.freshnessFor(orgId),
     requireFreshness: true,
     runtimeEvidence: policy.runtimeEvidenceFor(orgId),
@@ -114,8 +112,7 @@ export function poolPolicyBoundInference(input: {
       ? {}
       : {
           routeResolver: policy.routeResolver,
-          upstreamKeyFor: (role: InferenceModelRole) =>
-            policy.routeResolver?.upstreamKeyFor(role, orgId),
+          upstreamKeyFor: (role: InferenceModelRole) => policy.routeResolver?.upstreamKeyFor(role),
           upstreamKeyForRoute: (route: InferenceRoute) =>
             policy.routeResolver?.upstreamKeyOfRoute(route),
         }),

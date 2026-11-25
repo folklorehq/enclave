@@ -34,8 +34,8 @@ const ANTHROPIC_PROVIDER = 'anthropic';
 
 /** A Claude route refusal: the message is the code, and no upstream text or cause is kept. */
 export class ClaudeRouteError extends ProviderRouteError {
-  constructor(code: string, status?: number, retryAfterMs?: number, fallbackEligible = false) {
-    super(ClaudeRouteError.initFor(code, status, retryAfterMs, fallbackEligible));
+  constructor(code: string, status?: number, retryAfterMs?: number) {
+    super(ClaudeRouteError.initFor(code, status, retryAfterMs));
     this.name = 'ClaudeRouteError';
   }
 
@@ -43,14 +43,12 @@ export class ClaudeRouteError extends ProviderRouteError {
     code: string,
     status: number | undefined,
     retryAfterMs: number | undefined,
-    fallbackEligible: boolean,
   ): ProviderRouteErrorInit {
     const deferral = ClaudeRouteError.deferralOf(code);
     return {
       provider: ANTHROPIC_PROVIDER,
       code,
       marksSlow: CLAUDE_SLOW_CODES.has(code),
-      fallbackEligible,
       ...(status === undefined ? {} : { status }),
       ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
       ...(deferral === undefined ? {} : { deferral }),
