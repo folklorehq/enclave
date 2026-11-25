@@ -76,7 +76,7 @@ export function verifyAssignmentManifest(
   });
 }
 
-/** Wire-native verification of an already-parsed discriminated result (v3, V2, or legacy v1). */
+/** Wire-native verification of an already-parsed discriminated result (v3 or v4). */
 export function verifyAssignmentManifestWire(
   parsed: NormalizedAssignmentManifestV1,
   assignmentManifestPublicKeySpki: string,

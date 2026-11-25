@@ -72,7 +72,6 @@ export {
 } from './signed-boot-manifest.js';
 export {
   SignedAssignmentManifestError,
-  verifySignedAssignmentManifest,
   verifySignedAssignmentManifestV3,
   verifyAssignmentManifestWire,
   type SignedAssignmentManifestVerificationFailure,

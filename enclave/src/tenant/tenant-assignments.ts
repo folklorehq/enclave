@@ -1,6 +1,4 @@
 import {
-  type LegacyAssignmentKeyRecordV1,
-  type LegacyAssignmentReadFloorV1,
   type NormalizedAssignmentManifestV1,
   type SignedAssignmentManifest,
   type TenantAssignment,
@@ -48,18 +46,14 @@ export function parseVersionedAssignmentManifest(
   return parsed;
 }
 
-/** Discriminated dual-read assignment parser: parses the same union as every other reader. */
+/** Parses the signed assignment wire with the same parser as every other reader. */
 export function parseAssignmentManifestWire(
   manifest: unknown,
   expectedPoolId: string,
   lastGeneration: number,
-  floor?: LegacyAssignmentReadFloorV1 | null,
-  keyRecord?: LegacyAssignmentKeyRecordV1 | null,
 ): NormalizedAssignmentManifestV1 {
   const parsed = parseContractAssignmentManifestWire(manifest, expectedPoolId, {
     lastGeneration,
-    floor,
-    keyRecord,
   });
   assertNoDuplicates(parsed.assignments);
   return parsed;

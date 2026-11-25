@@ -1,21 +1,10 @@
 import {
-  assignmentManifestDigestPayload,
-  assignmentManifestSignaturePayload,
-  assignmentManifestV2Payload,
-  assignmentManifestV2Schema,
-  canonicalJson,
-  legacyAssignmentReadFloorV1Schema,
   parseAssignmentManifestWire,
   signedAssignmentManifestV3Schema,
-  versionedAssignmentManifestSchema,
-  type AssignmentManifestV2,
-  type LegacyAssignmentKeyRecordV1,
-  type LegacyAssignmentReadFloorV1,
-  type LegacySignedAssignmentManifestV1,
   type NormalizedAssignmentManifestV1,
   type SignedAssignmentManifestV3,
 } from '@folklore/contracts';
-import { createHash, createPublicKey, verify } from 'node:crypto';
+import { createPublicKey, verify } from 'node:crypto';
 import { buildSignerPurposeSignatureMessage } from '@folklore/contracts';
 import { encodeAssignmentManifestSubjectV3, digestCanonicalCbor } from './canonical-cbor.js';
 import { verifySignedAssignmentManifestV4 } from './signed-assignment-manifest-v4.js';
@@ -33,38 +22,6 @@ export class SignedAssignmentManifestError extends Error {
     super(code);
     this.name = 'SignedAssignmentManifestError';
   }
-}
-
-export function verifySignedAssignmentManifest(
-  raw: unknown,
-  expectedPoolId: string,
-  publicKeySpki: string,
-  minimumGeneration = 1,
-): LegacySignedAssignmentManifestV1 {
-  const parsed = versionedAssignmentManifestSchema.safeParse(raw);
-  if (!parsed.success) throw new SignedAssignmentManifestError('assignment_manifest_invalid');
-  if (parsed.data.poolId !== expectedPoolId) {
-    throw new SignedAssignmentManifestError('assignment_manifest_pool_mismatch');
-  }
-  if (parsed.data.generation < minimumGeneration) {
-    throw new SignedAssignmentManifestError('assignment_manifest_stale');
-  }
-  const { digest, signature, ...unsigned } = parsed.data;
-  const expectedDigest = createHash('sha256')
-    .update(assignmentManifestDigestPayload(unsigned))
-    .digest('hex');
-  if (expectedDigest !== digest) {
-    throw new SignedAssignmentManifestError('assignment_manifest_invalid');
-  }
-  const publicKey = publicKeyFromSpki(publicKeySpki);
-  const valid = verify(
-    null,
-    Buffer.from(assignmentManifestSignaturePayload(digest), 'utf8'),
-    publicKey,
-    Buffer.from(signature.signature, 'base64'),
-  );
-  if (!valid) throw new SignedAssignmentManifestError('assignment_manifest_signature_invalid');
-  return parsed.data;
 }
 
 export function publicKeyFromSpki(publicKeySpki: string) {
@@ -116,24 +73,17 @@ export function verifySignedAssignmentManifestV3(
 
 export interface VerifyAssignmentManifestWireOptions {
   lastGeneration: number;
-  floor?: LegacyAssignmentReadFloorV1 | null;
-  keyRecord?: LegacyAssignmentKeyRecordV1 | null;
 }
 
-/** Verifies the signed assignment wires and preserves their normalized discriminants. */
+/** Verifies the signed V4 and V3 assignment wires and preserves their normalized discriminants. */
 export function verifyAssignmentManifestWire(
   raw: unknown,
   expectedPoolId: string,
   publicKeySpki: string,
   options: VerifyAssignmentManifestWireOptions,
 ): NormalizedAssignmentManifestV1 {
-  const floor = options.floor
-    ? legacyAssignmentReadFloorV1Schema.parse(options.floor)
-    : (options.floor ?? null);
   const parsed = parseAssignmentManifestWire(raw, expectedPoolId, {
     lastGeneration: options.lastGeneration,
-    floor,
-    keyRecord: options.keyRecord,
   });
   switch (parsed.wire) {
     case 'SignedAssignmentManifestV4':
@@ -144,49 +94,15 @@ export function verifyAssignmentManifestWire(
         options.lastGeneration + 1,
       );
       return parsed;
-    case 'SignedAssignmentManifestV3': {
-      const envelope = parsed.raw;
+    case 'SignedAssignmentManifestV3':
       verifySignedAssignmentManifestV3(
-        envelope,
+        parsed.raw,
         expectedPoolId,
         publicKeySpki,
         options.lastGeneration + 1,
       );
       return parsed;
-    }
-    case 'AssignmentManifestV2': {
-      const signed = assignmentManifestV2Schema.parse(parsed.raw);
-      verifyAssignmentManifestV2Signature(signed, publicKeySpki);
-      return parsed;
-    }
-    case 'LegacySignedAssignmentManifestV1': {
-      const signed = parsed.raw;
-      verifySignedAssignmentManifest(
-        signed,
-        expectedPoolId,
-        publicKeySpki,
-        options.lastGeneration + 1,
-      );
-      return parsed;
-    }
+    default:
+      throw new SignedAssignmentManifestError('assignment_manifest_invalid');
   }
-}
-
-function verifyAssignmentManifestV2Signature(
-  signed: AssignmentManifestV2,
-  publicKeySpki: string,
-): void {
-  const { digest, signature, ...content } = signed;
-  const contentDigest = createHash('sha256').update(canonicalJson(content), 'utf8').digest('hex');
-  if (contentDigest !== digest) {
-    throw new SignedAssignmentManifestError('assignment_manifest_invalid');
-  }
-  const publicKey = publicKeyFromSpki(publicKeySpki);
-  const valid = verify(
-    null,
-    Buffer.from(assignmentManifestV2Payload(signed), 'utf8'),
-    publicKey,
-    Buffer.from(signature.signature, 'base64'),
-  );
-  if (!valid) throw new SignedAssignmentManifestError('assignment_manifest_signature_invalid');
 }
