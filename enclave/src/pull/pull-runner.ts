@@ -1,12 +1,11 @@
 /** Drives one connector pull() pass entirely inside the enclave — plaintext never leaves the enclave. */
 import { randomBytes } from 'node:crypto';
-import { GetParameterCommand, PutParameterCommand, type SSMClient } from '@aws-sdk/client-ssm';
+import { GetParameterCommand, type SSMClient } from '@aws-sdk/client-ssm';
 import type { S3Client } from '@aws-sdk/client-s3';
 import type { Logger } from '@folklore/core';
 import {
   type Connector,
   createPullConnector,
-  isCursorEnvelope,
   isSpecConnectorKind,
   type PullConnectorDeps,
   type PullOptions,
@@ -14,7 +13,6 @@ import {
   type SyncCursor,
 } from '@folklore/connectors';
 import { NOTION_KIND, isPausableSourceKind, supportsPerPersonMode } from '@folklore/contracts';
-import { ConnectorSpecError } from '@folklore/errors';
 import {
   oauthRefreshCommandSchema,
   pullStatsSchema,
@@ -149,12 +147,8 @@ export function resolvePullWindow(
   return { cursor: { value: backfill ? null : storedCursor }, options: { since, backfill } };
 }
 
-export type PullCursorStoreMode = 'sealed';
-
 export interface PullRunnerDeps {
   ssm: SSMClient;
-  /** Where every cursor lives; absent keeps member and Notion cursors sealed and the rest in SSM. */
-  cursorStore?: PullCursorStoreMode;
   s3?: S3Client;
   processedBucket?: string;
   crypto: EnclaveCrypto;
@@ -198,8 +192,7 @@ export type PullRunResult =
         | 'connection_response_invalid'
         | 'connection_integrity_failed'
         | 'connection_decrypt_failed'
-        | 'resource_scope_unavailable'
-        | 'cursor_store_unsealed';
+        | 'resource_scope_unavailable';
       sourceId: string;
       sourceKind: string;
     }
@@ -246,25 +239,7 @@ function isParameterNotFound(error: unknown): boolean {
   );
 }
 
-async function saveCursor(
-  ssm: SSMClient,
-  tenantId: string,
-  sourceId: string,
-  value: string | null,
-): Promise<void> {
-  if (value === null) return;
-  if (isCursorEnvelope(value)) throw new ConnectorSpecError('cursor_envelope_unsealed');
-  await ssm.send(
-    new PutParameterCommand({
-      Name: cursorSsmPath(tenantId, sourceId),
-      Value: value,
-      Type: 'String',
-      Overwrite: true,
-    }),
-  );
-}
-
-// Member cursors are personal sync tokens, so they stay sealed in S3.
+// Every cursor is sealed in S3: a member's is a personal sync token and a spec connector's is an envelope.
 async function loadSealedCursor(
   deps: PullRunnerDeps,
   message: PullDueMessage,
@@ -282,13 +257,9 @@ async function saveSealedCursor(
 
 const SSM_ACCESS_DENIED = 'AccessDeniedException';
 
-function isSealedMode(deps: PullRunnerDeps): boolean {
-  return deps.cursorStore === 'sealed';
-}
-
-// Only sealed mode names a source that is neither member nor Notion; every other mode keeps today's two codes.
-function isGenericSealedSource(deps: PullRunnerDeps, message: PullDueMessage): boolean {
-  return isSealedMode(deps) && message.ownerAccountId === undefined && message.kind !== NOTION_KIND;
+// A source that is neither member nor Notion has its own failure code from the two that name those.
+function isGenericSealedSource(message: PullDueMessage): boolean {
+  return message.ownerAccountId === undefined && message.kind !== NOTION_KIND;
 }
 
 // An unreadable sealed cursor re-snapshots; a missing one is read forward once from the legacy SSM parameter.
@@ -309,7 +280,7 @@ async function loadCursorForRun(
 
 function sealedCursorStore(deps: PullRunnerDeps, message: PullDueMessage): S3PullCursorStore {
   if (!deps.s3 || !deps.processedBucket) {
-    if (isGenericSealedSource(deps, message)) throw new Error('pull_cursor_store_unavailable');
+    if (isGenericSealedSource(message)) throw new Error('pull_cursor_store_unavailable');
     throw new Error('member_pull_cursor_store_unavailable');
   }
   return new S3PullCursorStore({
@@ -522,12 +493,6 @@ export async function runPull(
   }
 
   const startedAt = Date.now();
-  const usesSealedCursor =
-    memberScope !== undefined || message.kind === NOTION_KIND || isSealedMode(deps);
-  // A spec cursor is an envelope the legacy parameter store cannot hold, so the pull stops before any cursor, token or connector work.
-  if (isSpecConnectorKind(message.kind) && !usesSealedCursor) {
-    return notProcessed(message, 'cursor_store_unsealed');
-  }
   const sealedCursor = await loadRunCursor(deps, message, memberScope);
 
   const token = await resolveSourceToken(
@@ -554,7 +519,7 @@ export async function runPull(
     budgetedWindow(
       resolvePullWindow(
         backfill,
-        backfill ? null : await resumeCursor(deps, message, usesSealedCursor, sealedCursor),
+        backfill ? null : await resumeCursor(deps, message, sealedCursor),
         deps.historyWindow,
         deps.orgId,
       ),
@@ -594,7 +559,7 @@ export async function runPull(
     sourceId: message.sourceId,
     sourceKind: message.kind,
     persistCursor: async () => {
-      await persistRunCursor(deps, message, usesSealedCursor, cursor);
+      await persistRunCursor(deps, message, cursor);
       await settleBackfill(deps, message.kind, scope, hasMore);
     },
   };
@@ -603,14 +568,9 @@ export async function runPull(
 async function persistRunCursor(
   deps: PullRunnerDeps,
   message: PullDueMessage,
-  usesSealedCursor: boolean,
   cursor: string | null,
 ): Promise<void> {
-  if (usesSealedCursor) {
-    await saveSealedCursor(deps, message, message.kind === NOTION_KIND ? (cursor ?? '') : cursor);
-    return;
-  }
-  await saveCursor(deps.ssm, message.tenant_id, message.sourceId, cursor);
+  await saveSealedCursor(deps, message, message.kind === NOTION_KIND ? (cursor ?? '') : cursor);
 }
 
 const RESOURCE_SCOPE_UNAVAILABLE = 'unavailable';
@@ -704,17 +664,15 @@ async function loadRunCursor(
 ): Promise<string | null> {
   if (message.kind === NOTION_KIND) return null;
   if (memberScope !== undefined) return loadSealedCursor(deps, message);
-  return isSealedMode(deps) ? loadCursorForRun(deps, message) : null;
+  return loadCursorForRun(deps, message);
 }
 
 async function resumeCursor(
   deps: PullRunnerDeps,
   message: PullDueMessage,
-  usesSealedCursor: boolean,
   sealedCursor: string | null,
 ): Promise<string | null> {
   if (message.kind === NOTION_KIND) return loadNotionCursor(deps, message);
-  if (!usesSealedCursor) return loadCursor(deps.ssm, message.tenant_id, message.sourceId);
   return sealedCursor;
 }
 

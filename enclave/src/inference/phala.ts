@@ -20,7 +20,7 @@ import {
   inferenceAttestationConfigSchema,
   type InferenceAttestationConfig,
 } from '@folklore/contracts/enclave-attestation';
-import { CRITIQUE_TEMPERATURE, type SynthesisInference } from './CachedInference.js';
+import type { SynthesisInference } from './CachedInference.js';
 import { recordTokenUsage } from './TokenUsageScope.js';
 import { createPinnedInferenceFetch } from '../egress/inference.js';
 import {
@@ -502,6 +502,9 @@ export async function generate(
     temperature,
   });
 }
+
+// The one critique temperature, sent on every critique call.
+const CRITIQUE_TEMPERATURE = 0;
 
 export async function generateCritique(prompt: string, systemPrompt?: string): Promise<string> {
   assertInferenceConfigured();

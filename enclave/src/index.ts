@@ -1664,7 +1664,6 @@ async function writeIdleFlag(idle: boolean): Promise<void> {
 const router = new TenantMessageRouter({
   registry,
   ssm,
-  cursorStore: 'sealed',
   historyWindow: tenantHistoryWindow,
   s3,
   processedBucket: PROCESSED_OUTPUTS_BUCKET,

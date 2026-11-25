@@ -144,7 +144,6 @@ export const NOT_PROCESSED_REASONS = [
   'connection_integrity_failed',
   'connection_decrypt_failed',
   'resource_scope_unavailable',
-  'cursor_store_unsealed',
 ] as const satisfies readonly PullNotProcessedReason[];
 
 const INFERENCE_TRANSPORT_REASONS = [

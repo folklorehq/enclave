@@ -1,6 +1,4 @@
 import type { InferenceModelRole, InferenceTimer, InferenceUsageSink } from '@folklore/inference';
-import { CachedInference } from './CachedInference.js';
-import { inferenceModel, phalaInference } from './phala.js';
 import {
   TenantPolicyBoundInference,
   type TenantPolicyFreshnessPort,
@@ -117,23 +115,4 @@ export function poolPolicyBoundInference(input: {
             policy.routeResolver?.upstreamKeyOfRoute(route),
         }),
   });
-}
-
-/** A dedicated tenant's inference: the configured global backend behind its sealed cache. */
-export function dedicatedCachedInference(
-  cache: LlmOperationCache,
-  promptVersion: string,
-  usageSink?: InferenceUsageSink,
-): CachedInference {
-  return new CachedInference(
-    phalaInference,
-    cache,
-    {
-      embedModel: inferenceModel('embed'),
-      generateModel: inferenceModel('generate'),
-      critiqueModel: inferenceModel('critique'),
-      promptVersion,
-    },
-    usageSink,
-  );
 }
