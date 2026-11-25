@@ -636,11 +636,17 @@ export class EnclaveCrypto {
       this.hasSealedEnvelopeMarker(ctx) ||
       Object.entries(expected).some(([key, value]) => ctx[key] !== value) ||
       strictKeys.some((key) => expected[key] === undefined && ctx[key] !== undefined);
-    if (mismatch) {
+    return this.releasePlaintext(plaintext, mismatch, purpose);
+  }
+
+  // The decrypted buffer is the library's own, so the caller gets a copy and the original is wiped on every path.
+  private releasePlaintext(plaintext: Buffer, mismatch: boolean, purpose: string): Buffer {
+    try {
+      if (mismatch) throw new EncryptionContextMismatchError(purpose);
+      return Buffer.from(plaintext);
+    } finally {
       plaintext.fill(0);
-      throw new EncryptionContextMismatchError(purpose);
     }
-    return Buffer.from(plaintext);
   }
 
   private askTurnIdentity(ref: AskTurnRef): Record<string, string> {
@@ -699,8 +705,7 @@ export class EnclaveCrypto {
     const mismatch = Object.entries(expected).some(
       ([key, value]) => messageHeader.encryptionContext[key] !== value,
     );
-    if (mismatch) throw new EncryptionContextMismatchError(purpose);
-    return Buffer.from(plaintext);
+    return this.releasePlaintext(plaintext, mismatch, purpose);
   }
 
   private publicationSnapshotContext(ref: WikiPublicationSnapshotRef): Record<string, string> {
