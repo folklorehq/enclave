@@ -96,7 +96,6 @@ export const EXTRACTORS: Record<string, ExtractorFn> = {
   zoom: zoomExtractor,
   intercom: intercomExtractor,
   jira: jwtIssExtractor,
-  confluence: jwtIssExtractor,
 };
 
 export function hasPayloadTenantKey(

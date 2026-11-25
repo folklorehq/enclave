@@ -4,11 +4,8 @@ import { GetParameterCommand, PutParameterCommand, type SSMClient } from '@aws-s
 import type { S3Client } from '@aws-sdk/client-s3';
 import type { Logger } from '@folklore/core';
 import {
-  code,
-  type CodebaseRepositorySelection,
   type Connector,
   createPullConnector,
-  type DocumentBodyMode,
   isCursorEnvelope,
   isSpecConnectorKind,
   type PullConnectorDeps,
@@ -39,8 +36,6 @@ import { deriveMemberSourceId, deriveSourceId } from '@folklore/utils';
 import { logger } from '../logger.js';
 import type { MemberPullScope, Pipeline, ProcessedFact } from '../pipeline/index.js';
 import type { EnclaveCrypto } from '../crypto/esdk.js';
-import { GitHubCodebaseConnectionResolver } from '../codebase/GitHubCodebaseConnectionResolver.js';
-import type { CodebaseSelectionStore } from '../codebase/CodebaseSelectionStore.js';
 import {
   ADMIT_ALL,
   admissionOf,
@@ -58,11 +53,6 @@ import {
 import { ControlPlaneTenantDirectorySource } from '../directory/ControlPlaneTenantDirectorySource.js';
 import type { TenantHistoryWindow } from '../directory/TenantHistoryWindow.js';
 import type { JiraWebhookLifecycleService } from './JiraWebhookLifecycleService.js';
-import {
-  BODY_GATED_KINDS,
-  DOCUMENT_BODY_RELEASE,
-  documentBodyModeFor,
-} from './document-body-release.js';
 import { S3PullCursorStore } from './S3PullCursorStore.js';
 import { SingleFlight } from './SingleFlight.js';
 import { boundGitHubInstallationId } from './github-installation-binding.js';
@@ -163,7 +153,7 @@ export type PullCursorStoreMode = 'sealed';
 
 export interface PullRunnerDeps {
   ssm: SSMClient;
-  /** Where every cursor lives; absent keeps `code`, member and Notion cursors sealed and the rest in SSM. */
+  /** Where every cursor lives; absent keeps member and Notion cursors sealed and the rest in SSM. */
   cursorStore?: PullCursorStoreMode;
   s3?: S3Client;
   processedBucket?: string;
@@ -181,7 +171,6 @@ export interface PullRunnerDeps {
   mintGitHubInstallationToken?: (input: {
     installationId: string;
   }) => Promise<{ accessToken: string; expiresAt: string }>;
-  codebaseSelectionStore?: Pick<CodebaseSelectionStore, 'read'>;
   resourceScope: Pick<TenantResourceScope, 'read' | 'transitionBackfill'>;
   signal?: AbortSignal;
 }
@@ -220,12 +209,6 @@ export type PullRunResult =
       sourceKind: string;
     }
   | {
-      outcome: 'declined';
-      reason: 'body_release_off';
-      sourceId: string;
-      sourceKind: string;
-    }
-  | {
       outcome: 'paused';
       sourceId: string;
       sourceKind: string;
@@ -234,14 +217,6 @@ export type PullRunResult =
 export type PullNotProcessedReason = Extract<PullRunResult, { outcome: 'not_processed' }>['reason'];
 
 const consoleLogger: Logger = logger;
-
-function parseAllowlist(value: string | undefined): string[] {
-  if (!value) return [];
-  return value
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0);
-}
 
 function cursorSsmPath(tenantId: string, sourceId: string): string {
   return `/folklore/${tenantId}/pull-cursor/${sourceId}`;
@@ -289,7 +264,7 @@ async function saveCursor(
   );
 }
 
-// `code` cursors outgrow SSM and hold file paths, member cursors are personal sync tokens; both stay sealed in S3.
+// Member cursors are personal sync tokens, so they stay sealed in S3.
 async function loadSealedCursor(
   deps: PullRunnerDeps,
   message: PullDueMessage,
@@ -311,7 +286,7 @@ function isSealedMode(deps: PullRunnerDeps): boolean {
   return deps.cursorStore === 'sealed';
 }
 
-// Only sealed mode names a source that is neither code, member nor Notion; every other mode keeps today's two codes.
+// Only sealed mode names a source that is neither member nor Notion; every other mode keeps today's two codes.
 function isGenericSealedSource(deps: PullRunnerDeps, message: PullDueMessage): boolean {
   return isSealedMode(deps) && message.ownerAccountId === undefined && message.kind !== NOTION_KIND;
 }
@@ -334,7 +309,6 @@ async function loadCursorForRun(
 
 function sealedCursorStore(deps: PullRunnerDeps, message: PullDueMessage): S3PullCursorStore {
   if (!deps.s3 || !deps.processedBucket) {
-    if (message.kind === 'code') throw new Error('code_pull_cursor_store_unavailable');
     if (isGenericSealedSource(deps, message)) throw new Error('pull_cursor_store_unavailable');
     throw new Error('member_pull_cursor_store_unavailable');
   }
@@ -345,12 +319,6 @@ function sealedCursorStore(deps: PullRunnerDeps, message: PullDueMessage): S3Pul
     orgId: deps.orgId,
     deploymentId: deps.deploymentId,
   });
-}
-
-/** One tick per attempt, owned by exactly one site: the connector on completion, the runner on early returns. */
-export function advanceCodeCursorTick(cursorValue: string | null): string {
-  const cursor = code.parseCodeCursor(cursorValue);
-  return JSON.stringify({ ...cursor, tick: cursor.tick + 1 });
 }
 
 const MINT_TOKEN_TTL_MS = 50 * 60 * 1000;
@@ -469,7 +437,7 @@ export async function resolveSourceToken(
   mintGitHubInstallationToken?: PullRunnerDeps['mintGitHubInstallationToken'],
   scope: { orgId: string } = { orgId: 'unscoped' },
 ): Promise<string | null> {
-  if (kind !== 'github' && kind !== 'code') return connection.accessToken;
+  if (kind !== 'github') return connection.accessToken;
   if (!connection.connectionId || !connection.activationGeneration) {
     throw new Error('github_connection_binding_missing');
   }
@@ -483,24 +451,15 @@ export async function resolveSourceToken(
     },
   );
   if (minted.outcome === 'rate_limited') {
-    // github stays loud (DLQ alarm); a `code` mint-403 is a non-throwing early return the
-    // runner turns into a cursor tick bump (scheduler cadence is fixed, no backoff to rely on).
-    if (kind === 'code') return null;
     throw new Error('github_mint_rate_limited');
   }
   return minted.accessToken;
-}
-
-export interface PullBodyPolicy {
-  documentBodies: DocumentBodyMode;
 }
 
 export type PullConnectorBuilder = (
   kind: string,
   token: string,
   connectionMetadata: PullConnectionMetadata,
-  codebaseSelection?: CodebaseRepositorySelection,
-  bodyPolicy?: PullBodyPolicy,
 ) => Connector | null;
 
 // Every client here MUST egress via the proxy — either the global undici dispatcher
@@ -510,8 +469,6 @@ export function buildConnector(
   kind: string,
   token: string,
   connectionMetadata?: PullConnectionMetadata,
-  codebaseSelection?: CodebaseRepositorySelection,
-  bodyPolicy?: PullBodyPolicy,
 ): Connector | null {
   const deps: PullConnectorDeps = {
     logger: consoleLogger,
@@ -520,9 +477,6 @@ export function buildConnector(
       ? { externalTenantId: connectionMetadata.externalTenantId }
       : {}),
     httpsProxyAgent: externalHttpsProxyAgent(),
-    gmailLabelAllowlist: parseAllowlist(process.env['EMAIL_GMAIL_LABEL_ALLOWLIST']),
-    m365FolderAllowlist: parseAllowlist(process.env['EMAIL_M365_FOLDER_ALLOWLIST']),
-    ...(codebaseSelection ? { codebaseSelection } : {}),
     ...(isSpecConnectorKind(kind) && connectionMetadata?.orgId
       ? {
           connectorTransport: new ConnectorEgressTransport({
@@ -533,7 +487,6 @@ export function buildConnector(
           }),
         }
       : {}),
-    ...(bodyPolicy ? { documentBodies: bodyPolicy.documentBodies } : {}),
   };
   return createPullConnector(kind, deps);
 }
@@ -543,25 +496,16 @@ export async function runPull(
   message: PullDueMessage,
   deps: PullRunnerDeps,
   connectorBuilder: PullConnectorBuilder = buildConnector,
-  release: ReadonlyMap<string, DocumentBodyMode> = DOCUMENT_BODY_RELEASE,
 ): Promise<PullRunResult> {
   const routing = resolvePullRouting(message, deps.orgId);
   if (routing === null) return notProcessed(message, 'routing_invalid');
-  const mode = documentBodyModeFor(message.kind, release);
   const memberScope = routing.memberScope;
-  if (mode === 'off' && !memberScope && BODY_GATED_KINDS.has(message.kind)) {
-    return declined(message);
-  }
   const scope = await readResourceScope(deps, message, memberScope);
   if (scope === RESOURCE_SCOPE_UNAVAILABLE) {
     return notProcessed(message, 'resource_scope_unavailable');
   }
   if (scope?.paused) return pausedPull(message);
-  const resolved =
-    message.kind === 'code'
-      ? await resolveCodebaseConnection(deps)
-      : await resolveSourceConnection(message, deps, memberScope);
-  if (resolved.outcome === 'not_ready') return superseded(message);
+  const resolved = await resolveSourceConnection(message, deps, memberScope);
   if (resolved.outcome === 'not_processed') {
     return notProcessed(message, resolved.reason);
   }
@@ -570,24 +514,21 @@ export async function runPull(
     return notProcessed(message, 'connection_missing');
   }
   const connection = resolved.connection;
-  const activationGeneration =
-    resolved.outcome === 'ready' ? resolved.capabilityGeneration : connection.activationGeneration;
-  const codebaseSelection =
-    resolved.outcome === 'ready' ? selectionForCodeConnector(resolved.selection) : undefined;
-  if (message.trigger === 'activation' && message.activationGeneration !== activationGeneration) {
+  if (
+    message.trigger === 'activation' &&
+    message.activationGeneration !== connection.activationGeneration
+  ) {
     return superseded(message);
   }
 
   const startedAt = Date.now();
-  const isCode = message.kind === 'code';
   const usesSealedCursor =
-    isCode || memberScope !== undefined || message.kind === NOTION_KIND || isSealedMode(deps);
+    memberScope !== undefined || message.kind === NOTION_KIND || isSealedMode(deps);
   // A spec cursor is an envelope the legacy parameter store cannot hold, so the pull stops before any cursor, token or connector work.
   if (isSpecConnectorKind(message.kind) && !usesSealedCursor) {
     return notProcessed(message, 'cursor_store_unsealed');
   }
-  // The code cursor loads BEFORE the mint so a mint-403 early return can bump its tick.
-  const sealedCursor = await loadRunCursor(deps, message, { isCode, memberScope });
+  const sealedCursor = await loadRunCursor(deps, message, memberScope);
 
   const token = await resolveSourceToken(
     message.kind,
@@ -598,15 +539,10 @@ export async function runPull(
   if (!token) {
     return notProcessed(message, 'token_missing');
   }
-  const bodyPolicy = pullBodyPolicy(mode);
-  const connector = buildPullConnector(
-    connectorBuilder,
-    message.kind,
-    token,
-    { ...connectionMetadata(connection), orgId: deps.orgId },
-    codebaseSelection,
-    bodyPolicy,
-  );
+  const connector = buildPullConnector(connectorBuilder, message.kind, token, {
+    ...connectionMetadata(connection),
+    orgId: deps.orgId,
+  });
   if (!connector) {
     return notProcessed(message, 'connector_missing');
   }
@@ -632,19 +568,15 @@ export async function runPull(
     connector,
     window,
     connectorBuilder,
-    codebaseSelection,
     memberScope,
-    bodyPolicy,
   );
 
-  const cursor =
-    result.earlyReturn && isCode ? advanceCodeCursorTick(result.cursor.value) : result.cursor.value;
+  const cursor = result.cursor.value;
   await reconcileJiraWebhook(message, deps, result.connection);
   const admission = scope ? admissionOf(scope) : ADMIT_ALL;
   const facts = await handlePulledFacts(deps, message.kind, result, { memberScope, admission });
   // A connector that claims more without moving its cursor would loop, so only progress counts.
-  const hasMore =
-    result.hasMore && !result.earlyReturn && cursorProgressed(isCode, window.cursor.value, cursor);
+  const hasMore = result.hasMore && !result.earlyReturn && cursor !== window.cursor.value;
   return {
     outcome: 'processed',
     facts,
@@ -768,15 +700,11 @@ async function settleBackfill(
 async function loadRunCursor(
   deps: PullRunnerDeps,
   message: PullDueMessage,
-  scope: { isCode: boolean; memberScope: MemberPullScope | undefined },
+  memberScope: MemberPullScope | undefined,
 ): Promise<string | null> {
   if (message.kind === NOTION_KIND) return null;
-  if (scope.isCode || scope.memberScope !== undefined) return loadSealedCursor(deps, message);
+  if (memberScope !== undefined) return loadSealedCursor(deps, message);
   return isSealedMode(deps) ? loadCursorForRun(deps, message) : null;
-}
-
-function cursorProgressed(isCode: boolean, previous: string | null, next: string | null): boolean {
-  return isCode ? code.codeCursorProgressed(previous, next) : next !== previous;
 }
 
 async function resumeCursor(
@@ -859,64 +787,17 @@ function budgetedWindow(window: PullWindow): PullWindow {
   return { cursor: window.cursor, options: { ...window.options, maxFacts: PULL_FACT_BUDGET } };
 }
 
-async function resolveCodebaseConnection(deps: PullRunnerDeps) {
-  if (!deps.codebaseSelectionStore) {
-    return { outcome: 'not_ready' as const, reason: 'codebase_selection_missing' as const };
-  }
-  return new GitHubCodebaseConnectionResolver({
-    controlPlaneUrl: deps.controlPlaneUrl,
-    runtimeDeploymentId: deps.runtimeDeploymentId ?? deps.deploymentId,
-    tenantDeploymentId: deps.deploymentId,
-    agentToken: deps.agentToken,
-    orgId: deps.orgId,
-    crypto: deps.crypto,
-    fetchImpl: deps.controlPlaneFetch,
-    selectionStore: deps.codebaseSelectionStore,
-  }).resolveScheduled();
-}
-
-function selectionForCodeConnector(
-  selection: Awaited<ReturnType<CodebaseSelectionStore['read']>>,
-): CodebaseRepositorySelection {
-  if (selection.mode === 'all') return { mode: 'all' };
-  return {
-    mode: 'selected',
-    repositoryIds: selection.repositories.map((repository) => repository.id),
-  };
-}
-
-function pullBodyPolicy(mode: DocumentBodyMode): PullBodyPolicy | undefined {
-  return mode === 'off' ? undefined : { documentBodies: mode };
-}
-
 function buildPullConnector(
   connectorBuilder: PullConnectorBuilder,
   kind: string,
   token: string,
   connectionMetadata: PullConnectionMetadata,
-  codebaseSelection?: CodebaseRepositorySelection,
-  bodyPolicy?: PullBodyPolicy,
 ): Connector | null {
-  if (bodyPolicy) {
-    return connectorBuilder(kind, token, connectionMetadata, codebaseSelection, bodyPolicy);
-  }
-  if (codebaseSelection) {
-    return connectorBuilder(kind, token, connectionMetadata, codebaseSelection);
-  }
   return connectorBuilder(kind, token, connectionMetadata);
 }
 
 function superseded(message: PullDueMessage): PullRunResult {
   return { outcome: 'superseded', sourceId: message.sourceId, sourceKind: message.kind };
-}
-
-function declined(message: PullDueMessage): PullRunResult {
-  return {
-    outcome: 'declined',
-    reason: 'body_release_off',
-    sourceId: message.sourceId,
-    sourceKind: message.kind,
-  };
 }
 
 function notProcessed(message: PullDueMessage, reason: PullNotProcessedReason): PullRunResult {
@@ -944,7 +825,7 @@ export type RefreshedConnector =
 export async function refreshConnectorAfterUnauthorized(
   input: UnauthorizedRefresh,
 ): Promise<RefreshedConnector> {
-  if (input.connection.kind === 'github' || input.connection.kind === 'code') {
+  if (input.connection.kind === 'github') {
     return remintGitHubConnector(input);
   }
   return refreshOAuthConnector(input);
@@ -957,9 +838,7 @@ export async function pullWithRefresh(
   connector: Connector,
   window: PullWindow,
   connectorBuilder: PullConnectorBuilder = buildConnector,
-  codebaseSelection?: CodebaseRepositorySelection,
   memberScope?: MemberPullScope,
-  bodyPolicy?: PullBodyPolicy,
 ) {
   try {
     return {
@@ -976,16 +855,12 @@ export async function pullWithRefresh(
       ...(memberScope === undefined ? {} : { ownerAccountId: memberScope.ownerAccountId }),
       reconnect: () => resolveSourceConnection(message, deps, memberScope),
       build: (token, fresher) =>
-        buildPullConnector(
-          connectorBuilder,
-          message.kind,
-          token,
-          { ...connectionMetadata(fresher), orgId: deps.orgId },
-          codebaseSelection,
-          bodyPolicy,
-        ),
+        buildPullConnector(connectorBuilder, message.kind, token, {
+          ...connectionMetadata(fresher),
+          orgId: deps.orgId,
+        }),
     });
-    if (fresh.outcome === 'rate_limited') return rateLimitedRetry(message.kind, window, connection);
+    if (fresh.outcome === 'rate_limited') return rateLimitedRetry();
     return {
       ...(await fresh.connector.pull(window.cursor, window.options)),
       connection: fresh.connection,
@@ -993,24 +868,12 @@ export async function pullWithRefresh(
   }
 }
 
-// A code pull has no backoff of its own, so a throttled re-mint ends the attempt and the tick moves on.
-function rateLimitedRetry(
-  sourceKind: string,
-  window: PullWindow,
-  connection: DecryptedSourceConnection,
-): PullResult & { connection: DecryptedSourceConnection } {
-  if (sourceKind !== 'code') throw new Error('github_mint_rate_limited');
-  return {
-    facts: [],
-    containers: [],
-    cursor: window.cursor,
-    hasMore: false,
-    earlyReturn: true,
-    connection,
-  };
+// A throttled re-mint fails the pull loudly, like a throttled first mint.
+function rateLimitedRetry(): never {
+  throw new Error('github_mint_rate_limited');
 }
 
-// A github/code pull has no refresh token: re-mint the ~1h install token and retry once.
+// A github pull has no refresh token: re-mint the ~1h install token and retry once.
 // The retry mint bypasses the TTL cache — recovery is always a fresh mint.
 async function remintGitHubConnector(input: UnauthorizedRefresh): Promise<RefreshedConnector> {
   const { deps, connection, originalError } = input;

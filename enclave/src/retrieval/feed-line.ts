@@ -14,7 +14,6 @@ const SOURCE_NAMES: Readonly<Record<string, string>> = {
   linear: 'Linear',
   slack: 'Slack',
   notion: 'Notion',
-  clickup: 'ClickUp',
   intercom: 'Intercom',
 };
 const HTML_TAG = /<[^>]*>/g;

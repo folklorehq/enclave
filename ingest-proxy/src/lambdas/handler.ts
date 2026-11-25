@@ -28,7 +28,7 @@ import type { RoutingMode } from '../routing-allowlist.js';
 import { SQS_MAX_MESSAGE_BYTES } from '../encrypted-sqs-message-size.js';
 import { edgeLaneGroupId } from '../edge-lane.js';
 import { UUID_PATTERN } from '../uuid-pattern.js';
-import { normalizeHeaders, verifySignature, verifySvixSignature } from '../signature-verifier.js';
+import { normalizeHeaders, verifySignature } from '../signature-verifier.js';
 
 const ssm = new SSMClient({});
 const sqs = new SQSClient({});
@@ -41,15 +41,9 @@ export const SIGNABLE_SOURCES = new Set([
   'slack',
   'linear',
   'jira',
-  'confluence',
   'intercom',
   'notion',
-  'meeting',
-  'email',
-  'google_drive',
-  'microsoft365',
   'zoom',
-  'zoom_bot',
 ]);
 
 // SES inbound: mail arrives via SNS, not a provider HMAC. Authenticity rests on the AWS SNS
@@ -107,10 +101,6 @@ const CANARY_AUTHORIZATION_PREFIX = 'ca1.';
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const MS_PER_S = 1000;
-// Recall.ai signs every tenant's bot webhook with ONE workspace-level verification secret (Svix
-// scheme), not a per-tenant secret (design §4): inbound isolation rests on the unguessable per-tenant
-// ingest URL alone. Recall bots post to the `zoom` source path (design §8 — no `zoom_bot` SourceKind).
-const RECALL_WEBHOOK_SECRET_PATH = '/folklore/recall-api/webhook-verification-secret';
 const X25519_PUBLIC_KEY_HEX = /^[0-9a-f]{64}$/i;
 const publicKeyCache = new Map<string, { key: Buffer; expiresAt: number }>();
 const hmacSecretCache = new Map<string, { secret: string | null; expiresAt: number }>();
@@ -158,14 +148,6 @@ async function fetchSecretAt(name: string, cacheKey: string): Promise<SecretLook
 
 function fetchHmacSecret(tenantId: string, source: string): Promise<SecretLookup> {
   return fetchSecretAt(`/folklore/${tenantId}/webhook-secrets/${source}`, `${tenantId}/${source}`);
-}
-
-// A Recall bot transcript and a native-Zoom event both land on the `zoom` source path but sign
-// differently: Recall uses Svix headers (global secret), native Zoom uses `x-zm-signature` (per-tenant
-// Zoom Secret Token). Presence of a Svix signature header disambiguates the Recall producer.
-function isRecallInbound(source: string, headers: Record<string, string | undefined>): boolean {
-  if (source !== 'zoom') return false;
-  return Boolean(headers['webhook-signature'] ?? headers['svix-signature']);
 }
 
 function resolveSecret(secret: string | null): SecretLookup {
@@ -298,7 +280,6 @@ export function extractEventType(
         return '';
       }
     }
-    case 'zoom_bot':
     case 'zoom': {
       try {
         return (JSON.parse(body) as { event?: string }).event ?? '';
@@ -381,9 +362,6 @@ function providerDeliveryId(
         return null;
       }
     }
-    case 'zoom_bot':
-      // Svix message id uniquely identifies a delivery, so FIFO drops Recall's retries.
-      return headers['webhook-id'] ?? headers['svix-id'] ?? null;
     case GOOGLE_DRIVE_SOURCE: {
       // Each Drive push is a unique (channel, message-number) pair — the dedup key across retries.
       const channelId = headers['x-goog-channel-id'];
@@ -406,9 +384,7 @@ function providerDeliveryId(
       }
     }
     case 'zoom': {
-      // A Recall bot on the `zoom` path dedups on its Svix message id; native Zoom on the meeting uuid.
-      const svixId = headers['webhook-id'] ?? headers['svix-id'];
-      if (svixId) return svixId;
+      // Zoom dedups on the meeting uuid.
       try {
         const uuid = (JSON.parse(body) as { payload?: { object?: { uuid?: unknown } } }).payload
           ?.object?.uuid;
@@ -912,22 +888,14 @@ async function handleUrlRouted(
   // verifies the signature. An absent secret or a bad signature is a 401
   // (forged-event injection guard); a transient SSM error is a 503 so the
   // provider retries rather than the webhook being dropped (durability).
-  // Recall inbound verifies against the single global workspace secret (Svix); every other producer
-  // (incl. native Zoom on the same `zoom` path) verifies against its per-tenant secret. Fail closed.
-  const recallInbound = isRecallInbound(source, headers);
-  const lookup = recallInbound
-    ? await fetchSecretAt(RECALL_WEBHOOK_SECRET_PATH, RECALL_WEBHOOK_SECRET_PATH)
-    : await fetchHmacSecret(tenantId, source);
+  const lookup = await fetchHmacSecret(tenantId, source);
   if (lookup.status === 'error') return { statusCode: 503 };
   if (lookup.status === 'absent') return { statusCode: 401 };
   // Signature FIRST, even for Zoom's url_validation (which Zoom also signs): answering the CRC
   // echo HMAC(secret, plainToken) before verifying turns it into a forgery oracle for the
   // message signature HMAC(secret, `v0:{ts}:{body}`) over the same secret. Gating on a valid
   // signature means only a secret-holder (genuine Zoom) can reach the echo.
-  const signatureValid = recallInbound
-    ? verifySvixSignature(headers, body, lookup.secret)
-    : verifySignature(source, headers, body, lookup.secret);
-  if (!signatureValid) {
+  if (!verifySignature(source, headers, body, lookup.secret)) {
     return { statusCode: 401 };
   }
 
@@ -967,11 +935,8 @@ async function handleUrlRouted(
     return { statusCode: 200 };
   }
 
-  // The CRC echo is native-Zoom-only (its own Secret Token); a Recall payload never carries it.
-  if (!recallInbound) {
-    const challenge = zoomUrlValidation(source, body, lookup.secret);
-    if (challenge) return challenge;
-  }
+  const challenge = zoomUrlValidation(source, body, lookup.secret);
+  if (challenge) return challenge;
 
   if (!(await checkRateLimit(tenantId, source))) {
     return { statusCode: 429 };

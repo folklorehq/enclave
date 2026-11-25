@@ -29,11 +29,9 @@ import {
   type SourceConnectionResolution,
 } from '../pull/source-connections-client.js';
 import { boundGitHubInstallationId } from '../pull/github-installation-binding.js';
-import { CodebaseSelectionStore } from '../codebase/CodebaseSelectionStore.js';
 import { ResourceScopeUnavailableError } from '../resource-scope/resource-scope-errors.js';
 import { TenantResourceScope } from '../resource-scope/TenantResourceScope.js';
 import { errorType } from '../logging/error-fields.js';
-import { logger } from '../logger.js';
 
 export interface IngestMessage {
   encryption_version: 2;
@@ -168,17 +166,6 @@ export class TenantMessageRouter {
     const context = this.deps.registry.get(queueTenantId);
 
     if (isPullDueMessage(raw)) {
-      const codebaseSelectionStore =
-        raw.kind === 'code' && this.deps.s3
-          ? (() => {
-              const scope = context.processedOutputsScope();
-              return new CodebaseSelectionStore({
-                s3: this.deps.s3,
-                bucket: scope.bucket,
-                crypto: scope.crypto,
-              });
-            })()
-          : undefined;
       const result = await runPull(raw, {
         ssm: this.deps.ssm,
         ...(this.deps.cursorStore ? { cursorStore: this.deps.cursorStore } : {}),
@@ -197,16 +184,11 @@ export class TenantMessageRouter {
         refreshOAuthCredential: this.deps.refreshOAuthCredential,
         jiraWebhookLifecycle: this.deps.jiraWebhookLifecycle,
         mintGitHubInstallationToken: this.deps.mintGitHubInstallationToken,
-        ...(codebaseSelectionStore ? { codebaseSelectionStore } : {}),
         ...this.resourceScopeDeps(context, queueTenantId),
         ...(options.signal ? { signal: options.signal } : {}),
       });
       if (result.outcome === 'not_processed') {
         return { context, facts: [], shouldAcknowledge: false, failureCode: result.reason };
-      }
-      if (result.outcome === 'declined') {
-        logger.info('pull_declined', { source_kind: result.sourceKind, reason: result.reason });
-        return this.acknowledgedWithoutFacts(context);
       }
       if (result.outcome === 'superseded') return this.acknowledgedWithoutFacts(context);
       if (result.outcome === 'paused') {

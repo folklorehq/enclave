@@ -495,13 +495,6 @@ export class HttpProviderTokenClient implements ProviderTokenClient {
   ): { sourceUserId: string; externalTenantId?: string } {
     if (config.kind === 'linear') return this.linearIdentity(parsed, recheck);
     if (config.kind === 'notion') return { sourceUserId: this.requireId(parsed['id']) };
-    if (
-      config.kind === 'google_drive' ||
-      config.kind === 'gmail' ||
-      config.kind === 'google_calendar'
-    ) {
-      return { sourceUserId: this.requireId(parsed['sub']) };
-    }
     if (config.kind === 'intercom') {
       const app = parsed['app'];
       if (!isRecord(app)) throw new Error('provider_identity_missing');

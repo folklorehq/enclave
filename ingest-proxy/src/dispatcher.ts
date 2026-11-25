@@ -69,7 +69,6 @@ const PER_TENANT_SECRET_SSM_PREFIX = '/folklore';
 const ROUTING_TABLE = process.env['WEBHOOK_ROUTING_TABLE'] ?? '';
 const ZOOM_SOURCE = 'zoom';
 const ZOOM_URL_VALIDATION_EVENT = 'endpoint.url_validation';
-const MICROSOFT365_SOURCE = 'microsoft365';
 const INTERCOM_SOURCE = 'intercom';
 const INTERCOM_LIVENESS_ROUTE = 'HEAD /ingest/intercom';
 const JIRA_SOURCE = 'jira';
@@ -638,19 +637,6 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       parsed = JSON.parse(body);
     } catch {
       parsed = null;
-    }
-
-    // Microsoft365 subscription validation: echo validationToken as text/plain (unsigned).
-    // Must happen before the EXTRACTORS check since microsoft365 has no extractor.
-    if (source === MICROSOFT365_SOURCE) {
-      const validationToken = event.queryStringParameters?.['validationToken'];
-      if (typeof validationToken === 'string' && validationToken.length > 0) {
-        return {
-          statusCode: 200,
-          headers: { 'content-type': 'text/plain' },
-          body: validationToken,
-        };
-      }
     }
 
     if (!tenantId && !hasPayloadTenantKey(source)) {

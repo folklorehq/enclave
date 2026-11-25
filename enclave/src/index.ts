@@ -229,9 +229,6 @@ import {
 import { createOAuthRuntime, createPinnedControlPlaneFetch } from './pull/oauth-composition.js';
 import { evictMintedTokensForOrg, resetMintedTokenCache } from './pull/pull-runner.js';
 import { ManifestProviderSecretReader } from './pull/ManifestProviderSecretReader.js';
-import { GitHubCodebaseConnectionResolver } from './codebase/GitHubCodebaseConnectionResolver.js';
-import { CodebaseSelectionStore } from './codebase/CodebaseSelectionStore.js';
-import { EnclaveCodebaseSettingsAdapter } from './codebase/EnclaveCodebaseSettingsAdapter.js';
 import { EnclaveResourceScopeAdapter } from './resource-scope/EnclaveResourceScopeAdapter.js';
 import { EnclaveSourceResourceLister } from './resource-scope/EnclaveSourceResourceLister.js';
 import type { EnclaveOAuthIngress } from './pull/EnclaveOAuthIngress.js';
@@ -1307,41 +1304,6 @@ const mcpCalls = buildMcpCallTelemetry({ telemetry: opsTelemetry, logger });
 // consults so a self-stop can't land on a live session.
 const activityMonitor = new ActivityMonitor({ quietWindowMs: ACTIVITY_QUIET_WINDOW_MS });
 
-async function resolveInteractiveCodebaseConnection(orgId: string) {
-  if (!controlPlaneIdentity || !controlPlaneFetch || !mintGitHubInstallationToken) {
-    throw new Error('codebase_selection_unavailable');
-  }
-  const tenant = resolveTenant(orgId);
-  const scope = tenant.processedOutputsScope();
-  const resolver = new GitHubCodebaseConnectionResolver({
-    controlPlaneUrl: controlPlaneIdentity.origin,
-    runtimeDeploymentId: DEPLOYMENT_ID,
-    tenantDeploymentId: scope.deploymentId,
-    agentToken: process.env['AGENT_TOKEN'] ?? '',
-    orgId,
-    crypto: tenant.crypto,
-    fetchImpl: controlPlaneFetch,
-    selectionStore: new CodebaseSelectionStore({
-      s3,
-      bucket: scope.bucket,
-      crypto: scope.crypto,
-    }),
-  });
-  const resolved = await resolver.resolveInteractive();
-  if (resolved.outcome !== 'ready') throw new Error(resolved.reason);
-  return { connection: resolved.connection, scope };
-}
-
-function createCodebaseSettingsPort() {
-  if (!mintGitHubInstallationToken) return undefined;
-  return new EnclaveCodebaseSettingsAdapter({
-    s3,
-    resolveTenant,
-    resolveConnection: resolveInteractiveCodebaseConnection,
-    mintGitHubInstallationToken,
-  });
-}
-
 function createResourceScopePort() {
   const connectors =
     controlPlaneIdentity && controlPlaneFetch
@@ -1414,7 +1376,6 @@ try {
   const askUsageDays = new AnswerUsageDayCounts({ logger: askUsageLogger });
   const askUsageMeter = (sink: AskUsageSinkPort) =>
     new AskUsageMeter({ sink, logger: askUsageLogger, days: askUsageDays });
-  const codebaseSettingsPort = createCodebaseSettingsPort();
   const apiOptions: CreateContainerOptions = {
     pullAgentAccessProjection: (orgId) =>
       pullAgentAccessProjection?.(orgId) ?? Promise.resolve('skipped'),
@@ -1455,7 +1416,6 @@ try {
         fenceSignal: (orgId) => tenantRequests.fenceSignal(orgId),
       });
     },
-    ...(codebaseSettingsPort ? { codebaseSettings: codebaseSettingsPort } : {}),
     resourceScope: createResourceScopePort(),
     retrieverFactory: buildRetriever,
     factExcerptReaderFactory: buildRetriever,

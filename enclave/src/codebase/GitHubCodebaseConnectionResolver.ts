@@ -1,13 +1,9 @@
 import type { EnclaveCrypto } from '../crypto/esdk.js';
 import type {
-  DecryptedSourceConnection,
   RawSourceConnection,
   SourceConnectionResolution,
 } from '../pull/source-connections-client.js';
-import {
-  decryptSourceConnection,
-  fetchSourceConnections,
-} from '../pull/source-connections-client.js';
+import { fetchSourceConnections } from '../pull/source-connections-client.js';
 import {
   DEFAULT_CODEBASE_SELECTION,
   isCodebaseSelectionMissing,
@@ -15,12 +11,6 @@ import {
 } from './CodebaseSelectionStore.js';
 
 export type CodebaseConnectionResolution =
-  | {
-      outcome: 'ready';
-      connection: DecryptedSourceConnection;
-      selection: CodebaseSelection;
-      capabilityGeneration: string;
-    }
   | {
       outcome: 'not_ready';
       reason:
@@ -40,14 +30,6 @@ export type CodebaseConsentResolution =
       deploymentId: string;
     }
   | Extract<CodebaseConnectionResolution, { outcome: 'not_ready' | 'not_processed' }>;
-
-type ParentResolution =
-  | {
-      outcome: 'connected';
-      connection: DecryptedSourceConnection;
-      capabilityGeneration?: string;
-    }
-  | ParentRefusal;
 
 type ParentRefusal =
   | {
@@ -82,14 +64,6 @@ interface CodebaseSelectionStore {
 /** Resolves Codebase only through the matching GitHub parent observed by the enclave. */
 export class GitHubCodebaseConnectionResolver {
   constructor(private readonly deps: GitHubCodebaseConnectionResolverDeps) {}
-
-  async resolveScheduled(): Promise<CodebaseConnectionResolution> {
-    const parent = await this.resolveParent(true);
-    if (parent.outcome !== 'connected') return this.refusal(parent);
-    const readiness = await this.readReadiness(parent.capabilityGeneration);
-    if (readiness.outcome !== 'ready') return readiness;
-    return { ...readiness, connection: parent.connection };
-  }
 
   async resolveGraphConsent(): Promise<CodebaseConsentResolution> {
     const located = await this.locateParent(true);
@@ -142,41 +116,6 @@ export class GitHubCodebaseConnectionResolver {
       if (isCodebaseSelectionMissing(error)) return DEFAULT_CODEBASE_SELECTION;
       throw error;
     }
-  }
-
-  /** Interactive repository management requires a GitHub parent, never an enabled Codebase child. */
-  async resolveInteractive(): Promise<
-    | { outcome: 'ready'; connection: DecryptedSourceConnection }
-    | { outcome: 'not_ready'; reason: 'codebase_parent_missing' }
-    | Extract<SourceConnectionResolution, { outcome: 'not_processed' }>
-  > {
-    const parent = await this.resolveParent(false);
-    if (parent.outcome === 'connected') return { outcome: 'ready', connection: parent.connection };
-    if (parent.outcome === 'not_ready')
-      return { outcome: 'not_ready', reason: 'codebase_parent_missing' };
-    return parent;
-  }
-
-  private async resolveParent(requireCapability: boolean): Promise<ParentResolution> {
-    const located = await this.locateParent(requireCapability);
-    if (located.outcome !== 'located') return located;
-    const decrypted = await decryptSourceConnection(
-      located.parent,
-      this.deps.tenantDeploymentId,
-      this.deps.orgId,
-      this.deps.crypto,
-    );
-    if (decrypted.outcome !== 'connected') {
-      return decrypted.outcome === 'missing'
-        ? { outcome: 'not_ready', reason: 'github_parent_missing' }
-        : decrypted;
-    }
-    return {
-      ...decrypted,
-      ...(located.capabilityGeneration
-        ? { capabilityGeneration: located.capabilityGeneration }
-        : {}),
-    };
   }
 
   private async locateParent(requireCapability: boolean): Promise<LocatedParent> {

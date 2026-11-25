@@ -15,7 +15,6 @@ import {
   decodeHex,
   matchesDigest,
   verifySignature,
-  verifySvixSignature,
   withinReplayWindow,
 } from './signature-verifier.js';
 
@@ -89,8 +88,6 @@ export function verifyByDescriptor(
       return verifyHmacBody(verifier, headers, body, secret);
     case 'hmac_timestamped':
       return verifyHmacTimestamped(verifier, headers, body, secret);
-    case 'svix':
-      return verifySvixSignature(headers, body, secret);
     case 'builtin':
       return false;
   }

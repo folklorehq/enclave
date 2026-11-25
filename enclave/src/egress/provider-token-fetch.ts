@@ -90,9 +90,6 @@ const SUPPORTED_PROVIDER_KINDS = new Set([
   'notion',
   'intercom',
   'jira',
-  'google_drive',
-  'gmail',
-  'google_calendar',
 ]);
 const LINEAR_IDENTITY_QUERY =
   'query FolkloreOAuthIdentity { viewer { id guest active organization { id } } }';
