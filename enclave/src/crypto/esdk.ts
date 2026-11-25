@@ -287,24 +287,6 @@ export class EnclaveCrypto {
     });
   }
 
-  decryptWikiArticle(ciphertext: Buffer, expected: WikiArticleRef): Promise<Buffer> {
-    return this.open(ciphertext, WIKI_ARTICLE_PURPOSE, {
-      orgId: expected.orgId,
-      themeId: expected.themeId,
-      audienceId: audienceKey(expected.audienceId),
-    });
-  }
-
-  encryptWikiBlock(plaintext: Buffer, ref: WikiBlockRef): Promise<Buffer> {
-    return this.seal(plaintext, {
-      orgId: ref.orgId,
-      themeId: ref.themeId,
-      audienceId: audienceKey(ref.audienceId),
-      blockType: ref.blockType,
-      purpose: WIKI_BLOCK_PURPOSE,
-    });
-  }
-
   decryptWikiBlock(ciphertext: Buffer, expected: WikiBlockRef): Promise<Buffer> {
     return this.open(ciphertext, WIKI_BLOCK_PURPOSE, {
       orgId: expected.orgId,

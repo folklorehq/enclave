@@ -2,7 +2,6 @@ import { createRequire } from 'node:module';
 import { decode } from 'cborg';
 
 const require = createRequire(import.meta.url);
-const STUB = process.env['NSM_STUB'] === '1';
 // Matches the NSM driver's NSM_REQUEST_MAX_SIZE; each field also carries its own cap below.
 export const REQUEST_MAX_BYTES = 0x1000;
 export const USER_DATA_MAX_BYTES = 512;
@@ -50,13 +49,6 @@ export function createNsmAttestationPort(ioctl: NsmIoctlPort): NsmAttestationPor
 
 export function getAttestationDoc(input: Uint8Array | NsmAttestationRequest): Buffer {
   const request = normalizeAttestationRequest(input);
-  encodeAttestationRequest(request);
-  if (STUB) {
-    return Buffer.concat([
-      Buffer.alloc(48),
-      request.publicKey === undefined ? Buffer.alloc(0) : Buffer.from(request.publicKey),
-    ]);
-  }
   const document = createNsmAttestationPort(nativeIoctlPort).attest(request);
   if (document instanceof Promise) throw new Error('nsm_unavailable');
   return Buffer.from(document);

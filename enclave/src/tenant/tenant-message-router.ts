@@ -92,7 +92,7 @@ const UNAVAILABLE_RESOURCE_SCOPE: NonNullable<PullRunnerDeps['resourceScope']> =
   transitionBackfill: () => Promise.reject(new ResourceScopeUnavailableError()),
 };
 
-const PRE_NORMALIZED_MESSAGE_TYPE = 'pull-normalized';
+const JIRA_OAUTH_ENVELOPE_TYPE = 'jira-oauth-envelope';
 const MESSAGE_TYPE_UNSUPPORTED = 'message_type_unsupported';
 const GITHUB_SOURCE = 'github';
 const GITHUB_BINDING_MISMATCH = 'github_installation_binding_mismatch';
@@ -204,7 +204,8 @@ export class TenantMessageRouter {
       };
     }
 
-    if (raw.type === PRE_NORMALIZED_MESSAGE_TYPE) {
+    // The ingest proxy sends no type or the Jira OAuth envelope; anything else is refused before decrypt.
+    if (raw.type !== undefined && raw.type !== JIRA_OAUTH_ENVELOPE_TYPE) {
       throw new TenantMessageRouteError('pipeline', MESSAGE_TYPE_UNSUPPORTED);
     }
     const payload: EncryptedPayload = {
@@ -238,7 +239,7 @@ export class TenantMessageRouter {
         };
       }
     }
-    if (raw.type === 'jira-oauth-envelope') {
+    if (raw.type === JIRA_OAUTH_ENVELOPE_TYPE) {
       try {
         const result = await this.routeJiraOAuthEnvelope(raw, context, plaintext);
         return { context, ...result, shouldAcknowledge: true };

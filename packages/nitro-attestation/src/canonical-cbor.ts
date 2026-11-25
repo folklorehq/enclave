@@ -527,20 +527,6 @@ export function hashRuntimeAttestationKeyBundle(input: RuntimeAttestationKeyBund
   return createHash('sha256').update(encodeRuntimeAttestationKeyBundle(input)).digest('hex');
 }
 
-export function deriveAttestationUserData(manifest: BootManifest): BootManifestUserData {
-  return bootManifestUserDataSchema.parse({
-    version: 1,
-    manifestHash: hashBootManifest(manifest),
-    configurationGeneration: manifest.configurationGeneration,
-    orgId: manifest.orgId,
-    deploymentId: manifest.deploymentId,
-    sourceSha: manifest.sourceSha,
-    eifDigest: manifest.eifDigest,
-    kmsKeyArn: manifest.kmsKeyArn,
-    storageKeyArn: manifest.storageKeyArn,
-  });
-}
-
 export function encodeAttestationUserData(
   input: BootManifestUserData,
   runtimeKeyBundleHash?: string,

@@ -1,32 +1,17 @@
 import {
   type NormalizedAssignmentManifestV1,
   type TenantAssignment,
-  type VersionedTenantAssignment,
   canonicalQueueUrlSchema,
   parseAssignmentManifestWire as parseContractAssignmentManifestWire,
   tenantBucketNames,
   tenantResourceName,
   tenantWebhookQueueName,
-  versionedTenantAssignmentSchema,
 } from '@folklore/contracts';
 import { isLowercaseRfcUuid } from '@folklore/utils';
 import { bareKmsKeyId } from '../sealing/kms-key-arn.js';
 
 // The assignment shape is defined once in the shared contracts so the control-plane producer and
 // this consumer cannot drift.
-
-/** Explicit bootstrap compatibility boundary for unsigned legacy assignment sources. */
-export function toInitialStorageKeyVersion(
-  assignment: TenantAssignment,
-  defaultDeploymentId = '',
-): VersionedTenantAssignment {
-  return versionedTenantAssignmentSchema.parse({
-    ...assignment,
-    deploymentId: assignment.deploymentId ?? (defaultDeploymentId || assignment.tenantId),
-    activeStorageKeyVersion: 1,
-    storageKeyHistory: [{ version: 1, storageKeyId: assignment.storageKeyId }],
-  });
-}
 
 const SQS_URL_PATTERN = /^https:\/\/sqs\.([^.]+)\.amazonaws\.com\/(\d{12})\/([^/]+)$/;
 

@@ -4,7 +4,6 @@ import type {
   NormalizedAssignmentManifestV1,
   RecoveryKeyBindingV1,
   SignedActivePolicyCarrierV1,
-  TenantAssignment,
   VersionedTenantAssignment,
 } from '@folklore/contracts';
 import type { TenantContext } from './tenant-context.js';
@@ -12,7 +11,6 @@ import { HnswStore } from '../hnsw/index.js';
 import type { ResidentIndexOffer, TenantIdentity } from './TenantContextFactory.js';
 import { TenantRegistry } from './tenant-registry.js';
 import type { QueueAssignment } from './QueueSetDrainer.js';
-import { toInitialStorageKeyVersion } from './tenant-assignments.js';
 import {
   TenantGenerationRegistry,
   type TenantGenerationEntry,
@@ -129,7 +127,6 @@ export class TenantAssignmentApplier {
   private readonly logger: Logger;
   private readonly onTornDown: OnTenantTornDown | undefined;
   private readonly teardownTimeoutMs: number;
-  private readonly defaultDeploymentId: string;
   private readonly onActivated: OnTenantActivated | undefined;
   private readonly onGenerationChanged: TenantEviction | undefined;
   private readonly onGenerationCommitted: OnTenantGenerationCommitted | undefined;
@@ -148,7 +145,8 @@ export class TenantAssignmentApplier {
     logger?: Logger,
     onTornDown?: OnTenantTornDown,
     teardownTimeoutMs: number = TENANT_TEARDOWN_TIMEOUT_MS,
-    defaultDeploymentId = '',
+    // The composition root still fills this positional slot; it carries nothing.
+    unusedSlot?: undefined,
     onActivated?: OnTenantActivated,
     onGenerationChanged?: TenantEviction,
     onGenerationCommitted?: OnTenantGenerationCommitted,
@@ -161,7 +159,6 @@ export class TenantAssignmentApplier {
       this.logger = logger;
       this.onTornDown = onTornDown;
       this.teardownTimeoutMs = teardownTimeoutMs;
-      this.defaultDeploymentId = defaultDeploymentId;
       this.onActivated = onActivated;
       this.onGenerationChanged = onGenerationChanged;
       this.onGenerationCommitted = onGenerationCommitted;
@@ -175,7 +172,6 @@ export class TenantAssignmentApplier {
     this.logger = registryOrOptions.logger;
     this.onTornDown = registryOrOptions.onTornDown;
     this.teardownTimeoutMs = TENANT_TEARDOWN_TIMEOUT_MS;
-    this.defaultDeploymentId = '';
     this.onActivated = registryOrOptions.onActivated;
     this.onGenerationChanged = registryOrOptions.onGenerationChanged;
     this.onGenerationCommitted = undefined;
@@ -600,14 +596,6 @@ export class TenantAssignmentApplier {
     }
     this.lastAcceptedDigest = manifest.digest;
     return { applied: true, generation: manifest.generation };
-  }
-
-  async apply(assignments: TenantAssignment[]): Promise<boolean> {
-    return this.applyVersioned(
-      assignments.map((assignment) =>
-        toInitialStorageKeyVersion(assignment, this.defaultDeploymentId),
-      ),
-    );
   }
 
   private async applyVersioned(
