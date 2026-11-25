@@ -3,11 +3,6 @@ import type { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import type { ConnectorWebhook } from '@folklore/contracts';
 import { declaredBodyTenantKey, selectValue, WEBHOOKS } from './edge-descriptor.js';
 
-interface TenantResolution {
-  orgId: string;
-  resolvedFrom: 'payload' | 'jwt' | 'dynamic';
-}
-
 export type ExtractorFn = (body: unknown, headers: Record<string, string>) => string | null;
 
 interface RoutingEntry {

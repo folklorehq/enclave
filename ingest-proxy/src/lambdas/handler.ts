@@ -1,6 +1,5 @@
 // ECIES: ephemeral X25519 + HKDF-SHA256 + AES-256-GCM. Both public keys bound
 // in HKDF info — must match decryptPayload() in enclave/src/ingest/receiver.ts.
-import { DynamoDBClient, GetItemCommand } from '@aws-sdk/client-dynamodb';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
 import {
@@ -10,100 +9,25 @@ import {
   createCipheriv,
   createHash,
   createPublicKey,
-  createHmac,
-  createVerify,
   randomBytes,
   timingSafeEqual,
 } from 'crypto';
 import type { APIGatewayProxyHandlerV2 } from 'aws-lambda';
-import {
-  canaryAuthorizationAad,
-  canaryAuthorizationSchema,
-  type CanaryAuthorization,
-} from '@folklore/contracts';
 import { jiraEncryptedWebhookEnvelopeSchema } from '@folklore/contracts/enclave';
-import { checkRateLimit } from '../rate-limiter.js';
 import { fetchDispatcherAuthSecret, computeDispatcherAuthHmac } from '../dispatcher-auth.js';
 import type { RoutingMode } from '../routing-allowlist.js';
 import { SQS_MAX_MESSAGE_BYTES } from '../encrypted-sqs-message-size.js';
 import { edgeLaneGroupId } from '../edge-lane.js';
-import { UUID_PATTERN } from '../uuid-pattern.js';
-import { normalizeHeaders, verifySignature } from '../signature-verifier.js';
+import { normalizeHeaders } from '../signature-verifier.js';
 
 const ssm = new SSMClient({});
 const sqs = new SQSClient({});
-const ddb = new DynamoDBClient({});
 
 const QUEUE_URL = process.env['QUEUE_URL']!;
 
-export const SIGNABLE_SOURCES = new Set([
-  'github',
-  'slack',
-  'linear',
-  'jira',
-  'intercom',
-  'notion',
-  'zoom',
-]);
-
-// SES inbound: mail arrives via SNS, not a provider HMAC. Authenticity rests on the AWS SNS
-// message signature; tenant routing rests on the unguessable per-tenant alias (SES receipt rule) plus
-// this global allowlist of Folklore-owned inbound topic ARNs (proves "our pipeline", not "tenant B").
-const EMAIL_SOURCE = 'email';
-const EMAIL_TOPIC_ARN_PARAM = '/folklore/email-inbound/sns-topic-arn';
-// A validly-signed SES notification proves "our pipeline" but not "this tenant": bind delivery to the
-// SNS-signed recipient alias `ingest+<token>@<domain>` and confirm token→tenant equals the URL path,
-// or fail closed — otherwise tenant A's mail POSTed to tenant B's path seals under B's key.
-const EMAIL_INBOUND_ALIAS_TABLE_ENV = 'EMAIL_INBOUND_ALIAS_TABLE';
-const EMAIL_INBOUND_DOMAIN_ENV = 'EMAIL_INBOUND_DOMAIN';
-const EMAIL_ALIAS_LOCAL_PREFIX = 'ingest+';
-// Bound the replay of a captured, still-validly-signed SES notification (the Timestamp is signed).
-const SNS_REPLAY_TOLERANCE_S = 900;
-const SNS_NOTIFICATION = 'Notification';
-const SNS_SUBSCRIPTION_CONFIRMATION = 'SubscriptionConfirmation';
-const SNS_UNSUBSCRIBE_CONFIRMATION = 'UnsubscribeConfirmation';
-// SNS signing certs and confirmation callbacks are only trusted from an AWS SNS host over https.
-const SNS_HOST = /^sns\.[a-z0-9-]+\.amazonaws\.com$/;
-const SNS_SIGNING_ALGORITHM: Record<string, string> = { '1': 'RSA-SHA1', '2': 'RSA-SHA256' };
-const SNS_SIGNING_KEYS: Record<string, readonly string[]> = {
-  [SNS_NOTIFICATION]: ['Message', 'MessageId', 'Subject', 'Timestamp', 'TopicArn', 'Type'],
-  [SNS_SUBSCRIPTION_CONFIRMATION]: [
-    'Message',
-    'MessageId',
-    'SubscribeURL',
-    'Timestamp',
-    'Token',
-    'TopicArn',
-    'Type',
-  ],
-  [SNS_UNSUBSCRIBE_CONFIRMATION]: [
-    'Message',
-    'MessageId',
-    'SubscribeURL',
-    'Timestamp',
-    'Token',
-    'TopicArn',
-    'Type',
-  ],
-};
-// Bounded + FIFO-evicted: the cache is keyed by URL and populated before the signature is verified,
-// so an unbounded map would let a burst of distinct (host-valid) cert URLs amplify memory/requests.
-const SNS_CERT_CACHE_MAX = 64;
-const snsCertCache = new Map<string, { pem: string; expiresAt: number }>();
-
-const GOOGLE_DRIVE_SOURCE = 'google_drive';
-const MICROSOFT365_SOURCE = 'microsoft365';
-// Drive push channels have no body signature; validity is the channel token we set at watch() time,
-// and the initial `sync` state is a handshake carrying no change (Google Drive push notifications).
-const DRIVE_SYNC_STATE = 'sync';
-const CANARY_AUTHORIZATION_HEADER = 'x-folklore-canary-authorization';
-const CANARY_AUTHORIZATION_PREFIX = 'ca1.';
-
 const CACHE_TTL_MS = 5 * 60 * 1000;
-const MS_PER_S = 1000;
 const X25519_PUBLIC_KEY_HEX = /^[0-9a-f]{64}$/i;
 const publicKeyCache = new Map<string, { key: Buffer; expiresAt: number }>();
-const hmacSecretCache = new Map<string, { secret: string | null; expiresAt: number }>();
 
 async function fetchPublicKey(tenantId: string): Promise<Buffer> {
   const cached = publicKeyCache.get(tenantId);
@@ -124,79 +48,6 @@ async function fetchPublicKey(tenantId: string): Promise<Buffer> {
   return key;
 }
 
-type SecretLookup =
-  | { status: 'found'; secret: string }
-  | { status: 'absent' }
-  | { status: 'error' };
-
-async function fetchSecretAt(name: string, cacheKey: string): Promise<SecretLookup> {
-  const cached = hmacSecretCache.get(cacheKey);
-  if (cached && Date.now() < cached.expiresAt) return resolveSecret(cached.secret);
-
-  let secret: string | null;
-  try {
-    const result = await ssm.send(new GetParameterCommand({ Name: name, WithDecryption: true }));
-    secret = result.Parameter?.Value ?? null;
-  } catch (err) {
-    if (!isParameterNotFound(err)) return { status: 'error' };
-    secret = null;
-  }
-
-  hmacSecretCache.set(cacheKey, { secret, expiresAt: Date.now() + CACHE_TTL_MS });
-  return resolveSecret(secret);
-}
-
-function fetchHmacSecret(tenantId: string, source: string): Promise<SecretLookup> {
-  return fetchSecretAt(`/folklore/${tenantId}/webhook-secrets/${source}`, `${tenantId}/${source}`);
-}
-
-function resolveSecret(secret: string | null): SecretLookup {
-  return secret === null ? { status: 'absent' } : { status: 'found', secret };
-}
-
-function isParameterNotFound(err: unknown): boolean {
-  return err instanceof Error && err.name === 'ParameterNotFound';
-}
-
-const ZOOM_URL_VALIDATION_EVENT = 'endpoint.url_validation';
-
-interface ChallengeResponse {
-  statusCode: number;
-  headers: Record<string, string>;
-  body: string;
-}
-
-function zoomUrlValidation(source: string, body: string, secret: string): ChallengeResponse | null {
-  if (source !== 'zoom') return null;
-  let parsed: { event?: string; payload?: { plainToken?: unknown } };
-  try {
-    parsed = JSON.parse(body);
-  } catch {
-    return null;
-  }
-  if (parsed.event !== ZOOM_URL_VALIDATION_EVENT) return null;
-  const plainToken = parsed.payload?.plainToken;
-  if (typeof plainToken !== 'string') return null;
-  const encryptedToken = createHmac('sha256', secret).update(plainToken).digest('hex');
-  return {
-    statusCode: 200,
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ plainToken, encryptedToken }),
-  };
-}
-
-// Graph confirms a subscription by GET/POSTing ?validationToken=<opaque> and requires the raw token
-// echoed back as text/plain within 10s. It carries no clientState, so it precedes signature checks.
-function microsoft365ValidationEcho(
-  source: string,
-  query: Record<string, string | undefined> | undefined,
-): ChallengeResponse | null {
-  if (source !== MICROSOFT365_SOURCE) return null;
-  const token = query?.['validationToken'];
-  if (typeof token !== 'string' || token.length === 0) return null;
-  return { statusCode: 200, headers: { 'content-type': 'text/plain' }, body: token };
-}
-
 export function deriveAesKey(
   sharedSecret: Buffer,
   ephemeralPubBytes: Buffer,
@@ -208,23 +59,6 @@ export function deriveAesKey(
     recipientPubBytes,
   ]);
   return Buffer.from(hkdfSync('sha256', sharedSecret, Buffer.alloc(0), info, 32));
-}
-
-// Notion's subscription handshake POSTs a bare `{ verification_token }` with no signature — the
-// token IS the future signing secret, so nothing can sign this first contact. Distinguish it from a
-// signed event so we can 2xx it instead of failing the signature check and rejecting the endpoint.
-function isNotionVerificationHandshake(
-  source: string,
-  headers: Record<string, string | undefined>,
-  body: string,
-): boolean {
-  if (source !== 'notion' || headers['x-notion-signature']) return false;
-  try {
-    const parsed = JSON.parse(body) as { verification_token?: unknown; type?: unknown };
-    return typeof parsed.verification_token === 'string' && parsed.type === undefined;
-  } catch {
-    return false;
-  }
 }
 
 export function extractEventType(
@@ -268,18 +102,6 @@ export function extractEventType(
       return headers['x-intercom-topic'] ?? '';
     case 'meeting':
       return headers['x-meeting-event'] ?? '';
-    case GOOGLE_DRIVE_SOURCE:
-      return headers['x-goog-resource-state'] ?? '';
-    case MICROSOFT365_SOURCE: {
-      try {
-        return (
-          (JSON.parse(body) as { value?: Array<{ changeType?: string }> }).value?.[0]?.changeType ??
-          ''
-        );
-      } catch {
-        return '';
-      }
-    }
     case 'zoom': {
       try {
         return (JSON.parse(body) as { event?: string }).event ?? '';
@@ -290,37 +112,6 @@ export function extractEventType(
     default:
       return '';
   }
-}
-
-// A Drive ping ships its change signal in headers with an empty body; rebuild a content-free
-// payload (opaque resource/channel ids only) so the enclave normalizer can record the signal.
-function driveChangePingBody(headers: Record<string, string | undefined>): string {
-  return JSON.stringify({
-    resourceState: headers['x-goog-resource-state'] ?? '',
-    resourceId: headers['x-goog-resource-id'],
-    channelId: headers['x-goog-channel-id'],
-    messageNumber: headers['x-goog-message-number'],
-    resourceUri: headers['x-goog-resource-uri'],
-  });
-}
-
-// A Graph notification body carries the clientState (our webhook secret) — strip it and re-emit only
-// content-free routing metadata (subscription/resource ids + changeType) so no secret reaches SQS/enclave.
-function m365ChangePingBody(body: string): string {
-  let parsed: {
-    value?: Array<{ subscriptionId?: unknown; resource?: unknown; changeType?: unknown }>;
-  };
-  try {
-    parsed = JSON.parse(body);
-  } catch {
-    return JSON.stringify({ notifications: [] });
-  }
-  const notifications = (parsed.value ?? []).map((n) => ({
-    subscriptionId: typeof n.subscriptionId === 'string' ? n.subscriptionId : undefined,
-    resource: typeof n.resource === 'string' ? n.resource : undefined,
-    changeType: typeof n.changeType === 'string' ? n.changeType : undefined,
-  }));
-  return JSON.stringify({ notifications });
 }
 
 function providerDeliveryId(
@@ -347,42 +138,6 @@ function providerDeliveryId(
         return null;
       }
     }
-    case EMAIL_SOURCE: {
-      // The RFC Message-ID is the dedup key; the SES message id is the fallback.
-      try {
-        const mail = (
-          JSON.parse(body) as {
-            mail?: { commonHeaders?: { messageId?: unknown }; messageId?: unknown };
-          }
-        ).mail;
-        const rfc = mail?.commonHeaders?.messageId;
-        if (typeof rfc === 'string') return rfc;
-        return typeof mail?.messageId === 'string' ? mail.messageId : null;
-      } catch {
-        return null;
-      }
-    }
-    case GOOGLE_DRIVE_SOURCE: {
-      // Each Drive push is a unique (channel, message-number) pair — the dedup key across retries.
-      const channelId = headers['x-goog-channel-id'];
-      const messageNumber = headers['x-goog-message-number'];
-      return channelId && messageNumber ? `${channelId}:${messageNumber}` : null;
-    }
-    case MICROSOFT365_SOURCE: {
-      // (subscription, resource) identifies the changed drive item — the dedup key across Graph retries.
-      try {
-        const first = (
-          JSON.parse(body) as {
-            value?: Array<{ subscriptionId?: unknown; resource?: unknown }>;
-          }
-        ).value?.[0];
-        const sub = typeof first?.subscriptionId === 'string' ? first.subscriptionId : null;
-        const resource = typeof first?.resource === 'string' ? first.resource : null;
-        return sub && resource ? `${sub}:${resource}` : null;
-      } catch {
-        return null;
-      }
-    }
     case 'zoom': {
       // Zoom dedups on the meeting uuid.
       try {
@@ -398,63 +153,6 @@ function providerDeliveryId(
   }
 }
 
-type CommissioningMetadata =
-  | { status: 'absent' }
-  | { status: 'invalid' }
-  | { status: 'valid'; canaryRunId: string; requestId: string; bodySha256: string };
-
-function commissioningMetadata(source: string, body: string): CommissioningMetadata {
-  if (source !== 'github') return { status: 'absent' };
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(body) as Record<string, unknown>;
-  } catch {
-    return { status: 'absent' };
-  }
-  if (!Object.hasOwn(parsed, '_folklore_canary')) return { status: 'absent' };
-  const candidate = parsed['_folklore_canary'];
-  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
-    return { status: 'invalid' };
-  }
-  const values = candidate as Record<string, unknown>;
-  const canaryRunId = values['run_id'];
-  const requestId = values['request_id'];
-  if (
-    typeof canaryRunId !== 'string' ||
-    !UUID_PATTERN.test(canaryRunId) ||
-    typeof requestId !== 'string' ||
-    !/^[A-Za-z0-9._:-]{1,128}$/.test(requestId)
-  ) {
-    return { status: 'invalid' };
-  }
-  return {
-    status: 'valid',
-    canaryRunId,
-    requestId,
-    bodySha256: createHash('sha256').update(body, 'utf8').digest('hex'),
-  };
-}
-
-type CanaryAuthorizationHeader =
-  | { status: 'absent' }
-  | { status: 'invalid' }
-  | { status: 'valid'; authorization: CanaryAuthorization };
-
-function parseCanaryAuthorizationHeader(value: string | undefined): CanaryAuthorizationHeader {
-  if (value === undefined) return { status: 'absent' };
-  if (!value.startsWith(CANARY_AUTHORIZATION_PREFIX)) return { status: 'invalid' };
-  try {
-    const parsed = canaryAuthorizationSchema.safeParse(
-      JSON.parse(
-        Buffer.from(value.slice(CANARY_AUTHORIZATION_PREFIX.length), 'base64url').toString('utf8'),
-      ),
-    );
-    return parsed.success ? { status: 'valid', authorization: parsed.data } : { status: 'invalid' };
-  } catch {
-    return { status: 'invalid' };
-  }
-}
-
 // Key dedup on the delivery, not the per-call ECIES ciphertext, so FIFO drops provider retries.
 function deduplicationId(
   tenantId: string,
@@ -467,219 +165,6 @@ function deduplicationId(
   return createHash('sha256').update(key).digest('hex');
 }
 
-interface SnsEnvelope {
-  Type?: string;
-  MessageId?: string;
-  TopicArn?: string;
-  Subject?: string;
-  Message?: string;
-  Timestamp?: string;
-  Token?: string;
-  SubscribeURL?: string;
-  SignatureVersion?: string;
-  Signature?: string;
-  SigningCertURL?: string;
-}
-
-type ChallengeOrStatus = { statusCode: number; headers?: Record<string, string>; body?: string };
-
-function parseSnsEnvelope(body: string): SnsEnvelope | null {
-  try {
-    const parsed = JSON.parse(body) as SnsEnvelope;
-    return typeof parsed?.Type === 'string' ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-function snsHost(raw: string | undefined): URL | null {
-  if (!raw) return null;
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    return null;
-  }
-  return url.protocol === 'https:' && SNS_HOST.test(url.hostname) ? url : null;
-}
-
-function snsStringToSign(msg: SnsEnvelope): string | null {
-  const keys = SNS_SIGNING_KEYS[msg.Type ?? ''];
-  if (!keys) return null;
-  let out = '';
-  for (const key of keys) {
-    const value = (msg as Record<string, unknown>)[key];
-    // `Subject` is signed only when present; every other listed field is always included.
-    if (value === undefined || value === null) continue;
-    out += `${key}\n${String(value)}\n`;
-  }
-  return out;
-}
-
-async function fetchSigningCert(url: string): Promise<string | null> {
-  if (!snsHost(url)) return null;
-  const cached = snsCertCache.get(url);
-  if (cached && Date.now() < cached.expiresAt) return cached.pem;
-  const res = await fetch(url);
-  if (!res.ok) return null;
-  const pem = await res.text();
-  if (snsCertCache.size >= SNS_CERT_CACHE_MAX && !snsCertCache.has(url)) {
-    const oldest = snsCertCache.keys().next().value;
-    if (oldest !== undefined) snsCertCache.delete(oldest);
-  }
-  snsCertCache.set(url, { pem, expiresAt: Date.now() + CACHE_TTL_MS });
-  return pem;
-}
-
-async function verifySnsSignature(msg: SnsEnvelope): Promise<boolean> {
-  const algorithm = SNS_SIGNING_ALGORITHM[msg.SignatureVersion ?? ''];
-  const stringToSign = snsStringToSign(msg);
-  if (!algorithm || !stringToSign || !msg.Signature || !msg.SigningCertURL) return false;
-  const pem = await fetchSigningCert(msg.SigningCertURL);
-  if (!pem) return false;
-  try {
-    return createVerify(algorithm)
-      .update(stringToSign, 'utf8')
-      .verify(pem, msg.Signature, 'base64');
-  } catch {
-    return false;
-  }
-}
-
-function topicAllowed(arn: string | undefined, allowlist: string): boolean {
-  if (!arn) return false;
-  return allowlist
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter(Boolean)
-    .includes(arn);
-}
-
-async function confirmSnsSubscription(msg: SnsEnvelope): Promise<ChallengeOrStatus> {
-  if (!snsHost(msg.SubscribeURL)) return { statusCode: 400 };
-  const res = await fetch(msg.SubscribeURL!);
-  return { statusCode: res.ok ? 200 : 502 };
-}
-
-function emailEventType(message: string): string {
-  try {
-    return (JSON.parse(message) as { notificationType?: string }).notificationType ?? '';
-  } catch {
-    return '';
-  }
-}
-
-// Mirrors parseAliasToken() in infra/src/email-inbound.ts — both are the tenant-routing gate, so they
-// must agree. Rejects foreign domains and empty tokens; never logs the recipient or token.
-function parseAliasToken(recipient: string, inboundDomain: string): string | null {
-  const at = recipient.indexOf('@');
-  if (at === -1) return null;
-  const local = recipient.slice(0, at).toLowerCase();
-  const domain = recipient.slice(at + 1).toLowerCase();
-  if (domain !== inboundDomain.toLowerCase()) return null;
-  if (!local.startsWith(EMAIL_ALIAS_LOCAL_PREFIX)) return null;
-  const token = local.slice(EMAIL_ALIAS_LOCAL_PREFIX.length).trim();
-  return token.length > 0 ? token : null;
-}
-
-// The SNS-signed `Message` carries `receipt.recipients` (signature-covered — unlike the spoofable
-// `mail.destination`); the first alias matching our inbound domain yields the routing token.
-function aliasTokenFromNotification(notification: string, inboundDomain: string): string | null {
-  let parsed: { receipt?: { recipients?: unknown } };
-  try {
-    parsed = JSON.parse(notification);
-  } catch {
-    return null;
-  }
-  const recipients = parsed.receipt?.recipients;
-  if (!Array.isArray(recipients)) return null;
-  for (const recipient of recipients) {
-    if (typeof recipient !== 'string') continue;
-    const token = parseAliasToken(recipient, inboundDomain);
-    if (token) return token;
-  }
-  return null;
-}
-
-type AliasBinding = { status: 'match' } | { status: 'reject' } | { status: 'error' };
-
-async function resolveAliasTenant(table: string, token: string): Promise<string | null> {
-  const out = await ddb.send(
-    new GetItemCommand({
-      TableName: table,
-      Key: { token: { S: token } },
-      ProjectionExpression: 'tenantId',
-    }),
-  );
-  return out.Item?.['tenantId']?.S ?? null;
-}
-
-// Cryptographic tenant binding: resolve the SNS-signed recipient alias to a tenant and
-// require it to equal the URL-path tenant. Missing config, foreign/empty token, or an unknown alias
-// fail closed (reject → 401); only a transient DynamoDB error is retryable (error → 503).
-async function bindRecipientAlias(tenantId: string, notification: string): Promise<AliasBinding> {
-  const table = process.env[EMAIL_INBOUND_ALIAS_TABLE_ENV];
-  const inboundDomain = process.env[EMAIL_INBOUND_DOMAIN_ENV];
-  if (!table || !inboundDomain) return { status: 'reject' };
-  const token = aliasTokenFromNotification(notification, inboundDomain);
-  if (!token) return { status: 'reject' };
-  let resolved: string | null;
-  try {
-    resolved = await resolveAliasTenant(table, token);
-  } catch {
-    return { status: 'error' };
-  }
-  if (!resolved) return { status: 'reject' };
-  return resolved === tenantId ? { status: 'match' } : { status: 'reject' };
-}
-
-// Reject a captured notification whose signed Timestamp is missing, unparseable, or outside the
-// replay window (mirrors the Slack/Zoom/Svix freshness gate; the Timestamp is SNS-signature-covered).
-function snsTimestampFresh(ts: string | undefined, toleranceS: number): boolean {
-  if (!ts) return false;
-  const parsed = Date.parse(ts);
-  return !Number.isNaN(parsed) && Math.abs(Date.now() - parsed) <= toleranceS * MS_PER_S;
-}
-
-// SES inbound: authenticate the SNS delivery (signature + Folklore-owned topic), then seal only the
-// SES notification (the SNS envelope is transport). No email body reaches a log, error, or SQS in
-// plaintext — it is ECIES-sealed exactly like every other connector.
-async function handleEmailInbound(tenantId: string, body: string): Promise<ChallengeOrStatus> {
-  const msg = parseSnsEnvelope(body);
-  if (!msg) return { statusCode: 400 };
-
-  const allowlist = await fetchSecretAt(EMAIL_TOPIC_ARN_PARAM, EMAIL_TOPIC_ARN_PARAM);
-  if (allowlist.status === 'error') return { statusCode: 503 };
-  if (allowlist.status === 'absent') return { statusCode: 401 };
-
-  if (!(await verifySnsSignature(msg))) return { statusCode: 401 };
-  if (!topicAllowed(msg.TopicArn, allowlist.secret)) return { statusCode: 401 };
-
-  if (msg.Type === SNS_SUBSCRIPTION_CONFIRMATION) return confirmSnsSubscription(msg);
-  if (msg.Type !== SNS_NOTIFICATION) return { statusCode: 200 };
-
-  if (!snsTimestampFresh(msg.Timestamp, SNS_REPLAY_TOLERANCE_S)) return { statusCode: 401 };
-
-  const notification = msg.Message ?? '';
-
-  // Bind the delivery to the SNS-signed recipient alias BEFORE sealing — a valid signature + allowed
-  // topic is not enough; the resolved tenant must equal the URL path or we fail closed.
-  const binding = await bindRecipientAlias(tenantId, notification);
-  if (binding.status === 'error') return { statusCode: 503 };
-  if (binding.status !== 'match') return { statusCode: 401 };
-
-  if (!(await checkRateLimit(tenantId, EMAIL_SOURCE))) return { statusCode: 429 };
-
-  await sealAndEnqueue({
-    tenantId,
-    source: EMAIL_SOURCE,
-    eventType: emailEventType(notification),
-    payloadBody: notification,
-    dedupId: deduplicationId(tenantId, EMAIL_SOURCE, {}, notification),
-  });
-  return { statusCode: 200 };
-}
-
 async function sealAndEnqueue(params: {
   tenantId: string;
   source: string;
@@ -687,9 +172,6 @@ async function sealAndEnqueue(params: {
   payloadBody: string;
   dedupId: string;
   messageType?: 'jira-oauth-envelope';
-  canaryRunId?: string;
-  requestId?: string;
-  canaryAuthorization?: CanaryAuthorization;
 }): Promise<void> {
   const recipientPubBytes = await fetchPublicKey(params.tenantId);
   const recipientPub = createPublicKey({
@@ -707,18 +189,15 @@ async function sealAndEnqueue(params: {
 
   const nonce = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', aesKey, nonce);
-  const aadFields: Record<string, unknown> = {
+  const aadFields = {
     version: 2,
     tenant_id: params.tenantId,
     source: params.source,
     type: params.messageType ?? null,
     event_type: params.eventType,
-    canary_run_id: params.canaryRunId ?? null,
-    request_id: params.requestId ?? null,
+    canary_run_id: null,
+    request_id: null,
   };
-  if (params.canaryAuthorization) {
-    aadFields['canary_authorization'] = canaryAuthorizationAad(params.canaryAuthorization);
-  }
   const aad = Buffer.from(JSON.stringify(aadFields), 'utf8');
   cipher.setAAD(aad);
   const encrypted = Buffer.concat([cipher.update(params.payloadBody, 'utf8'), cipher.final()]);
@@ -730,10 +209,6 @@ async function sealAndEnqueue(params: {
     source: params.source,
     ...(params.messageType ? { type: params.messageType } : {}),
     eventType: params.eventType,
-    ...(params.canaryRunId && params.requestId
-      ? { canary_run_id: params.canaryRunId, request_id: params.requestId }
-      : {}),
-    ...(params.canaryAuthorization ? { canary_authorization: params.canaryAuthorization } : {}),
     ephemeralPublicKey: ephemeralPubBytes.toString('hex'),
     nonce: nonce.toString('hex'),
     ciphertext: ciphertextWithTag.toString('hex'),
@@ -823,12 +298,7 @@ export async function handleDispatcherInvoke(
     payloadBody = JSON.stringify(parsedEnvelope.data);
     messageType = 'jira-oauth-envelope';
   } else {
-    payloadBody =
-      event.source === GOOGLE_DRIVE_SOURCE
-        ? driveChangePingBody(headers)
-        : event.source === MICROSOFT365_SOURCE
-          ? m365ChangePingBody(event.body)
-          : event.body;
+    payloadBody = event.body;
   }
 
   const dedupId = event.deliveryId
@@ -850,123 +320,9 @@ export async function handleDispatcherInvoke(
 }
 
 export const handler: APIGatewayProxyHandlerV2 = async (event) => {
-  if (!event.pathParameters) {
-    const dispatchEvent = event as unknown as DispatcherEvent;
-    if (dispatchEvent.source && dispatchEvent.tenantId && dispatchEvent.body) {
-      return handleDispatcherInvoke(dispatchEvent);
-    }
-    return { statusCode: 400 };
+  const dispatchEvent = event as unknown as DispatcherEvent;
+  if (dispatchEvent.source && dispatchEvent.tenantId && dispatchEvent.body) {
+    return handleDispatcherInvoke(dispatchEvent);
   }
-  const tenantId = event.pathParameters['tenant_id'];
-  const source = event.pathParameters['source'];
-  if (!tenantId || !source) return { statusCode: 400 };
-  if (!SIGNABLE_SOURCES.has(source)) return { statusCode: 400 };
-  return handleUrlRouted(event, tenantId, source);
+  return { statusCode: 400 };
 };
-
-async function handleUrlRouted(
-  event: Parameters<APIGatewayProxyHandlerV2>[0],
-  tenantId: string,
-  source: string,
-): Promise<ChallengeOrStatus> {
-  const body = event.body ?? '';
-  const headers = normalizeHeaders(event.headers);
-
-  // SES inbound is verified by AWS SNS signature, not a provider HMAC — its own path.
-  if (source === EMAIL_SOURCE) return handleEmailInbound(tenantId, body);
-
-  // ACK Notion's unsigned subscription handshake (it carries only the verification_token, which the
-  // admin registers as the webhook secret) without treating it as an event or forwarding it to SQS.
-  if (isNotionVerificationHandshake(source, event.headers, body)) return { statusCode: 200 };
-
-  // Graph subscription validation: echo the opaque validationToken as text/plain (no clientState
-  // yet, so it precedes the signature gate — the token echo carries no secret and admits nothing).
-  const graphValidation = microsoft365ValidationEcho(source, event.queryStringParameters);
-  if (graphValidation) return graphValidation;
-
-  // Fail closed: a supported source is admitted only when a provisioned secret
-  // verifies the signature. An absent secret or a bad signature is a 401
-  // (forged-event injection guard); a transient SSM error is a 503 so the
-  // provider retries rather than the webhook being dropped (durability).
-  const lookup = await fetchHmacSecret(tenantId, source);
-  if (lookup.status === 'error') return { statusCode: 503 };
-  if (lookup.status === 'absent') return { statusCode: 401 };
-  // Signature FIRST, even for Zoom's url_validation (which Zoom also signs): answering the CRC
-  // echo HMAC(secret, plainToken) before verifying turns it into a forgery oracle for the
-  // message signature HMAC(secret, `v0:{ts}:{body}`) over the same secret. Gating on a valid
-  // signature means only a secret-holder (genuine Zoom) can reach the echo.
-  if (!verifySignature(source, headers, body, lookup.secret)) {
-    return { statusCode: 401 };
-  }
-
-  const commissioning = commissioningMetadata(source, body);
-  const canaryAuthorization = parseCanaryAuthorizationHeader(headers[CANARY_AUTHORIZATION_HEADER]);
-  if (
-    commissioning.status === 'invalid' ||
-    (commissioning.status === 'valid' && headers['x-github-delivery'] !== commissioning.requestId)
-  ) {
-    return { statusCode: 400 };
-  }
-  if (canaryAuthorization.status === 'invalid') return { statusCode: 401 };
-  if (commissioning.status === 'valid') {
-    const authorization =
-      canaryAuthorization.status === 'valid' ? canaryAuthorization.authorization : undefined;
-    const issuedAt = authorization ? Date.parse(authorization.issued_at) : Number.NaN;
-    const expiresAt = authorization ? Date.parse(authorization.expires_at) : Number.NaN;
-    if (
-      !authorization ||
-      authorization.org_id !== tenantId ||
-      authorization.canary_run_id !== commissioning.canaryRunId ||
-      authorization.request_id !== commissioning.requestId ||
-      authorization.body_sha256 !== commissioning.bodySha256 ||
-      !Number.isFinite(issuedAt) ||
-      !Number.isFinite(expiresAt) ||
-      issuedAt > Date.now() ||
-      expiresAt <= Date.now()
-    ) {
-      return { statusCode: 401 };
-    }
-  } else if (canaryAuthorization.status === 'valid') {
-    return { statusCode: 401 };
-  }
-
-  // The channel-creation handshake carries no change — ack it without enqueuing anything.
-  if (source === GOOGLE_DRIVE_SOURCE && headers['x-goog-resource-state'] === DRIVE_SYNC_STATE) {
-    return { statusCode: 200 };
-  }
-
-  const challenge = zoomUrlValidation(source, body, lookup.secret);
-  if (challenge) return challenge;
-
-  if (!(await checkRateLimit(tenantId, source))) {
-    return { statusCode: 429 };
-  }
-
-  // Drive pings have an empty body (signal in headers); Graph notifications carry the clientState
-  // secret — both are re-emitted content-free so no secret or unneeded payload reaches SQS/enclave.
-  const payloadBody =
-    source === GOOGLE_DRIVE_SOURCE
-      ? driveChangePingBody(headers)
-      : source === MICROSOFT365_SOURCE
-        ? m365ChangePingBody(body)
-        : body;
-
-  const eventType = extractEventType(source, headers, body);
-  await sealAndEnqueue({
-    tenantId,
-    source,
-    eventType,
-    payloadBody,
-    dedupId: deduplicationId(tenantId, source, headers, payloadBody),
-    ...(commissioning.status === 'valid'
-      ? {
-          canaryRunId: commissioning.canaryRunId,
-          requestId: commissioning.requestId,
-          canaryAuthorization:
-            canaryAuthorization.status === 'valid' ? canaryAuthorization.authorization : undefined,
-        }
-      : {}),
-  });
-
-  return { statusCode: 200 };
-}
