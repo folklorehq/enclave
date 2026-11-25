@@ -1,4 +1,3 @@
-import type { SSMClient } from '@aws-sdk/client-ssm';
 import type { S3Client } from '@aws-sdk/client-s3';
 import { decryptPayload, type EncryptedPayload } from '../ingest/receiver.js';
 import { PipelineProcessingError, type ProcessedFact } from '../pipeline/index.js';
@@ -99,7 +98,6 @@ const GITHUB_BINDING_MISMATCH = 'github_installation_binding_mismatch';
 
 interface TenantMessageRouterDeps {
   registry: TenantRegistry;
-  ssm: SSMClient;
   historyWindow: PullRunnerDeps['historyWindow'];
   s3?: S3Client;
   processedBucket?: string;
@@ -166,7 +164,6 @@ export class TenantMessageRouter {
 
     if (isPullDueMessage(raw)) {
       const result = await runPull(raw, {
-        ssm: this.deps.ssm,
         historyWindow: this.deps.historyWindow,
         s3: this.deps.s3,
         processedBucket: context.processedOutputsBucket || this.deps.processedBucket,

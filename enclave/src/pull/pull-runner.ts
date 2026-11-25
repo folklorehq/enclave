@@ -1,6 +1,5 @@
 /** Drives one connector pull() pass entirely inside the enclave — plaintext never leaves the enclave. */
 import { randomBytes } from 'node:crypto';
-import { GetParameterCommand, type SSMClient } from '@aws-sdk/client-ssm';
 import type { S3Client } from '@aws-sdk/client-s3';
 import type { Logger } from '@folklore/core';
 import {
@@ -148,7 +147,6 @@ export function resolvePullWindow(
 }
 
 export interface PullRunnerDeps {
-  ssm: SSMClient;
   s3?: S3Client;
   processedBucket?: string;
   crypto: EnclaveCrypto;
@@ -211,34 +209,6 @@ export type PullNotProcessedReason = Extract<PullRunResult, { outcome: 'not_proc
 
 const consoleLogger: Logger = logger;
 
-function cursorSsmPath(tenantId: string, sourceId: string): string {
-  return `/folklore/${tenantId}/pull-cursor/${sourceId}`;
-}
-
-async function loadCursor(
-  ssm: SSMClient,
-  tenantId: string,
-  sourceId: string,
-): Promise<string | null> {
-  try {
-    const resp = await ssm.send(
-      new GetParameterCommand({ Name: cursorSsmPath(tenantId, sourceId) }),
-    );
-    return resp.Parameter?.Value ?? null;
-  } catch (error) {
-    if (isParameterNotFound(error)) return null;
-    throw error;
-  }
-}
-
-function isParameterNotFound(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    (error as { name?: unknown }).name === 'ParameterNotFound'
-  );
-}
-
 // Every cursor is sealed in S3: a member's is a personal sync token and a spec connector's is an envelope.
 async function loadSealedCursor(
   deps: PullRunnerDeps,
@@ -255,27 +225,9 @@ async function saveSealedCursor(
   await sealedCursorStore(deps, message).save(message.sourceId, value);
 }
 
-const SSM_ACCESS_DENIED = 'AccessDeniedException';
-
 // A source that is neither member nor Notion has its own failure code from the two that name those.
 function isGenericSealedSource(message: PullDueMessage): boolean {
   return message.ownerAccountId === undefined && message.kind !== NOTION_KIND;
-}
-
-// An unreadable sealed cursor re-snapshots; a missing one is read forward once from the legacy SSM parameter.
-async function loadCursorForRun(
-  deps: PullRunnerDeps,
-  message: PullDueMessage,
-): Promise<string | null> {
-  const sealed = await sealedCursorStore(deps, message).loadState(message.sourceId);
-  if (sealed.state === 'present') return sealed.value;
-  if (sealed.state === 'unreadable') return null;
-  try {
-    return await loadCursor(deps.ssm, message.tenant_id, message.sourceId);
-  } catch (error) {
-    if ((error as { name?: unknown } | null)?.name === SSM_ACCESS_DENIED) return null;
-    throw error;
-  }
 }
 
 function sealedCursorStore(deps: PullRunnerDeps, message: PullDueMessage): S3PullCursorStore {
@@ -493,7 +445,7 @@ export async function runPull(
   }
 
   const startedAt = Date.now();
-  const sealedCursor = await loadRunCursor(deps, message, memberScope);
+  const sealedCursor = await loadRunCursor(deps, message);
 
   const token = await resolveSourceToken(
     message.kind,
@@ -559,18 +511,10 @@ export async function runPull(
     sourceId: message.sourceId,
     sourceKind: message.kind,
     persistCursor: async () => {
-      await persistRunCursor(deps, message, cursor);
+      await saveSealedCursor(deps, message, cursor);
       await settleBackfill(deps, message.kind, scope, hasMore);
     },
   };
-}
-
-async function persistRunCursor(
-  deps: PullRunnerDeps,
-  message: PullDueMessage,
-  cursor: string | null,
-): Promise<void> {
-  await saveSealedCursor(deps, message, message.kind === NOTION_KIND ? (cursor ?? '') : cursor);
 }
 
 const RESOURCE_SCOPE_UNAVAILABLE = 'unavailable';
@@ -660,11 +604,9 @@ async function settleBackfill(
 async function loadRunCursor(
   deps: PullRunnerDeps,
   message: PullDueMessage,
-  memberScope: MemberPullScope | undefined,
 ): Promise<string | null> {
   if (message.kind === NOTION_KIND) return null;
-  if (memberScope !== undefined) return loadSealedCursor(deps, message);
-  return loadCursorForRun(deps, message);
+  return loadSealedCursor(deps, message);
 }
 
 async function resumeCursor(
@@ -676,14 +618,15 @@ async function resumeCursor(
   return sealedCursor;
 }
 
-// Notion moved from SSM to the sealed store: SSM is read only while no sealed object exists, and an unreadable one fails the pull rather than re-pulling from the legacy value.
+// An unreadable sealed Notion cursor fails the pull rather than silently starting a fresh window; an absent one starts fresh.
+// An empty object is a marker an earlier release wrote when there was nothing to resume, and reads as no cursor.
 async function loadNotionCursor(
   deps: PullRunnerDeps,
   message: PullDueMessage,
 ): Promise<string | null> {
   const sealed = await sealedCursorStore(deps, message).loadStrict(message.sourceId);
-  if (sealed.found) return sealed.value === '' ? null : sealed.value;
-  return loadCursor(deps.ssm, message.tenant_id, message.sourceId);
+  if (!sealed.found || sealed.value === '') return null;
+  return sealed.value;
 }
 
 interface PullRouting {
