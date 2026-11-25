@@ -210,7 +210,7 @@ export function buildSignerRootEnrollmentFloorBoundSubjectV1(
   ];
 }
 
-export type SignerRootEnrollmentSubjectV1 =
+type SignerRootEnrollmentSubjectV1 =
   | SignerRootEnrollmentBootstrapSubjectV1
   | SignerRootEnrollmentFloorBoundSubjectV1;
 
@@ -223,7 +223,7 @@ export function canonicalSignerRootEnrollmentSubjectBytes(
   return canonicalCbor(buildSignerRootEnrollmentFloorBoundSubjectV1(subject));
 }
 
-export interface SignerRootEnrollmentAuthorizationPreimageV1 {
+interface SignerRootEnrollmentAuthorizationPreimageV1 {
   schema: 'SignerRootEnrollmentAuthorizationPreimageV1';
   version: 1;
   authorizationKind: 'normal_root_enrollment';

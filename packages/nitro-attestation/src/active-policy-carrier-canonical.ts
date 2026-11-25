@@ -19,16 +19,14 @@ import {
 import { canonicalCbor } from './canonical-cbor.js';
 
 export const ACTIVE_POLICY_CARRIER_PAYLOAD_V1_DOMAIN = 'folklore.active-policy-carrier-payload.v1';
-export const SIGNED_ACTIVE_POLICY_CARRIER_V1_DOMAIN = 'folklore.signed-active-policy-carrier.v1';
+const SIGNED_ACTIVE_POLICY_CARRIER_V1_DOMAIN = 'folklore.signed-active-policy-carrier.v1';
 
 // The payload embeds the active policy and its authorization envelope in canonical array form
 // (produced by the existing canonical encoders and decoded once), plus the exact ordered
 // GenerationContextV1 and protected policy reference. One canonical CBOR encode per value; never
 // JSON stringification and never re-encoding already-canonical bytes.
 
-export function activePolicyCarrierGenerationContextArrayV1(
-  context: GenerationContextV1,
-): unknown[] {
+function activePolicyCarrierGenerationContextArrayV1(context: GenerationContextV1): unknown[] {
   return [
     context.orgId,
     context.deploymentId,
@@ -46,7 +44,7 @@ export function activePolicyCarrierGenerationContextArrayV1(
   ];
 }
 
-export function activePolicyCarrierProtectedPolicyReferenceArrayV1(
+function activePolicyCarrierProtectedPolicyReferenceArrayV1(
   reference: ActivePolicyCarrierProtectedPolicyReferenceV1,
 ): unknown[] {
   return [
@@ -72,7 +70,7 @@ function authorizationEnvelopeArray(
   return [...decode(encodeActivePolicyAuthorizationEnvelopeV1(unsignedEnvelope)), signature];
 }
 
-export function activePolicyCarrierPayloadArrayV1(input: ActivePolicyCarrierPayloadV1): unknown[] {
+function activePolicyCarrierPayloadArrayV1(input: ActivePolicyCarrierPayloadV1): unknown[] {
   const payload = activePolicyCarrierPayloadV1Schema.parse(input);
   return [
     payload.schema,
@@ -106,7 +104,7 @@ export function digestActivePolicyCarrierPayloadV1(input: ActivePolicyCarrierPay
   return sha256Hex(encodeActivePolicyCarrierPayloadV1(input));
 }
 
-export function signedActivePolicyCarrierArrayV1(input: SignedActivePolicyCarrierV1): unknown[] {
+function signedActivePolicyCarrierArrayV1(input: SignedActivePolicyCarrierV1): unknown[] {
   const carrier = signedActivePolicyCarrierV1Schema.parse(input);
   return [
     carrier.schema,

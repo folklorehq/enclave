@@ -9,13 +9,13 @@ import { canonicalMemberSet } from './trusted-signer-root.js';
 export const TRUSTED_SIGNER_RECOVERY_ROOT_MEMBER_COUNT = 5 as const;
 export const TRUSTED_SIGNER_RECOVERY_ROOT_THRESHOLD = 3 as const;
 
-export interface TrustedSignerRecoveryRootMemberV1 {
+interface TrustedSignerRecoveryRootMemberV1 {
   readonly memberId: string;
   readonly publicKeyPem: string;
   readonly publicKeySpkiDerSha256: string;
 }
 
-export interface TrustedSignerRecoveryRootV1 {
+interface TrustedSignerRecoveryRootV1 {
   readonly schema: 'TrustedSignerRecoveryRootV1';
   readonly version: 1;
   readonly rootKind: 'recovery';
@@ -116,7 +116,7 @@ export const trustedSignerRecoveryRootV1: TrustedSignerRecoveryRootV1 =
 
 export const TRUSTED_SIGNER_RECOVERY_ROOT_DIGEST: string = trustedSignerRecoveryRootV1.rootDigest;
 
-export interface RecoveryRootQuorumSignatureV1 {
+interface RecoveryRootQuorumSignatureV1 {
   readonly memberId: string;
   readonly signature: string;
 }

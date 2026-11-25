@@ -14,7 +14,7 @@ import {
 import { hashBootManifestKeyset, verifySignedBootManifestKeyset } from './boot-manifest-keyset.js';
 import { buildSignerPurposeSignatureMessage } from '@folklore/contracts';
 
-export type SignedBootManifestVerificationFailure =
+type SignedBootManifestVerificationFailure =
   | 'boot_manifest_invalid'
   | 'boot_manifest_key_unavailable'
   | 'boot_manifest_key_revoked'
@@ -23,19 +23,19 @@ export type SignedBootManifestVerificationFailure =
   | 'boot_manifest_subject_digest_mismatch'
   | 'boot_manifest_signature_invalid';
 
-export class SignedBootManifestError extends Error {
+class SignedBootManifestError extends Error {
   constructor(readonly code: SignedBootManifestVerificationFailure) {
     super(code);
     this.name = 'SignedBootManifestError';
   }
 }
 
-export interface VerifiedSignedBootManifest {
+interface VerifiedSignedBootManifest {
   manifest: BootManifest;
   keyset: BootManifestKeyset;
 }
 
-export function verifySignedBootManifest(
+function verifySignedBootManifest(
   rawManifest: unknown,
   rawKeyset: unknown,
 ): VerifiedSignedBootManifest {
@@ -69,7 +69,7 @@ export function verifySignedBootManifest(
   return { manifest: parsed.data.manifest, keyset };
 }
 
-export interface VerifiedSignedBootManifestV3 {
+interface VerifiedSignedBootManifestV3 {
   manifest: BootManifest;
   keyset: BootManifestKeyset;
   signed: SignedBootManifestV3;
@@ -134,7 +134,7 @@ export function verifySignedBootManifestV3(
   return { manifest: envelope.manifest, keyset, signed: envelope };
 }
 
-export type ParsedBootManifestWireResult =
+type ParsedBootManifestWireResult =
   | { wire: 'LegacySignedBootManifestV2'; manifest: BootManifest; keyset: BootManifestKeyset }
   | { wire: 'SignedBootManifestV3'; manifest: BootManifest; keyset: BootManifestKeyset };
 

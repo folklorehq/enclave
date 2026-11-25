@@ -100,8 +100,6 @@ export const attestationManifestSchema = z
     }
   });
 
-export type AttestationManifestV1 = z.infer<typeof attestationManifestSchema>;
-
 const bundleSchema = z
   .object({
     dsseEnvelope: z.object({ payload: z.string() }).passthrough(),
@@ -369,7 +367,7 @@ export async function parseVerifiedEnclaveRelease(
   );
   return outcome.release;
 }
-export function releaseVerificationMatchesManifest(
+function releaseVerificationMatchesManifest(
   release: ReleaseVerification,
   manifest: z.infer<typeof attestationManifestSchema>,
   manifestSha256: string,

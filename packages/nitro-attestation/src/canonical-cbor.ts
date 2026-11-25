@@ -513,7 +513,7 @@ export function hashNitroDocument(document: Uint8Array): string {
   return createHash('sha256').update(document).digest('hex');
 }
 
-export function encodeRuntimeAttestationKeyBundle(input: RuntimeAttestationKeyBundle): Uint8Array {
+function encodeRuntimeAttestationKeyBundle(input: RuntimeAttestationKeyBundle): Uint8Array {
   const bundle = runtimeAttestationKeyBundleSchema.parse(input);
   return encode([
     'folklore.runtime-attestation-key-bundle.v1',
@@ -634,7 +634,7 @@ export function encodePoolRuntimeHealthSignaturePayload(input: {
   ]);
 }
 
-export interface RuntimeHealthSignaturePayload {
+interface RuntimeHealthSignaturePayload {
   nonce: Uint8Array;
   documentHash: string;
   manifestHash: string;
@@ -703,7 +703,7 @@ export function digestCanonicalCbor(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-export interface BootManifestSubjectV3ScopeInput {
+interface BootManifestSubjectV3ScopeInput {
   manifestGeneration: number;
   orgId: string;
   deploymentId: string;
@@ -744,30 +744,5 @@ export function encodeAssignmentManifestSubjectV3(input: {
     input.payload.environment,
     input.payload.awsAccountId,
     input.payload.awsRegion,
-  ]);
-}
-
-export function encodeDormantBootCarrierSubjectV1(input: {
-  carrier: DormantBootManifestV2CarrierManifest;
-  scope: {
-    carrierGeneration: number;
-    orgId: string;
-    deploymentId: string;
-    environment: string;
-    awsAccountId: string;
-    awsRegion: string;
-  };
-}): Uint8Array {
-  const { signerKeyId: _signerOwned, ...unsignedCarrier } = input.carrier;
-  return canonicalCbor([
-    'folklore.dormant-boot-manifest-v3-carrier.v1',
-    1,
-    canonicalJsonDigest(unsignedCarrier),
-    input.scope.carrierGeneration,
-    input.scope.orgId,
-    input.scope.deploymentId,
-    input.scope.environment,
-    input.scope.awsAccountId,
-    input.scope.awsRegion,
   ]);
 }

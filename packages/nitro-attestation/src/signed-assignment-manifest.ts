@@ -9,7 +9,7 @@ import { buildSignerPurposeSignatureMessage } from '@folklore/contracts';
 import { encodeAssignmentManifestSubjectV3, digestCanonicalCbor } from './canonical-cbor.js';
 import { verifySignedAssignmentManifestV4 } from './signed-assignment-manifest-v4.js';
 
-export type SignedAssignmentManifestVerificationFailure =
+type SignedAssignmentManifestVerificationFailure =
   | 'assignment_manifest_invalid'
   | 'assignment_manifest_pool_mismatch'
   | 'assignment_manifest_stale'
@@ -71,7 +71,7 @@ export function verifySignedAssignmentManifestV3(
   return envelope;
 }
 
-export interface VerifyAssignmentManifestWireOptions {
+interface VerifyAssignmentManifestWireOptions {
   lastGeneration: number;
 }
 

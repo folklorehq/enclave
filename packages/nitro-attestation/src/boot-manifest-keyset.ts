@@ -15,7 +15,7 @@ import { assertApprovedBootManifestRoot } from './trusted-boot-root-policy.js';
 
 const KEYSET_DOMAIN = 'folklore.boot-manifest-keyset.v1';
 
-export type BootManifestKeysetVerificationFailure =
+type BootManifestKeysetVerificationFailure =
   | 'boot_manifest_keyset_invalid'
   | 'boot_manifest_keyset_signature_invalid'
   | 'boot_manifest_keyset_root_invalid';

@@ -19,14 +19,14 @@ const UTC_TIME_LAST_YEAR = 2049;
 // RFC 5280 4.1.2.5: a certificate with no well-defined expiry uses this GeneralizedTime.
 const NO_WELL_DEFINED_EXPIRY = new Date(Date.UTC(9999, 11, 31, 23, 59, 59));
 
-export type SelfSignedCertificateErrorCode =
+type SelfSignedCertificateErrorCode =
   | 'certificate_serial_invalid'
   | 'certificate_common_name_invalid'
   | 'certificate_not_before_invalid'
   | 'certificate_public_key_invalid'
   | 'certificate_signature_invalid';
 
-export class SelfSignedCertificateError extends Error {
+class SelfSignedCertificateError extends Error {
   readonly code: SelfSignedCertificateErrorCode;
 
   constructor(code: SelfSignedCertificateErrorCode) {

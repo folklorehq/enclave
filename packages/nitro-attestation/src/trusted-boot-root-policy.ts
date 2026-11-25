@@ -16,7 +16,7 @@ const APPROVED_ROOT_KEY_ID = 'folklore-boot-root-kms-2026-08';
 const APPROVED_ROOT_DER_SPKI_SHA256 =
   '0d454f42fd96e8de65b0a3fc2772bceffc09c11286e5e048f5386d7ffe09bf50';
 
-export interface BootManifestRootIdentity {
+interface BootManifestRootIdentity {
   readonly keyId: string;
   readonly publicKeyPem: string;
   readonly derSpkiSha256: string;

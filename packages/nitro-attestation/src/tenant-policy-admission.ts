@@ -23,14 +23,14 @@ const TENANT_POLICY_ROLE_CONTEXT_DOMAIN = 'folklore.tenant-policy-role-context.v
 const PATH_SEGMENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const DIGEST_PATTERN = /^[0-9a-f]{64}$/;
 
-export class TenantPolicyAdmissionTimeError extends Error {
+class TenantPolicyAdmissionTimeError extends Error {
   constructor() {
     super('tenant policy admission time is invalid');
     this.name = 'TenantPolicyAdmissionTimeError';
   }
 }
 
-export interface TenantPolicyAdmissionObjectKeyInput {
+interface TenantPolicyAdmissionObjectKeyInput {
   readonly orgId: string;
   readonly deploymentId: string;
   readonly poolDeploymentId: string;

@@ -13,7 +13,7 @@ export const GENERATION_HIGH_WATER_SIGNING_DOMAIN = 'folklore.generation-high-wa
 export const GENERATION_HIGH_WATER_GENESIS_DOMAIN =
   'folklore.generation-high-water.genesis.v1' as const;
 
-export class GenerationHighWaterCanonicalError extends Error {
+class GenerationHighWaterCanonicalError extends Error {
   readonly code:
     | 'high_water_object_invalid'
     | 'high_water_replay_mismatch'

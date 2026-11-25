@@ -51,7 +51,7 @@ export function canonicalRecoveryRootUpdateSubjectBytes(
   return canonicalCbor(buildRecoveryRootUpdateFloorBoundSubjectV1(input));
 }
 
-export interface RecoveryRootUpdateAuthorizationPreimageV1 {
+interface RecoveryRootUpdateAuthorizationPreimageV1 {
   schema: 'RecoveryRootUpdateAuthorizationPreimageV1';
   version: 1;
   authorizationKind: 'recovery_root_update';

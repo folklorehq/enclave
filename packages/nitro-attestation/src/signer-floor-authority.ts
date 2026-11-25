@@ -8,7 +8,7 @@ import {
   type SignerFloorCommitV2,
 } from '@folklore/contracts';
 
-export interface SignerFloorCommitVerificationInputV2 {
+interface SignerFloorCommitVerificationInputV2 {
   readonly commit: SignerFloorCommitV2;
   readonly publicKeyDer: Uint8Array;
   readonly expectedAuthority: SignerFloorAuthorityV2;
