@@ -6,12 +6,7 @@ import { Hono, type Context, type MiddlewareHandler } from 'hono';
 import { etag } from 'hono/etag';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
-import {
-  COLLAB_DEFAULT_PORT,
-  COLLAB_WS_PATH,
-  MAX_TCP_PORT,
-  ROLL_SW_PATH,
-} from '@folklore/contracts';
+import { COLLAB_DEFAULT_PORT, COLLAB_WS_PATH, MAX_TCP_PORT } from '@folklore/contracts';
 import { MCP_PROTECTED_RESOURCE_METADATA_PATH, MCP_RESOURCE_PATH } from '@folklore/utils';
 
 type FetchHandler = (req: Request) => Response | Promise<Response>;
@@ -37,7 +32,6 @@ const CLOSE_TIMEOUT_MS = 5_000;
 const REFUSED_UNCONFIGURED = 'unconfigured';
 const REFUSED_CAPACITY = 'capacity';
 const REFUSED_UPSTREAM = 'upstream_unreachable';
-const NO_CACHE = 'no-cache';
 const SHELL_CACHE = 'private, no-cache';
 const NO_STORE = 'no-store';
 const IMMUTABLE_CACHE = 'public, max-age=31536000, immutable';
@@ -48,14 +42,11 @@ const API_FORWARD_PATHS = [
   MCP_PROTECTED_RESOURCE_METADATA_PATH,
 ] as const;
 const BOX_DIST_ROOT = './dist/box';
-const ROLL_SW_FILE = `${BOX_DIST_ROOT}${ROLL_SW_PATH}`;
 const BOX_INDEX_FILE = `${BOX_DIST_ROOT}/index.html`;
 const CACHE_CONTROL = 'Cache-Control';
-const CONTENT_TYPE = 'Content-Type';
 const CONTENT_ENCODING = 'Content-Encoding';
 const VARY = 'Vary';
 const ACCEPT_ENCODING = 'Accept-Encoding';
-const JAVASCRIPT_CONTENT_TYPE = 'text/javascript; charset=utf-8';
 // Same-origin referrers only: box paths carry page slugs, which must not reach linked sites.
 // Popups stay reachable because source connect polls its OAuth popup through window.open.
 const BROWSER_HARDENING_HEADERS: Readonly<Record<string, string>> = {
@@ -121,19 +112,6 @@ export class BoxServer {
       this.app.use(path, this.uncachedUnlessDeclared);
       this.app.all(path, (c) => this.forwardToApi(c));
     }
-
-    // Revalidated on every load so a fixed or disabled worker reaches browsers on their next visit.
-    this.app.get(
-      ROLL_SW_PATH,
-      serveStatic({
-        path: ROLL_SW_FILE,
-        onFound: (_path, c) => {
-          c.header(CACHE_CONTROL, NO_CACHE);
-          c.header(CONTENT_TYPE, JAVASCRIPT_CONTENT_TYPE);
-        },
-      }),
-    );
-    this.app.get(ROLL_SW_PATH, (c) => c.notFound());
 
     this.mountStaticShell();
   }
