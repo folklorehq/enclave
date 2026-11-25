@@ -1621,7 +1621,6 @@ if (SYNTHESIS_REQUEST_QUEUE_URL) {
     decisionModes: jevSiteMode,
     providerRoutes,
     upstreamPaused: (upstream) => upstreamGate.pauseRemainingMs(upstream) > 0,
-    enforceTenantPolicy: true,
     upstreamGate,
     synthesisQueueUrl: SYNTHESIS_REQUEST_QUEUE_URL,
     processedQueueUrl: PROCESSED_QUEUE_URL,
